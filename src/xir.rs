@@ -165,6 +165,9 @@ pub enum Intrinsic {
     DropInPlace(Ty),
     /// Consume a value without running its destructor.
     Forget,
+    /// Memory-mapped I/O: loads/stores the optimizer may not remove or merge.
+    VolatileLoad,
+    VolatileStore,
 }
 
 #[derive(Clone, Debug)]

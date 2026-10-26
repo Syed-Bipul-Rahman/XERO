@@ -68,7 +68,10 @@ impl State {
             self.moved.entry(*k).or_insert(*v);
         }
         for (k, v) in &other.holders {
-            self.holders.entry(*k).or_default().extend(v.iter().copied());
+            self.holders
+                .entry(*k)
+                .or_default()
+                .extend(v.iter().copied());
         }
     }
 }
@@ -185,7 +188,8 @@ impl<'a> Ck<'a> {
             return;
         }
         if self.seen.insert((span.lo, span.hi, msg.clone())) {
-            self.errors.push(Diagnostic::new(span, msg).note(note_span, note));
+            self.errors
+                .push(Diagnostic::new(span, msg).note(note_span, note));
         }
     }
 
@@ -284,20 +288,28 @@ impl<'a> Ck<'a> {
                 if loc.mutable || loc.synthetic {
                     Ok(())
                 } else {
-                    Err(format!("cannot mutate immutable variable `{}`; declare it with `let mut {}`", loc.name, loc.name))
+                    Err(format!(
+                        "cannot mutate immutable variable `{}`; declare it with `let mut {}`",
+                        loc.name, loc.name
+                    ))
                 }
             }
             Place::Static(name, m) => {
                 if *m {
                     Ok(())
                 } else {
-                    Err(format!("cannot mutate immutable static `{}`", name.rsplit('.').next().unwrap_or(name)))
+                    Err(format!(
+                        "cannot mutate immutable static `{}`",
+                        name.rsplit('.').next().unwrap_or(name)
+                    ))
                 }
             }
             Place::Field(b, _) | Place::Index(b, _) => self.is_mutable(b),
             Place::Deref(e) => match &e.ty {
                 Ty::Ref(_, true) | Ty::Ptr(_) => Ok(()),
-                Ty::Ref(_, false) => Err("cannot mutate through a `&` reference; use `&mut`".into()),
+                Ty::Ref(_, false) => {
+                    Err("cannot mutate through a `&` reference; use `&mut`".into())
+                }
                 _ => Ok(()),
             },
         }
@@ -322,7 +334,9 @@ impl<'a> Ck<'a> {
     }
 
     fn overlaps(a: &[Proj], b: &[Proj]) -> bool {
-        a.iter().zip(b).all(|(x, y)| x == y || matches!((x, y), (Proj::Index, Proj::Index)))
+        a.iter()
+            .zip(b)
+            .all(|(x, y)| x == y || matches!((x, y), (Proj::Index, Proj::Index)))
     }
 
     /// Check an access against live loans and the moved set.
@@ -330,12 +344,18 @@ impl<'a> Ck<'a> {
         if self.mode != Mode::Check {
             return;
         }
-        let Some((root, path)) = Self::place_path(p) else { return };
+        let Some((root, path)) = Self::place_path(p) else {
+            return;
+        };
         let Root::Local(l) = root.clone();
         // use after move
         if kind != Access::Write || !path.is_empty() {
             if let Some(&mspan) = self.st.moved.get(&l) {
-                let msg = if kind == Access::Write { format!("cannot assign to a part of moved value {}", self.name(l)) } else { format!("use of moved value {}", self.name(l)) };
+                let msg = if kind == Access::Write {
+                    format!("cannot assign to a part of moved value {}", self.name(l))
+                } else {
+                    format!("use of moved value {}", self.name(l))
+                };
                 self.error_note(span, msg, mspan, "value moved here");
                 return;
             }
@@ -356,7 +376,10 @@ impl<'a> Ck<'a> {
                 continue;
             }
             // overwriting/moving a reference itself doesn't affect what it points to
-            if matches!(kind, Access::Write | Access::Move) && loan.path.len() > path.len() && loan.path[path.len()..].contains(&Proj::Deref) {
+            if matches!(kind, Access::Write | Access::Move)
+                && loan.path.len() > path.len()
+                && loan.path[path.len()..].contains(&Proj::Deref)
+            {
                 continue;
             }
             let conflict = match (loan.mutable, kind) {
@@ -373,9 +396,17 @@ impl<'a> Ck<'a> {
                     Access::Mutable => "mutably borrow",
                 };
                 let lspan = loan.span;
-                let how = if loan.mutable { "mutably borrowed" } else { "borrowed" };
+                let how = if loan.mutable {
+                    "mutably borrowed"
+                } else {
+                    "borrowed"
+                };
                 let msg = format!("cannot {what} {} because it is {how}", self.name(l));
-                let note = if loan.mutable { "mutable borrow created here (and used later)" } else { "borrow created here (and used later)" };
+                let note = if loan.mutable {
+                    "mutable borrow created here (and used later)"
+                } else {
+                    "borrow created here (and used later)"
+                };
                 self.error_note(span, msg, lspan, note);
                 return;
             }
@@ -384,7 +415,12 @@ impl<'a> Ck<'a> {
 
     fn new_loan(&mut self, p: &Place, mutable: bool, span: Span) -> Option<usize> {
         let (root, path) = Self::place_path(p)?;
-        self.loans.push(Loan { root, path, mutable, span });
+        self.loans.push(Loan {
+            root,
+            path,
+            mutable,
+            span,
+        });
         Some(self.loans.len() - 1)
     }
 
@@ -491,14 +527,21 @@ impl<'a> Ck<'a> {
             let others: Vec<usize> = self.in_flight[base..].iter().flatten().copied().collect();
             for (id, span, place) in &reserved {
                 let me = self.loans[*id].clone();
-                let conflicting = others.iter().copied().chain(reserved.iter().map(|r| r.0).filter(|r| r != id)).find(|o| {
-                    let ol = &self.loans[*o];
-                    ol.root == me.root && Self::overlaps(&ol.path, &me.path)
-                });
+                let conflicting = others
+                    .iter()
+                    .copied()
+                    .chain(reserved.iter().map(|r| r.0).filter(|r| r != id))
+                    .find(|o| {
+                        let ol = &self.loans[*o];
+                        ol.root == me.root && Self::overlaps(&ol.path, &me.path)
+                    });
                 if let Some(o) = conflicting {
                     let Root::Local(l) = me.root.clone();
                     let ospan = self.loans[o].span;
-                    let msg = format!("cannot mutably borrow {} because it is also borrowed by another argument", self.name(l));
+                    let msg = format!(
+                        "cannot mutably borrow {} because it is also borrowed by another argument",
+                        self.name(l)
+                    );
                     self.error_note(*span, msg, ospan, "other borrow here");
                 } else {
                     // activation: the full `&mut` check against live loans and mutability
@@ -573,7 +616,9 @@ impl<'a> Ck<'a> {
                     Loans::new()
                 }
             }
-            K::Struct(xs) | K::Tuple(xs) | K::Array(xs) | K::Variant(_, xs) => self.exprs_in_flight(xs),
+            K::Struct(xs) | K::Tuple(xs) | K::Array(xs) | K::Variant(_, xs) => {
+                self.exprs_in_flight(xs)
+            }
             K::ArrayRepeat(a, _) => self.expr(a),
             K::Assign(p, v) => {
                 let lv = self.expr(v);
@@ -647,7 +692,10 @@ impl<'a> Ck<'a> {
                 }
                 let breaks = self.breaks.remove(id).unwrap_or_default();
                 self.continues.remove(id);
-                let mut out = State { diverged: true, ..Default::default() };
+                let mut out = State {
+                    diverged: true,
+                    ..Default::default()
+                };
                 for b in &breaks {
                     out.merge(b);
                 }
@@ -684,7 +732,10 @@ impl<'a> Ck<'a> {
                     self.access(p, Access::Read, e.span);
                 }
                 let start = self.st.clone();
-                let mut merged = State { diverged: true, ..Default::default() };
+                let mut merged = State {
+                    diverged: true,
+                    ..Default::default()
+                };
                 let mut out = Loans::new();
                 for arm in arms {
                     self.st = start.clone();
@@ -698,7 +749,7 @@ impl<'a> Ck<'a> {
                         }
                         self.mark_moved(p, arm.span);
                     }
-                    self.bind_pat(&arm.pat, Some(p), &scrut_loans, arm.span);
+                    self.bind_pat(&arm.pat, Some(p.clone()), &scrut_loans, arm.span);
                     if let Some(g) = &arm.guard {
                         self.expr(g);
                     }
@@ -726,18 +777,22 @@ impl<'a> Ck<'a> {
     fn pat_moves(&self, p: &Pat) -> bool {
         match p {
             Pat::Bind(id, BindMode::Value) => !self.ck.is_copy(&self.f.locals[*id as usize].ty),
-            Pat::Tuple(ps) | Pat::Variant(_, ps) | Pat::Or(ps) => ps.iter().any(|p| self.pat_moves(p)),
+            Pat::Tuple(ps) | Pat::Variant(_, ps) | Pat::Or(ps) => {
+                ps.iter().any(|p| self.pat_moves(p))
+            }
             _ => false,
         }
     }
 
     /// Declare pattern bindings; by-reference bindings borrow the scrutinee.
-    fn bind_pat(&mut self, p: &Pat, scrut: Option<&Place>, scrut_loans: &Loans, span: Span) {
+    /// `scrut` tracks the sub-place being matched (field projections and
+    /// dereferences included) so by-reference bindings borrow exactly it.
+    fn bind_pat(&mut self, p: &Pat, scrut: Option<Place>, scrut_loans: &Loans, span: Span) {
         match p {
             Pat::Bind(id, mode) => {
                 self.declare(*id);
                 let mut held = Loans::new();
-                if let (BindMode::Ref(m), Some(sp)) = (mode, scrut) {
+                if let (BindMode::Ref(m), Some(sp)) = (mode, &scrut) {
                     self.access(sp, if *m { Access::Mutable } else { Access::Shared }, span);
                     if let Some(l) = self.new_loan(sp, *m, span) {
                         held.insert(l);
@@ -753,12 +808,28 @@ impl<'a> Ck<'a> {
                     s.push(*id);
                 }
             }
-            Pat::Tuple(ps) | Pat::Variant(_, ps) | Pat::Or(ps) => {
-                for q in ps {
-                    self.bind_pat(q, scrut, scrut_loans, span);
+            Pat::Tuple(ps) | Pat::Variant(_, ps) => {
+                for (i, q) in ps.iter().enumerate() {
+                    let sub = scrut.clone().map(|s| Place::Field(Box::new(s), i as u32));
+                    self.bind_pat(q, sub, scrut_loans, span);
                 }
             }
-            Pat::Deref(inner) => self.bind_pat(inner, scrut, scrut_loans, span),
+            Pat::Or(ps) => {
+                for q in ps {
+                    self.bind_pat(q, scrut.clone(), scrut_loans, span);
+                }
+            }
+            Pat::Deref(inner) => {
+                let sub = scrut.map(|s| {
+                    let ty = self.place_ty(&s).unwrap_or(Ty::unit());
+                    Place::Deref(Box::new(Expr {
+                        kind: K::Use(s, UseKind::Copy),
+                        ty,
+                        span,
+                    }))
+                });
+                self.bind_pat(inner, sub, scrut_loans, span)
+            }
             _ => {}
         }
     }
@@ -802,7 +873,11 @@ impl<'a> Ck<'a> {
         // locals of this block die here
         let dying: Vec<LocalId> = b.scope.clone();
         if !self.st.diverged {
-            self.check_dying(&dying, &tail, b.tail.as_ref().map(|t| t.span).unwrap_or(span));
+            self.check_dying(
+                &dying,
+                &tail,
+                b.tail.as_ref().map(|t| t.span).unwrap_or(span),
+            );
         }
         self.live_scope.pop();
         for l in &dying {
@@ -830,12 +905,19 @@ impl<'a> Ck<'a> {
             let Root::Local(l) = loan.root.clone();
             if dying_set.contains(&l) && !loan.via_deref() {
                 let lspan = loan.span;
-                let msg = format!("{} does not live long enough: the borrow escapes the block that owns it", self.name(l));
+                let msg = format!(
+                    "{} does not live long enough: the borrow escapes the block that owns it",
+                    self.name(l)
+                );
                 self.error_note(tail_span, msg, lspan, "borrowed here");
             }
         }
         // outer variables still used later must not hold loans on dying locals
-        let outer: Vec<LocalId> = self.live_scope[..self.live_scope.len() - 1].iter().flatten().copied().collect();
+        let outer: Vec<LocalId> = self.live_scope[..self.live_scope.len() - 1]
+            .iter()
+            .flatten()
+            .copied()
+            .collect();
         for h in outer {
             if dying_set.contains(&h) {
                 continue;
@@ -844,14 +926,21 @@ impl<'a> Ck<'a> {
             if lu <= self.pos {
                 continue;
             }
-            let Some(ls) = self.st.holders.get(&h).cloned() else { continue };
+            let Some(ls) = self.st.holders.get(&h).cloned() else {
+                continue;
+            };
             for id in ls {
                 let loan = &self.loans[id];
                 let Root::Local(l) = loan.root.clone();
                 if dying_set.contains(&l) && !loan.via_deref() {
                     let lspan = loan.span;
                     let msg = format!("{} does not live long enough: it is still borrowed by {} after its scope ends", self.name(l), self.name(h));
-                    self.error_note(lspan, msg, self.f.locals[h as usize].span, "the borrowing variable is declared here and used later");
+                    self.error_note(
+                        lspan,
+                        msg,
+                        self.f.locals[h as usize].span,
+                        "the borrowing variable is declared here and used later",
+                    );
                 }
             }
         }
@@ -866,8 +955,15 @@ impl<'a> Ck<'a> {
             if !loan.via_deref() {
                 let Root::Local(l) = loan.root.clone();
                 let lspan = loan.span;
-                let what = if is_return { "returns a reference to" } else { "leaks a reference to" };
-                let msg = format!("function {what} {}, which is destroyed when the function returns", self.name(l));
+                let what = if is_return {
+                    "returns a reference to"
+                } else {
+                    "leaks a reference to"
+                };
+                let msg = format!(
+                    "function {what} {}, which is destroyed when the function returns",
+                    self.name(l)
+                );
                 self.error_note(span, msg, lspan, "borrowed here");
             }
         }

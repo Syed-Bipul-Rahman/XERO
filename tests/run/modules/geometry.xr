@@ -1,0 +1,30 @@
+module modules.geometry
+
+pub copy struct Vec2 {
+    pub x: f64
+    pub y: f64
+}
+
+impl Vec2 {
+    pub fn new(x: f64, y: f64) -> Vec2 {
+        Vec2 { x: x, y: y }
+    }
+
+    pub fn dot(self, other: Vec2) -> f64 {
+        self.x * other.x + self.y * other.y
+    }
+
+    pub fn scale(self, k: f64) -> Vec2 {
+        Vec2 { x: self.x * k, y: self.y * k }
+    }
+}
+
+pub const ORIGIN_X: f64 = 0.0
+
+pub fn manhattan(a: Vec2, b: Vec2) -> f64 {
+    abs(a.x - b.x) + abs(a.y - b.y)
+}
+
+fn abs(v: f64) -> f64 {
+    if v < 0.0 { -v } else { v }
+}

@@ -10,7 +10,13 @@ use crate::xir::{BindMode, LocalId, Pat};
 impl FnCx<'_> {
     /// Lower pattern `p` matched against a value of type `ty`.
     /// New bindings are appended to `binds` (the caller declares them).
-    pub fn pattern(&mut self, p: &ast::Pattern, ty: &Ty, mode: BindMode, binds: &mut Vec<(String, LocalId)>) -> Result<Pat> {
+    pub fn pattern(
+        &mut self,
+        p: &ast::Pattern,
+        ty: &Ty,
+        mode: BindMode,
+        binds: &mut Vec<(String, LocalId)>,
+    ) -> Result<Pat> {
         // Default binding mode: matching a non-reference pattern against `&T`
         // dereferences and switches bindings to by-reference.
         let structural = match &p.kind {
@@ -25,7 +31,9 @@ impl FnCx<'_> {
                     BindMode::Value => BindMode::Ref(*m),
                 };
                 let inner = (**inner).clone();
-                return Ok(Pat::Deref(Box::new(self.pattern(p, &inner, new_mode, binds)?)));
+                return Ok(Pat::Deref(Box::new(
+                    self.pattern(p, &inner, new_mode, binds)?,
+                )));
             }
         }
         match &p.kind {
@@ -35,7 +43,13 @@ impl FnCx<'_> {
                     return self.variant_pat(aid, idx, None, ty, mode, p.span, binds);
                 }
                 if binds.iter().any(|(n, _)| *n == id.name) {
-                    return self.err(id.span, format!("identifier `{}` is bound more than once in the same pattern", id.name));
+                    return self.err(
+                        id.span,
+                        format!(
+                            "identifier `{}` is bound more than once in the same pattern",
+                            id.name
+                        ),
+                    );
                 }
                 let bty = match mode {
                     BindMode::Value => ty.clone(),
@@ -47,11 +61,21 @@ impl FnCx<'_> {
             }
             PatKind::Lit(e) => {
                 let (v, is_bool) = self.lit_value(e, ty)?;
-                Ok(if is_bool { Pat::Bool(v != 0) } else { Pat::Int(v) })
+                Ok(if is_bool {
+                    Pat::Bool(v != 0)
+                } else {
+                    Pat::Int(v)
+                })
             }
             PatKind::Range(lo, hi, inclusive) => {
                 if !ty.is_int() {
-                    return self.err(p.span, format!("range patterns require an integer type, found `{}`", self.ts(ty)));
+                    return self.err(
+                        p.span,
+                        format!(
+                            "range patterns require an integer type, found `{}`",
+                            self.ts(ty)
+                        ),
+                    );
                 }
                 let (lo_v, _) = self.lit_value(lo, ty)?;
                 let (mut hi_v, _) = self.lit_value(hi, ty)?;
@@ -65,10 +89,23 @@ impl FnCx<'_> {
             }
             PatKind::Tuple(ps) => {
                 let Ty::Tuple(ts) = ty else {
-                    return self.err(p.span, format!("tuple pattern cannot match a value of type `{}`", self.ts(ty)));
+                    return self.err(
+                        p.span,
+                        format!(
+                            "tuple pattern cannot match a value of type `{}`",
+                            self.ts(ty)
+                        ),
+                    );
                 };
                 if ts.len() != ps.len() {
-                    return self.err(p.span, format!("tuple pattern has {} element(s), but the value has {}", ps.len(), ts.len()));
+                    return self.err(
+                        p.span,
+                        format!(
+                            "tuple pattern has {} element(s), but the value has {}",
+                            ps.len(),
+                            ts.len()
+                        ),
+                    );
                 }
                 let ts = ts.clone();
                 let mut out = Vec::new();
@@ -87,7 +124,8 @@ impl FnCx<'_> {
                     let mut inner = Vec::new();
                     out.push(self.pattern(a, ty, mode, &mut inner)?);
                     if !inner.is_empty() {
-                        return self.err(a.span, "bindings inside `|` patterns are not supported yet");
+                        return self
+                            .err(a.span, "bindings inside `|` patterns are not supported yet");
                     }
                 }
                 Ok(Pat::Or(out))
@@ -115,7 +153,12 @@ impl FnCx<'_> {
         None
     }
 
-    fn resolve_variant_path(&mut self, path: &[ast::Ident], ty: &Ty, span: crate::diag::Span) -> Result<(AdtId, u32)> {
+    fn resolve_variant_path(
+        &mut self,
+        path: &[ast::Ident],
+        ty: &Ty,
+        span: crate::diag::Span,
+    ) -> Result<(AdtId, u32)> {
         let target = match ty {
             Ty::Adt(aid, _) => Some(*aid),
             _ => None,
@@ -126,61 +169,130 @@ impl FnCx<'_> {
                 if let Some(idx) = self.ck.adts[aid as usize].variant_index(&name.name) {
                     return Ok((aid, idx));
                 }
-                if self.ck.adts[aid as usize].name == name.name && !self.ck.adts[aid as usize].is_enum() {
+                if self.ck.adts[aid as usize].name == name.name
+                    && !self.ck.adts[aid as usize].is_enum()
+                {
                     return Ok((aid, 0));
                 }
             }
             return match self.ck.lookup(self.module, &name.name) {
                 Some(Def::Variant(aid, idx)) => Ok((aid, idx)),
                 Some(Def::Adt(aid)) if !self.ck.adts[aid as usize].is_enum() => Ok((aid, 0)),
-                _ => self.err(name.span, format!("no variant named `{}` for type `{}`", name.name, self.ts(ty))),
+                _ => self.err(
+                    name.span,
+                    format!(
+                        "no variant named `{}` for type `{}`",
+                        name.name,
+                        self.ts(ty)
+                    ),
+                ),
             };
         }
         // Enum.Variant / module.Enum.Variant / module.Variant
-        let mut e = ast::Expr { kind: E::Name(path[0].clone(), Vec::new()), span: path[0].span };
+        let mut e = ast::Expr {
+            kind: E::Name(path[0].clone(), Vec::new()),
+            span: path[0].span,
+        };
         if path[0].name == "Self" {
             e.kind = E::SelfType(Vec::new());
         }
         for seg in &path[1..path.len() - 1] {
             let sp = e.span.to(seg.span);
-            e = ast::Expr { kind: E::Field(Box::new(e), seg.clone(), Vec::new()), span: sp };
+            e = ast::Expr {
+                kind: E::Field(Box::new(e), seg.clone(), Vec::new()),
+                span: sp,
+            };
         }
         let last = path.last().unwrap();
         match self.path(&e)? {
-            Some(PathRes::Type(Ty::Adt(aid, _))) | Some(PathRes::GenericAdt(aid)) => match self.ck.adts[aid as usize].variant_index(&last.name) {
-                Some(idx) => Ok((aid, idx)),
-                None => self.err(last.span, format!("enum `{}` has no variant `{}`", self.ck.adts[aid as usize].name, last.name)),
-            },
-            Some(PathRes::Module(m)) => match self.ck.lookup_in(self.module, m, &last.name, last.span)? {
-                Def::Variant(aid, idx) => Ok((aid, idx)),
-                Def::Adt(aid) if !self.ck.adts[aid as usize].is_enum() => Ok((aid, 0)),
-                _ => self.err(last.span, format!("`{}` is not an enum variant", last.name)),
-            },
+            Some(PathRes::Type(Ty::Adt(aid, _))) | Some(PathRes::GenericAdt(aid)) => {
+                match self.ck.adts[aid as usize].variant_index(&last.name) {
+                    Some(idx) => Ok((aid, idx)),
+                    None => self.err(
+                        last.span,
+                        format!(
+                            "enum `{}` has no variant `{}`",
+                            self.ck.adts[aid as usize].name, last.name
+                        ),
+                    ),
+                }
+            }
+            Some(PathRes::Module(m)) => {
+                match self.ck.lookup_in(self.module, m, &last.name, last.span)? {
+                    Def::Variant(aid, idx) => Ok((aid, idx)),
+                    Def::Adt(aid) if !self.ck.adts[aid as usize].is_enum() => Ok((aid, 0)),
+                    _ => self.err(last.span, format!("`{}` is not an enum variant", last.name)),
+                }
+            }
             _ => self.err(span, "expected an enum variant path"),
         }
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn variant_pat(&mut self, aid: AdtId, idx: u32, args: Option<&[ast::Pattern]>, ty: &Ty, mode: BindMode, span: crate::diag::Span, binds: &mut Vec<(String, LocalId)>) -> Result<Pat> {
+    fn variant_pat(
+        &mut self,
+        aid: AdtId,
+        idx: u32,
+        args: Option<&[ast::Pattern]>,
+        ty: &Ty,
+        mode: BindMode,
+        span: crate::diag::Span,
+        binds: &mut Vec<(String, LocalId)>,
+    ) -> Result<Pat> {
         let Ty::Adt(tid, targs) = ty else {
-            return self.err(span, format!("this pattern matches `{}`, but the value has type `{}`", self.ck.adts[aid as usize].name, self.ts(ty)));
+            return self.err(
+                span,
+                format!(
+                    "this pattern matches `{}`, but the value has type `{}`",
+                    self.ck.adts[aid as usize].name,
+                    self.ts(ty)
+                ),
+            );
         };
         if *tid != aid {
-            return self.err(span, format!("this pattern matches `{}`, but the value has type `{}`", self.ck.adts[aid as usize].name, self.ts(ty)));
+            return self.err(
+                span,
+                format!(
+                    "this pattern matches `{}`, but the value has type `{}`",
+                    self.ck.adts[aid as usize].name,
+                    self.ts(ty)
+                ),
+            );
         }
         let a = &self.ck.adts[aid as usize];
-        let fields: Vec<Ty> = if a.is_enum() { a.variants[idx as usize].iter().map(|f| f.subst(targs)).collect() } else { a.fields.iter().map(|f| f.subst(targs)).collect() };
+        let fields: Vec<Ty> = if a.is_enum() {
+            a.variants[idx as usize]
+                .iter()
+                .map(|f| f.subst(targs))
+                .collect()
+        } else {
+            a.fields.iter().map(|f| f.subst(targs)).collect()
+        };
         if !a.is_enum() && a.module != self.module {
             if let super::AdtKind::Struct(fs) = &a.kind {
                 if fs.iter().any(|f| f.vis != ast::Vis::Pub) {
-                    return self.err(span, format!("cannot destructure `{}`: it has private fields", a.name));
+                    return self.err(
+                        span,
+                        format!("cannot destructure `{}`: it has private fields", a.name),
+                    );
                 }
             }
         }
-        let name = if a.is_enum() { a.variant_name(idx).to_string() } else { a.name.clone() };
+        let name = if a.is_enum() {
+            a.variant_name(idx).to_string()
+        } else {
+            a.name.clone()
+        };
         let args = args.unwrap_or(&[]);
         if args.len() != fields.len() {
-            return self.err(span, format!("`{name}` has {} field(s), but the pattern has {}", fields.len(), args.len()));
+            return self.err(
+                span,
+                format!(
+                    "`{name}` has {} field(s), but the pattern has {}",
+                    fields.len(),
+                    args.len()
+                ),
+            );
         }
         let mut out = Vec::new();
         for (sp, ft) in args.iter().zip(&fields) {
@@ -200,9 +312,17 @@ impl FnCx<'_> {
                     _ => self.err(e.span, "expected an integer literal"),
                 }
             }
-            (E::Str(_), _) => self.err(e.span, "string literal patterns are not supported yet; compare with `==`"),
-            (E::Float(..), _) => self.err(e.span, "floating-point literal patterns are not allowed"),
-            _ => self.err(e.span, format!("literal pattern does not match type `{}`", self.ts(ty))),
+            (E::Str(_), _) => self.err(
+                e.span,
+                "string literal patterns are not supported yet; compare with `==`",
+            ),
+            (E::Float(..), _) => {
+                self.err(e.span, "floating-point literal patterns are not allowed")
+            }
+            _ => self.err(
+                e.span,
+                format!("literal pattern does not match type `{}`", self.ts(ty)),
+            ),
         }
     }
 }

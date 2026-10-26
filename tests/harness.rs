@@ -35,7 +35,10 @@ fn expected_output(src: &str) -> (String, i32) {
             continue;
         }
         if in_block {
-            let l = line.strip_prefix("// ").or_else(|| line.strip_prefix("//")).unwrap_or(line);
+            let l = line
+                .strip_prefix("// ")
+                .or_else(|| line.strip_prefix("//"))
+                .unwrap_or(line);
             out.push_str(l);
             out.push('\n');
         }
@@ -52,9 +55,19 @@ fn run_programs() {
         let src = std::fs::read_to_string(&f).unwrap();
         let (want, want_code) = expected_output(&src);
         let exe = tmp.join(f.file_stem().unwrap());
-        let build = Command::new(xeroc()).arg("build").arg(&f).arg("-o").arg(&exe).output().unwrap();
+        let build = Command::new(xeroc())
+            .arg("build")
+            .arg(&f)
+            .arg("-o")
+            .arg(&exe)
+            .output()
+            .unwrap();
         if !build.status.success() {
-            failures.push(format!("{}: compile failed:\n{}", f.display(), String::from_utf8_lossy(&build.stderr)));
+            failures.push(format!(
+                "{}: compile failed:\n{}",
+                f.display(),
+                String::from_utf8_lossy(&build.stderr)
+            ));
             continue;
         }
         let run = Command::new(&exe).output().unwrap();
@@ -66,7 +79,11 @@ fn run_programs() {
     }
     let _ = std::fs::remove_dir_all(&tmp);
     if !failures.is_empty() {
-        panic!("{} program(s) failed:\n\n{}", failures.len(), failures.join("\n"));
+        panic!(
+            "{} program(s) failed:\n\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
     }
 }
 
@@ -75,22 +92,40 @@ fn rejected_programs() {
     let mut failures = Vec::new();
     for f in files("tests/fail") {
         let src = std::fs::read_to_string(&f).unwrap();
-        let wanted: Vec<&str> = src.lines().filter_map(|l| l.trim().strip_prefix("// error:")).map(|s| s.trim()).collect();
-        assert!(!wanted.is_empty(), "{} has no `// error:` lines", f.display());
+        let wanted: Vec<&str> = src
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("// error:"))
+            .map(|s| s.trim())
+            .collect();
+        assert!(
+            !wanted.is_empty(),
+            "{} has no `// error:` lines",
+            f.display()
+        );
         let out = Command::new(xeroc()).arg("check").arg(&f).output().unwrap();
         let stderr = String::from_utf8_lossy(&out.stderr);
         if out.status.success() {
-            failures.push(format!("{}: compiled successfully but should have been rejected", f.display()));
+            failures.push(format!(
+                "{}: compiled successfully but should have been rejected",
+                f.display()
+            ));
             continue;
         }
         for w in wanted {
             if !stderr.contains(w) {
-                failures.push(format!("{}: expected error containing `{w}`, got:\n{stderr}", f.display()));
+                failures.push(format!(
+                    "{}: expected error containing `{w}`, got:\n{stderr}",
+                    f.display()
+                ));
             }
         }
     }
     if !failures.is_empty() {
-        panic!("{} program(s) failed:\n\n{}", failures.len(), failures.join("\n"));
+        panic!(
+            "{} program(s) failed:\n\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
     }
 }
 
@@ -101,10 +136,31 @@ fn add_is_zero_cost() {
     let tmp = std::env::temp_dir().join(format!("xero-asm-{}", std::process::id()));
     std::fs::create_dir_all(&tmp).unwrap();
     let src = tmp.join("add.xr");
-    std::fs::write(&src, "export fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n").unwrap();
+    std::fs::write(
+        &src,
+        "export fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n",
+    )
+    .unwrap();
     let asm = tmp.join("add.s");
-    let out = Command::new(xeroc()).args(["build", "--lib", "--emit", "asm", "--target", "x86_64-linux", "-o"]).arg(&asm).arg(&src).output().unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = Command::new(xeroc())
+        .args([
+            "build",
+            "--lib",
+            "--emit",
+            "asm",
+            "--target",
+            "x86_64-linux",
+            "-o",
+        ])
+        .arg(&asm)
+        .arg(&src)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let text = std::fs::read_to_string(&asm).unwrap();
     let body: Vec<&str> = text
         .lines()
@@ -114,6 +170,10 @@ fn add_is_zero_cost() {
         .map(|l| l.trim())
         .filter(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with('.'))
         .collect();
-    assert_eq!(body, vec!["lea\teax, [rdi + rsi]", "ret"], "unexpected code for add:\n{text}");
+    assert_eq!(
+        body,
+        vec!["lea\teax, [rdi + rsi]", "ret"],
+        "unexpected code for add:\n{text}"
+    );
     let _ = std::fs::remove_dir_all(&tmp);
 }

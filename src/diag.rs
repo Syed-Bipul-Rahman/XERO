@@ -15,7 +15,11 @@ impl Span {
     }
 
     pub fn to(self, other: Span) -> Span {
-        Span { file: self.file, lo: self.lo.min(other.lo), hi: self.hi.max(other.hi) }
+        Span {
+            file: self.file,
+            lo: self.lo.min(other.lo),
+            hi: self.hi.max(other.hi),
+        }
     }
 }
 
@@ -33,7 +37,11 @@ impl SourceFile {
                 line_starts.push(i as u32 + 1);
             }
         }
-        SourceFile { path, text, line_starts }
+        SourceFile {
+            path,
+            text,
+            line_starts,
+        }
     }
 
     /// 1-based (line, column).
@@ -47,7 +55,11 @@ impl SourceFile {
 
     pub fn line_text(&self, line: usize) -> &str {
         let start = self.line_starts[line - 1] as usize;
-        let end = self.line_starts.get(line).map(|&e| e as usize).unwrap_or(self.text.len());
+        let end = self
+            .line_starts
+            .get(line)
+            .map(|&e| e as usize)
+            .unwrap_or(self.text.len());
         self.text[start..end].trim_end_matches(['\n', '\r'])
     }
 }
@@ -77,7 +89,11 @@ pub struct Diagnostic {
 
 impl Diagnostic {
     pub fn new(span: Span, message: impl Into<String>) -> Diagnostic {
-        Diagnostic { span, message: message.into(), notes: Vec::new() }
+        Diagnostic {
+            span,
+            message: message.into(),
+            notes: Vec::new(),
+        }
     }
 
     pub fn note(mut self, span: Span, message: impl Into<String>) -> Diagnostic {
@@ -110,8 +126,16 @@ fn render_one(out: &mut String, sm: &SourceMap, kind: &str, span: Span, msg: &st
     let _ = writeln!(out, "{:gutter$} |", "");
     let _ = writeln!(out, "{line} | {text}");
     let (end_line, end_col) = file.line_col(span.hi.max(span.lo + 1) - 1);
-    let width = if end_line == line { (end_col + 1).saturating_sub(col).max(1) } else { 1 };
-    let pad: String = text.chars().take(col - 1).map(|c| if c == '\t' { '\t' } else { ' ' }).collect();
+    let width = if end_line == line {
+        (end_col + 1).saturating_sub(col).max(1)
+    } else {
+        1
+    };
+    let pad: String = text
+        .chars()
+        .take(col - 1)
+        .map(|c| if c == '\t' { '\t' } else { ' ' })
+        .collect();
     let _ = writeln!(out, "{:gutter$} | {}{}", "", pad, "^".repeat(width));
 }
 

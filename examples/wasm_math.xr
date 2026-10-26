@@ -1,0 +1,27 @@
+// Build:  xeroc build examples/wasm_math.xr --target wasm32 --lib -o math.wasm
+// No runtime, no allocator, no imports: just the exported functions.
+
+export fn fib(n: i32) -> i32 {
+    let mut a = 0
+    let mut b = 1
+    for _ in 0..n {
+        let t = a + b
+        a = b
+        b = t
+    }
+    a
+}
+
+export fn is_prime(n: u32) -> bool {
+    if n < 2 {
+        return false
+    }
+    let mut d: u32 = 2
+    while d * d <= n {
+        if n % d == 0 {
+            return false
+        }
+        d += 1
+    }
+    true
+}

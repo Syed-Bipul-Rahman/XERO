@@ -6,13 +6,24 @@ pub type AdtId = u32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum IntTy {
-    I8, I16, I32, I64, Isize,
-    U8, U16, U32, U64, Usize,
+    I8,
+    I16,
+    I32,
+    I64,
+    Isize,
+    U8,
+    U16,
+    U32,
+    U64,
+    Usize,
 }
 
 impl IntTy {
     pub fn signed(self) -> bool {
-        matches!(self, IntTy::I8 | IntTy::I16 | IntTy::I32 | IntTy::I64 | IntTy::Isize)
+        matches!(
+            self,
+            IntTy::I8 | IntTy::I16 | IntTy::I32 | IntTy::I64 | IntTy::Isize
+        )
     }
 
     pub fn bits(self, ptr_bits: u32) -> u32 {
@@ -27,15 +38,31 @@ impl IntTy {
 
     pub fn name(self) -> &'static str {
         match self {
-            IntTy::I8 => "i8", IntTy::I16 => "i16", IntTy::I32 => "i32", IntTy::I64 => "i64", IntTy::Isize => "isize",
-            IntTy::U8 => "u8", IntTy::U16 => "u16", IntTy::U32 => "u32", IntTy::U64 => "u64", IntTy::Usize => "usize",
+            IntTy::I8 => "i8",
+            IntTy::I16 => "i16",
+            IntTy::I32 => "i32",
+            IntTy::I64 => "i64",
+            IntTy::Isize => "isize",
+            IntTy::U8 => "u8",
+            IntTy::U16 => "u16",
+            IntTy::U32 => "u32",
+            IntTy::U64 => "u64",
+            IntTy::Usize => "usize",
         }
     }
 
     pub fn from_name(s: &str) -> Option<IntTy> {
         Some(match s {
-            "i8" => IntTy::I8, "i16" => IntTy::I16, "i32" => IntTy::I32, "i64" => IntTy::I64, "isize" => IntTy::Isize,
-            "u8" => IntTy::U8, "u16" => IntTy::U16, "u32" => IntTy::U32, "u64" => IntTy::U64, "usize" => IntTy::Usize,
+            "i8" => IntTy::I8,
+            "i16" => IntTy::I16,
+            "i32" => IntTy::I32,
+            "i64" => IntTy::I64,
+            "isize" => IntTy::Isize,
+            "u8" => IntTy::U8,
+            "u16" => IntTy::U16,
+            "u32" => IntTy::U32,
+            "u64" => IntTy::U64,
+            "usize" => IntTy::Usize,
             _ => return None,
         })
     }
@@ -126,7 +153,10 @@ impl Ty {
     /// Replace `Param(i)` with `args[i]`.
     pub fn subst(&self, args: &[Ty]) -> Ty {
         match self {
-            Ty::Param(i) => args.get(*i as usize).cloned().unwrap_or_else(|| self.clone()),
+            Ty::Param(i) => args
+                .get(*i as usize)
+                .cloned()
+                .unwrap_or_else(|| self.clone()),
             Ty::Ref(t, m) => Ty::Ref(Box::new(t.subst(args)), *m),
             Ty::Ptr(t) => Ty::Ptr(Box::new(t.subst(args))),
             Ty::Array(t, n) => Ty::Array(Box::new(t.subst(args)), *n),
@@ -166,8 +196,14 @@ pub fn match_template(pat: &Ty, ty: &Ty, out: &mut Vec<Option<Ty>>) -> bool {
         (Ty::Ref(a, m1), Ty::Ref(b, m2)) => m1 == m2 && match_template(a, b, out),
         (Ty::Ptr(a), Ty::Ptr(b)) | (Ty::Slice(a), Ty::Slice(b)) => match_template(a, b, out),
         (Ty::Array(a, n1), Ty::Array(b, n2)) => n1 == n2 && match_template(a, b, out),
-        (Ty::Tuple(a), Ty::Tuple(b)) => a.len() == b.len() && a.iter().zip(b).all(|(x, y)| match_template(x, y, out)),
-        (Ty::Adt(i1, a), Ty::Adt(i2, b)) => i1 == i2 && a.len() == b.len() && a.iter().zip(b).all(|(x, y)| match_template(x, y, out)),
+        (Ty::Tuple(a), Ty::Tuple(b)) => {
+            a.len() == b.len() && a.iter().zip(b).all(|(x, y)| match_template(x, y, out))
+        }
+        (Ty::Adt(i1, a), Ty::Adt(i2, b)) => {
+            i1 == i2
+                && a.len() == b.len()
+                && a.iter().zip(b).all(|(x, y)| match_template(x, y, out))
+        }
         _ => pat == ty,
     }
 }
@@ -181,7 +217,14 @@ pub struct TyFmt<'a> {
 
 impl fmt::Display for TyFmt<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let sub = |t: &Ty| TyFmt { ty: t, adt_name: self.adt_name, param_name: self.param_name }.to_string();
+        let sub = |t: &Ty| {
+            TyFmt {
+                ty: t,
+                adt_name: self.adt_name,
+                param_name: self.param_name,
+            }
+            .to_string()
+        };
         match self.ty {
             Ty::Int(i) => write!(f, "{}", i.name()),
             Ty::Float(FloatTy::F32) => write!(f, "f32"),

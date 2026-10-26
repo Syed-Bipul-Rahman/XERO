@@ -1,0 +1,61 @@
+// Modules, imports, visibility, consts and statics.
+
+import modules.geometry
+import modules.geometry.{Vec2}
+import std.math
+
+const LIMIT: i32 = 10 * 4 + 2
+const GREETING: &str = "hello from a const"
+static TABLE: [u8; 4] = [1, 2, 4, 8]
+static mut CALLS: u32 = 0
+
+fn counted() -> u32 {
+    unsafe {
+        CALLS += 1
+        CALLS
+    }
+}
+
+fn main() {
+    let a = Vec2.new(1.0, 2.0)
+    let b = geometry.Vec2.new(3.0, 4.0)
+    println(a.dot(b))
+    println(a.scale(3.0).y)
+    println(geometry.manhattan(a, b))
+    println(geometry.ORIGIN_X)
+    println(LIMIT)
+    println(GREETING)
+    let mut sum: u32 = 0
+    for t in &TABLE {
+        sum += *t as u32
+    }
+    println(sum)
+    counted()
+    counted()
+    println(counted())
+    println(math.max(3, 9))
+    println(math.min(2.5, -1.0))
+    println(math.clamp(15, 0, 10))
+    println(math.isqrt(1000000))
+    println(math.gcd(48, 18))
+    println(math.pow_int(2, 20))
+    println(math.sqrt(2.0))
+    println(math.abs(-7))
+}
+// output:
+// 11.0
+// 6.0
+// 4.0
+// 0.0
+// 42
+// hello from a const
+// 15
+// 3
+// 9
+// -1.0
+// 10
+// 1000
+// 6
+// 1048576
+// 1.414214
+// 7

@@ -129,8 +129,18 @@ fn main() {
         exit(2);
     };
     if cmd == "check" {
-        let opts = Options { input, output: None, emit: Emit::Xir, opt_level, target, lib, intel_syntax: intel };
-        let mut fe = xeroc::driver::Frontend { sm: Default::default() };
+        let opts = Options {
+            input,
+            output: None,
+            emit: Emit::Xir,
+            opt_level,
+            target,
+            lib,
+            intel_syntax: intel,
+        };
+        let mut fe = xeroc::driver::Frontend {
+            sm: Default::default(),
+        };
         match xeroc::driver::compile_to_llvm(&mut fe, &opts) {
             Ok(_) => return,
             Err(xeroc::driver::FrontendError::Diags(ds)) => {
@@ -150,7 +160,15 @@ fn main() {
     } else {
         output
     };
-    let opts = Options { input, output, emit: if run { Emit::Exe } else { emit }, opt_level, target, lib, intel_syntax: intel };
+    let opts = Options {
+        input,
+        output,
+        emit: if run { Emit::Exe } else { emit },
+        opt_level,
+        target,
+        lib,
+        intel_syntax: intel,
+    };
     match build(&opts) {
         Ok(path) => {
             if run {

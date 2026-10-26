@@ -1,0 +1,53 @@
+// Ownership in Xero: every value has exactly one owner, and is destroyed
+// exactly once, at a statically known point. No GC, no reference counting.
+
+struct File {
+    name: String
+}
+
+impl File {
+    fn open(name: &str) -> File {
+        print("open  ")
+        println(name)
+        File { name: String.from(name) }
+    }
+
+    fn write(&mut self, text: &str) {
+        print("write ")
+        print(&self.name)
+        print(": ")
+        println(text)
+    }
+
+    drop {
+        print("close ")
+        println(&self.name)
+    }
+}
+
+// Takes ownership: the file is closed when this function returns.
+fn archive(f: File) {
+    print("archiving ")
+    println(&f.name)
+}
+
+// Borrows mutably: the caller keeps ownership.
+fn log(f: &mut File, line: &str) {
+    f.write(line)
+}
+
+fn main() {
+    let mut log_file = File.open("app.log")
+    log(&mut log_file, "started")
+
+    {
+        let tmp = File.open("scratch.tmp")
+        println("using scratch")
+    }   // scratch.tmp is closed here
+
+    let data = File.open("data.bin")
+    let moved = move data       // ownership transfers; `data` can no longer be used
+    archive(moved)              // data.bin is closed inside `archive`
+
+    log(&mut log_file, "finished")
+}   // app.log is closed here

@@ -37,6 +37,8 @@ pub enum IntrinsicFn {
     PtrWrite,
     DropInPlace,
     Forget,
+    VolatileLoad,
+    VolatileStore,
 }
 
 const INTRINSICS: &[(&str, IntrinsicFn)] = &[
@@ -51,10 +53,16 @@ const INTRINSICS: &[(&str, IntrinsicFn)] = &[
     ("ptr_write", IntrinsicFn::PtrWrite),
     ("drop_in_place", IntrinsicFn::DropInPlace),
     ("forget", IntrinsicFn::Forget),
+    ("volatile_load", IntrinsicFn::VolatileLoad),
+    ("volatile_store", IntrinsicFn::VolatileStore),
 ];
 
 /// Types from other std modules that are visible everywhere, like the prelude.
-pub const PRELUDE_TYPES: &[(&str, &str)] = &[("std.vec", "Vec"), ("std.string", "String"), ("std.mem", "Box")];
+pub const PRELUDE_TYPES: &[(&str, &str)] = &[
+    ("std.vec", "Vec"),
+    ("std.string", "String"),
+    ("std.mem", "Box"),
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Def {
@@ -135,7 +143,10 @@ impl AdtDef {
 
     pub fn variant_index(&self, name: &str) -> Option<u32> {
         match &self.kind {
-            AdtKind::Enum(vs) => vs.iter().position(|v| v.name.name == name).map(|i| i as u32),
+            AdtKind::Enum(vs) => vs
+                .iter()
+                .position(|v| v.name.name == name)
+                .map(|i| i as u32),
             AdtKind::Struct(_) => None,
         }
     }
@@ -276,7 +287,12 @@ impl Checker {
     // ------------------------------------------------------------ collection
 
     /// Run the whole front end. `root` indexes the module containing `main`.
-    pub fn run(mut self, parsed: Vec<ParsedModule>, root: usize, is_lib: bool) -> std::result::Result<(xir::Program, Checker), Vec<Diagnostic>> {
+    pub fn run(
+        mut self,
+        parsed: Vec<ParsedModule>,
+        root: usize,
+        is_lib: bool,
+    ) -> std::result::Result<(xir::Program, Checker), Vec<Diagnostic>> {
         let mut impl_decls = Vec::new();
         let mut imports = Vec::new();
         for (mi, pm) in parsed.into_iter().enumerate() {
@@ -284,7 +300,12 @@ impl Checker {
             if pm.path == "std.prelude" {
                 self.prelude = Some(mid);
             }
-            self.modules.push(ModuleDef { path: pm.path.clone(), file: pm.ast.file, scope: HashMap::new(), is_std: pm.is_std });
+            self.modules.push(ModuleDef {
+                path: pm.path.clone(),
+                file: pm.ast.file,
+                scope: HashMap::new(),
+                is_std: pm.is_std,
+            });
             for item in pm.ast.items {
                 self.collect_item(mid, item, &mut impl_decls, &mut imports);
             }
@@ -319,13 +340,19 @@ impl Checker {
             if m.is_std && !f.decl.is_export {
                 continue;
             }
-            let key = FnKey { fid: fid as FnId, targs: Vec::new(), self_ty: None };
+            let key = FnKey {
+                fid: fid as FnId,
+                targs: Vec::new(),
+                self_ty: None,
+            };
             let name = self.instance(key);
             if fid_is_main(&self.fns[fid]) && self.fns[fid].module == root as ModId {
                 let ret_ast = self.fns[fid].decl.ret.clone();
                 let fmod = self.fns[fid].module;
                 let ret = match &ret_ast {
-                    Some(t) => self.resolve_type(t, fmod, &Env::default()).unwrap_or(Ty::unit()),
+                    Some(t) => self
+                        .resolve_type(t, fmod, &Env::default())
+                        .unwrap_or(Ty::unit()),
                     None => Ty::unit(),
                 };
                 if !(ret.is_unit() || ret == Ty::Int(IntTy::I32) || ret.is_never()) {
@@ -341,7 +368,10 @@ impl Checker {
         }
         if entry.is_none() && !is_lib {
             let file = self.modules[root].file;
-            self.error(Diagnostic::new(Span::new(file, 0, 0), "no `main` function found (use `--lib` to build a library object)"));
+            self.error(Diagnostic::new(
+                Span::new(file, 0, 0),
+                "no `main` function found (use `--lib` to build a library object)",
+            ));
         }
         self.drain_queue();
 
@@ -355,7 +385,12 @@ impl Checker {
             match self.static_init(sid) {
                 Ok((ty, init)) => {
                     let s = &self.statics[sid as usize];
-                    statics.push(xir::Static { name: s.symbol.clone(), ty, init, mutable: s.mutable });
+                    statics.push(xir::Static {
+                        name: s.symbol.clone(),
+                        ty,
+                        init,
+                        mutable: s.mutable,
+                    });
                 }
                 Err(d) => self.error(d),
             }
@@ -363,23 +398,50 @@ impl Checker {
         if !self.diags.is_empty() {
             return Err(self.diags);
         }
-        let mut externs: Vec<xir::Extern> = std::mem::take(&mut self.externs).into_values().collect();
+        let mut externs: Vec<xir::Extern> =
+            std::mem::take(&mut self.externs).into_values().collect();
         externs.sort_by(|a, b| a.name.cmp(&b.name));
         let funcs = std::mem::take(&mut self.out_funcs);
-        Ok((xir::Program { funcs, externs, statics, entry }, self))
+        Ok((
+            xir::Program {
+                funcs,
+                externs,
+                statics,
+                entry,
+            },
+            self,
+        ))
     }
 
     fn define(&mut self, mid: ModId, name: &Ident, def: Def, vis: Vis) {
         let scope = &mut self.modules[mid as usize].scope;
         if let Some(prev) = scope.get(&name.name) {
-            let d = Diagnostic::new(name.span, format!("`{}` is defined more than once in this module", name.name)).note(prev.span, "previous definition here");
+            let d = Diagnostic::new(
+                name.span,
+                format!("`{}` is defined more than once in this module", name.name),
+            )
+            .note(prev.span, "previous definition here");
             self.diags.push(d);
             return;
         }
-        scope.insert(name.name.clone(), Binding { def, vis, span: name.span, imported: false });
+        scope.insert(
+            name.name.clone(),
+            Binding {
+                def,
+                vis,
+                span: name.span,
+                imported: false,
+            },
+        );
     }
 
-    fn collect_item(&mut self, mid: ModId, item: ast::Item, impls: &mut Vec<(ModId, ast::ImplDecl)>, imports: &mut Vec<(ModId, Vis, ast::Import, Span)>) {
+    fn collect_item(
+        &mut self,
+        mid: ModId,
+        item: ast::Item,
+        impls: &mut Vec<(ModId, ast::ImplDecl)>,
+        imports: &mut Vec<(ModId, Vis, ast::Import, Span)>,
+    ) {
         let vis = item.vis;
         match item.kind {
             ItemKind::Import(imp) => imports.push((mid, vis, imp, item.span)),
@@ -391,14 +453,25 @@ impl Checker {
                     ));
                 }
                 if decl.body.is_none() && !decl.generics.params.is_empty() {
-                    self.error(Diagnostic::new(decl.name.span, "foreign functions cannot be generic"));
+                    self.error(Diagnostic::new(
+                        decl.name.span,
+                        "foreign functions cannot be generic",
+                    ));
                 }
                 if decl.self_param.is_some() {
-                    self.error(Diagnostic::new(decl.name.span, "`self` parameter is only allowed in `impl` and `trait` methods"));
+                    self.error(Diagnostic::new(
+                        decl.name.span,
+                        "`self` parameter is only allowed in `impl` and `trait` methods",
+                    ));
                 }
                 let name = decl.name.clone();
                 let fid = self.fns.len() as FnId;
-                self.fns.push(FnDef { decl, module: mid, owner: FnOwner::Free, vis });
+                self.fns.push(FnDef {
+                    decl,
+                    module: mid,
+                    owner: FnOwner::Free,
+                    vis,
+                });
                 self.define(mid, &name, Def::Fn(fid), vis);
             }
             ItemKind::Struct(s) => {
@@ -425,7 +498,10 @@ impl Checker {
                 let mut seen = HashSet::new();
                 for v in &e.variants {
                     if !seen.insert(v.name.name.clone()) {
-                        self.error(Diagnostic::new(v.name.span, format!("duplicate variant `{}`", v.name.name)));
+                        self.error(Diagnostic::new(
+                            v.name.span,
+                            format!("duplicate variant `{}`", v.name.name),
+                        ));
                     }
                 }
                 self.adts.push(AdtDef {
@@ -443,7 +519,9 @@ impl Checker {
                 });
                 self.define(mid, &name, Def::Adt(id), vis);
                 // `Some`/`None`/`Ok`/`Err` are usable unqualified everywhere
-                if self.modules[mid as usize].path == "std.prelude" && (name.name == "Option" || name.name == "Result") {
+                if self.modules[mid as usize].path == "std.prelude"
+                    && (name.name == "Option" || name.name == "Result")
+                {
                     if let AdtKind::Enum(vs) = &self.adts[id as usize].kind {
                         let vs: Vec<Ident> = vs.iter().map(|v| v.name.clone()).collect();
                         for (i, v) in vs.iter().enumerate() {
@@ -456,44 +534,85 @@ impl Checker {
                 let id = self.traits.len() as TraitId;
                 let name = t.name.clone();
                 if !t.generics.params.is_empty() {
-                    self.error(Diagnostic::new(t.name.span, "generic traits are not supported yet"));
+                    self.error(Diagnostic::new(
+                        t.name.span,
+                        "generic traits are not supported yet",
+                    ));
                 }
                 let mut defaults = HashMap::new();
                 for m in &t.methods {
                     if m.body.is_some() {
                         let fid = self.fns.len() as FnId;
-                        self.fns.push(FnDef { decl: m.clone(), module: mid, owner: FnOwner::Trait(id), vis: Vis::Pub });
+                        self.fns.push(FnDef {
+                            decl: m.clone(),
+                            module: mid,
+                            owner: FnOwner::Trait(id),
+                            vis: Vis::Pub,
+                        });
                         defaults.insert(m.name.name.clone(), fid);
                     }
                     if m.self_param.is_none() {
                         self.error(Diagnostic::new(m.name.span, "trait methods must take `self`, `&self` or `&mut self` (static trait functions are not supported yet)"));
                     }
                 }
-                self.traits.push(TraitDef { name: t.name.name.clone(), module: mid, decl: t, supertraits: Vec::new(), defaults });
+                self.traits.push(TraitDef {
+                    name: t.name.name.clone(),
+                    module: mid,
+                    decl: t,
+                    supertraits: Vec::new(),
+                    defaults,
+                });
                 self.define(mid, &name, Def::Trait(id), vis);
             }
             ItemKind::Impl(i) => impls.push((mid, i)),
             ItemKind::TypeAlias { name, generics, ty } => {
                 let id = self.aliases.len() as u32;
-                self.aliases.push(AliasDef { module: mid, generics: generics.params, ty });
+                self.aliases.push(AliasDef {
+                    module: mid,
+                    generics: generics.params,
+                    ty,
+                });
                 self.define(mid, &name, Def::Alias(id), vis);
             }
             ItemKind::Const { name, ty, value } => {
                 let id = self.consts.len() as u32;
-                self.consts.push(ConstDef { name: name.name.clone(), module: mid, ty, value, cache: None, in_progress: false });
+                self.consts.push(ConstDef {
+                    name: name.name.clone(),
+                    module: mid,
+                    ty,
+                    value,
+                    cache: None,
+                    in_progress: false,
+                });
                 self.define(mid, &name, Def::Const(id), vis);
             }
-            ItemKind::Static { name, mutable, ty, value } => {
+            ItemKind::Static {
+                name,
+                mutable,
+                ty,
+                value,
+            } => {
                 let id = self.statics.len() as u32;
                 let symbol = format!("{}.{}", self.modules[mid as usize].path, name.name);
-                self.statics.push(StaticDef { name: name.name.clone(), module: mid, mutable, ty, value, symbol, resolved: None });
+                self.statics.push(StaticDef {
+                    name: name.name.clone(),
+                    module: mid,
+                    mutable,
+                    ty,
+                    value,
+                    symbol,
+                    resolved: None,
+                });
                 self.define(mid, &name, Def::Static(id), vis);
             }
         }
     }
 
     fn find_module(&self, path: &str) -> Option<ModId> {
-        self.modules.iter().position(|m| m.path == path).map(|i| i as ModId)
+        self.modules
+            .iter()
+            .position(|m| m.path == path)
+            .map(|i| i as ModId)
     }
 
     fn resolve_import(&mut self, mid: ModId, vis: Vis, imp: &ast::Import, span: Span) {
@@ -505,30 +624,61 @@ impl Checker {
         };
         match &imp.names {
             None => {
-                let bind = imp.alias.clone().unwrap_or_else(|| imp.path.last().unwrap().clone());
+                let bind = imp
+                    .alias
+                    .clone()
+                    .unwrap_or_else(|| imp.path.last().unwrap().clone());
                 let scope = &mut self.modules[mid as usize].scope;
                 if scope.contains_key(&bind.name) {
-                    self.error(Diagnostic::new(bind.span, format!("`{}` is already defined in this module", bind.name)));
+                    self.error(Diagnostic::new(
+                        bind.span,
+                        format!("`{}` is already defined in this module", bind.name),
+                    ));
                     return;
                 }
-                scope.insert(bind.name.clone(), Binding { def: Def::Module(target), vis, span: bind.span, imported: true });
+                scope.insert(
+                    bind.name.clone(),
+                    Binding {
+                        def: Def::Module(target),
+                        vis,
+                        span: bind.span,
+                        imported: true,
+                    },
+                );
             }
             Some(names) => {
                 for n in names {
                     let Some(b) = self.modules[target as usize].scope.get(&n.name).copied() else {
-                        self.error(Diagnostic::new(n.span, format!("module `{full}` has no item named `{}`", n.name)));
+                        self.error(Diagnostic::new(
+                            n.span,
+                            format!("module `{full}` has no item named `{}`", n.name),
+                        ));
                         continue;
                     };
                     if b.vis != Vis::Pub || b.imported {
-                        self.error(Diagnostic::new(n.span, format!("`{}` is private to module `{full}`", n.name)));
+                        self.error(Diagnostic::new(
+                            n.span,
+                            format!("`{}` is private to module `{full}`", n.name),
+                        ));
                         continue;
                     }
                     let scope = &mut self.modules[mid as usize].scope;
                     if scope.contains_key(&n.name) {
-                        self.error(Diagnostic::new(n.span, format!("`{}` is already defined in this module", n.name)));
+                        self.error(Diagnostic::new(
+                            n.span,
+                            format!("`{}` is already defined in this module", n.name),
+                        ));
                         continue;
                     }
-                    scope.insert(n.name.clone(), Binding { def: b.def, vis, span: n.span, imported: true });
+                    scope.insert(
+                        n.name.clone(),
+                        Binding {
+                            def: b.def,
+                            vis,
+                            span: n.span,
+                            imported: true,
+                        },
+                    );
                 }
             }
         }
@@ -556,15 +706,30 @@ impl Checker {
                 }
             }
         }
-        INTRINSICS.iter().find(|(n, _)| *n == name).map(|(_, i)| Def::Intrinsic(*i))
+        INTRINSICS
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, i)| Def::Intrinsic(*i))
     }
 
     /// Look up `name` inside module `target` from module `from` (respecting `pub`).
     pub fn lookup_in(&self, from: ModId, target: ModId, name: &str, span: Span) -> Result<Def> {
         match self.modules[target as usize].scope.get(name) {
             Some(b) if b.vis == Vis::Pub && !b.imported || from == target => Ok(b.def),
-            Some(_) => Err(Diagnostic::new(span, format!("`{name}` is private to module `{}`", self.modules[target as usize].path))),
-            None => Err(Diagnostic::new(span, format!("module `{}` has no item named `{name}`", self.modules[target as usize].path))),
+            Some(_) => Err(Diagnostic::new(
+                span,
+                format!(
+                    "`{name}` is private to module `{}`",
+                    self.modules[target as usize].path
+                ),
+            )),
+            None => Err(Diagnostic::new(
+                span,
+                format!(
+                    "module `{}` has no item named `{name}`",
+                    self.modules[target as usize].path
+                ),
+            )),
         }
     }
 
@@ -590,7 +755,10 @@ impl Checker {
                     let mut seen = HashSet::new();
                     for f in fs {
                         if !seen.insert(f.name.name.clone()) {
-                            errs.push(Diagnostic::new(f.name.span, format!("duplicate field `{}`", f.name.name)));
+                            errs.push(Diagnostic::new(
+                                f.name.span,
+                                format!("duplicate field `{}`", f.name.name),
+                            ));
                         }
                         match self.resolve_type(&f.ty, module, &env) {
                             Ok(t) => fields.push(t),
@@ -621,7 +789,10 @@ impl Checker {
                             }
                         }
                         if discs.contains(&next) {
-                            errs.push(Diagnostic::new(v.name.span, format!("discriminant value {next} is assigned more than once")));
+                            errs.push(Diagnostic::new(
+                                v.name.span,
+                                format!("discriminant value {next} is assigned more than once"),
+                            ));
                         }
                         discs.push(next);
                         next += 1;
@@ -654,8 +825,11 @@ impl Checker {
         }
         // Infinite-size check: a by-value cycle through fields.
         for id in 0..self.adts.len() {
+            let args: Vec<Ty> = (0..self.adts[id].generics.len() as u32)
+                .map(Ty::Param)
+                .collect();
             let mut stack = Vec::new();
-            if self.adt_cycles(id as AdtId, &mut stack) {
+            if self.contains_by_value(&Ty::Adt(id as AdtId, args), id as AdtId, &mut stack, true) {
                 let span = self.adts[id].span;
                 let name = self.adts[id].name.clone();
                 self.error(Diagnostic::new(span, format!("recursive type `{name}` has infinite size; use a raw pointer for indirection")));
@@ -663,24 +837,37 @@ impl Checker {
         }
     }
 
-    fn adt_cycles(&self, id: AdtId, stack: &mut Vec<AdtId>) -> bool {
-        if stack.contains(&id) {
-            return stack[0] == id;
-        }
-        stack.push(id);
-        let a = &self.adts[id as usize];
-        let mut found = false;
-        for t in a.fields.iter().chain(a.variants.iter().flatten()) {
-            let mut inner = Vec::new();
-            direct_adts(t, &mut inner);
-            for i in inner {
-                if self.adt_cycles(i, stack) {
-                    found = true;
+    /// Does a value of type `t` contain a `target` by value (through fields,
+    /// tuples, arrays and enum payloads, but not through pointers)?
+    fn contains_by_value(&self, t: &Ty, target: AdtId, stack: &mut Vec<Ty>, root: bool) -> bool {
+        match t {
+            Ty::Adt(id, args) => {
+                if *id == target && !root {
+                    return true;
                 }
+                if stack.contains(t) || stack.len() > 32 {
+                    return false;
+                }
+                stack.push(t.clone());
+                let a = &self.adts[*id as usize];
+                let inner: Vec<Ty> = a
+                    .fields
+                    .iter()
+                    .chain(a.variants.iter().flatten())
+                    .map(|f| f.subst(args))
+                    .collect();
+                let found = inner
+                    .iter()
+                    .any(|f| self.contains_by_value(f, target, stack, false));
+                stack.pop();
+                found
             }
+            Ty::Array(e, _) => self.contains_by_value(e, target, stack, false),
+            Ty::Tuple(ts) => ts
+                .iter()
+                .any(|t| self.contains_by_value(t, target, stack, false)),
+            _ => false,
         }
-        stack.pop();
-        found
     }
 
     fn resolve_traits(&mut self) {
@@ -703,21 +890,37 @@ impl Checker {
             return Err(Diagnostic::new(t.span, "expected a trait name"));
         };
         if !args.is_empty() {
-            return Err(Diagnostic::new(t.span, "generic traits are not supported yet"));
+            return Err(Diagnostic::new(
+                t.span,
+                "generic traits are not supported yet",
+            ));
         }
         match self.resolve_path_def(path, module)? {
             Def::Trait(id) => Ok(id),
-            _ => Err(Diagnostic::new(t.span, format!("`{}` is not a trait", path.last().unwrap().name))),
+            _ => Err(Diagnostic::new(
+                t.span,
+                format!("`{}` is not a trait", path.last().unwrap().name),
+            )),
         }
     }
 
     fn resolve_path_def(&self, path: &[Ident], module: ModId) -> Result<Def> {
         let first = &path[0];
-        let mut def = self.lookup(module, &first.name).ok_or_else(|| Diagnostic::new(first.span, format!("cannot find `{}` in this scope", first.name)))?;
+        let mut def = self.lookup(module, &first.name).ok_or_else(|| {
+            Diagnostic::new(
+                first.span,
+                format!("cannot find `{}` in this scope", first.name),
+            )
+        })?;
         for seg in &path[1..] {
             match def {
                 Def::Module(m) => def = self.lookup_in(module, m, &seg.name, seg.span)?,
-                _ => return Err(Diagnostic::new(seg.span, format!("`{}` is not a module", first.name))),
+                _ => {
+                    return Err(Diagnostic::new(
+                        seg.span,
+                        format!("`{}` is not a module", first.name),
+                    ))
+                }
             }
         }
         Ok(def)
@@ -754,26 +957,43 @@ impl Checker {
         let mut methods = HashMap::new();
         for (vis, m) in decl.methods {
             if m.body.is_none() {
-                self.error(Diagnostic::new(m.name.span, "methods in an `impl` block need a body"));
+                self.error(Diagnostic::new(
+                    m.name.span,
+                    "methods in an `impl` block need a body",
+                ));
                 continue;
             }
             let fid = self.fns.len() as FnId;
             let name = m.name.clone();
             let vis = if trait_id.is_some() { Vis::Pub } else { vis };
-            self.fns.push(FnDef { decl: m, module: mid, owner: FnOwner::Impl(iid), vis });
+            self.fns.push(FnDef {
+                decl: m,
+                module: mid,
+                owner: FnOwner::Impl(iid),
+                vis,
+            });
             if methods.insert(name.name.clone(), fid).is_some() {
-                self.error(Diagnostic::new(name.span, format!("duplicate method `{}`", name.name)));
+                self.error(Diagnostic::new(
+                    name.span,
+                    format!("duplicate method `{}`", name.name),
+                ));
             }
         }
         let mut drop_fn = None;
         if let Some(body) = decl.drop {
             if trait_id.is_some() {
-                self.error(Diagnostic::new(body.span, "`drop` blocks belong in an inherent `impl Type { ... }` block"));
+                self.error(Diagnostic::new(
+                    body.span,
+                    "`drop` blocks belong in an inherent `impl Type { ... }` block",
+                ));
             }
             let span = body.span;
             let fid = self.fns.len() as FnId;
             let fdecl = FnDecl {
-                name: Ident { name: "drop".into(), span },
+                name: Ident {
+                    name: "drop".into(),
+                    span,
+                },
                 generics: ast::Generics::default(),
                 self_param: Some((SelfKind::RefMut, false, span)),
                 params: Vec::new(),
@@ -784,25 +1004,46 @@ impl Checker {
                 is_export: false,
                 span,
             };
-            self.fns.push(FnDef { decl: fdecl, module: mid, owner: FnOwner::Impl(iid), vis: Vis::Pub });
+            self.fns.push(FnDef {
+                decl: fdecl,
+                module: mid,
+                owner: FnOwner::Impl(iid),
+                vis: Vis::Pub,
+            });
             drop_fn = Some(fid);
             match &self_ty {
                 Ty::Adt(id, args) => {
                     let a = &self.adts[*id as usize];
-                    let generic_ok = args.iter().enumerate().all(|(i, t)| *t == Ty::Param(i as u32)) && args.len() == decl.generics.params.len();
+                    let generic_ok = args
+                        .iter()
+                        .enumerate()
+                        .all(|(i, t)| *t == Ty::Param(i as u32))
+                        && args.len() == decl.generics.params.len();
                     if a.module != mid {
-                        self.error(Diagnostic::new(span, "a `drop` block must be in the same module as the type it destroys"));
+                        self.error(Diagnostic::new(
+                            span,
+                            "a `drop` block must be in the same module as the type it destroys",
+                        ));
                     } else if !generic_ok {
                         self.error(Diagnostic::new(span, "a `drop` block must apply to every instance of the type (`impl<T> Type<T> { drop { ... } }`)"));
                     } else if a.is_copy {
-                        self.error(Diagnostic::new(span, format!("`copy` type `{}` cannot have a `drop` block", a.name)));
+                        self.error(Diagnostic::new(
+                            span,
+                            format!("`copy` type `{}` cannot have a `drop` block", a.name),
+                        ));
                     } else if a.drop_impl.is_some() {
-                        self.error(Diagnostic::new(span, format!("type `{}` already has a `drop` block", a.name)));
+                        self.error(Diagnostic::new(
+                            span,
+                            format!("type `{}` already has a `drop` block", a.name),
+                        ));
                     } else {
                         self.adts[*id as usize].drop_impl = Some(iid);
                     }
                 }
-                _ => self.error(Diagnostic::new(span, "`drop` blocks are only allowed on structs and enums")),
+                _ => self.error(Diagnostic::new(
+                    span,
+                    "`drop` blocks are only allowed on structs and enums",
+                )),
             }
         }
         self.impls.push(ImplDef {
@@ -820,7 +1061,9 @@ impl Checker {
 
     fn validate_impls(&mut self) {
         for iid in 0..self.impls.len() {
-            let Some(tid) = self.impls[iid].trait_id else { continue };
+            let Some(tid) = self.impls[iid].trait_id else {
+                continue;
+            };
             let span = self.impls[iid].span;
             let tname = self.traits[tid as usize].name.clone();
             // methods must match the trait
@@ -828,7 +1071,14 @@ impl Checker {
                 .decl
                 .methods
                 .iter()
-                .map(|m| (m.name.name.clone(), m.body.is_some(), m.self_param.map(|s| s.0), m.params.len()))
+                .map(|m| {
+                    (
+                        m.name.name.clone(),
+                        m.body.is_some(),
+                        m.self_param.map(|s| s.0),
+                        m.params.len(),
+                    )
+                })
                 .collect();
             for (name, has_default, self_kind, nparams) in &required {
                 match self.impls[iid].methods.get(name) {
@@ -840,23 +1090,41 @@ impl Checker {
                         }
                     }
                     None if !has_default => {
-                        self.error(Diagnostic::new(span, format!("missing method `{name}` in implementation of trait `{tname}`")));
+                        self.error(Diagnostic::new(
+                            span,
+                            format!("missing method `{name}` in implementation of trait `{tname}`"),
+                        ));
                     }
                     None => {}
                 }
             }
-            let names: Vec<(String, Span)> = self.impls[iid].methods.iter().map(|(n, f)| (n.clone(), self.fns[*f as usize].decl.name.span)).collect();
+            let names: Vec<(String, Span)> = self.impls[iid]
+                .methods
+                .iter()
+                .map(|(n, f)| (n.clone(), self.fns[*f as usize].decl.name.span))
+                .collect();
             for (n, sp) in names {
                 if !required.iter().any(|r| r.0 == n) {
-                    self.error(Diagnostic::new(sp, format!("method `{n}` is not a member of trait `{tname}`")));
+                    self.error(Diagnostic::new(
+                        sp,
+                        format!("method `{n}` is not a member of trait `{tname}`"),
+                    ));
                 }
             }
             // overlapping impls of the same trait for the same type
             for other in 0..iid {
-                if self.impls[other].trait_id == Some(tid) && templates_overlap(&self.impls[other].self_ty, &self.impls[iid].self_ty) {
+                if self.impls[other].trait_id == Some(tid)
+                    && templates_overlap(&self.impls[other].self_ty, &self.impls[iid].self_ty)
+                {
                     let ty = self.ty_str(&self.impls[iid].self_ty);
                     let prev = self.impls[other].span;
-                    self.error(Diagnostic::new(span, format!("conflicting implementations of trait `{tname}` for `{ty}`")).note(prev, "first implementation here"));
+                    self.error(
+                        Diagnostic::new(
+                            span,
+                            format!("conflicting implementations of trait `{tname}` for `{ty}`"),
+                        )
+                        .note(prev, "first implementation here"),
+                    );
                 }
             }
             // supertraits: checked for non-generic impls now
@@ -878,7 +1146,12 @@ impl Checker {
     pub fn ty_str(&self, t: &Ty) -> String {
         let adt_name = |id: AdtId| self.adts[id as usize].name.clone();
         let param_name = |i: u32| format!("T{i}");
-        TyFmt { ty: t, adt_name: &adt_name, param_name: &param_name }.to_string()
+        TyFmt {
+            ty: t,
+            adt_name: &adt_name,
+            param_name: &param_name,
+        }
+        .to_string()
     }
 
     /// Module-qualified type name used in symbol mangling.
@@ -888,46 +1161,79 @@ impl Checker {
             format!("{}.{}", self.modules[a.module as usize].path, a.name)
         };
         let param_name = |i: u32| format!("T{i}");
-        TyFmt { ty: t, adt_name: &adt_name, param_name: &param_name }.to_string()
+        TyFmt {
+            ty: t,
+            adt_name: &adt_name,
+            param_name: &param_name,
+        }
+        .to_string()
     }
 
     pub fn resolve_type(&mut self, t: &TypeExpr, module: ModId, env: &Env) -> Result<Ty> {
         Ok(match &t.kind {
-            TypeKind::Ref(m, inner) => Ty::Ref(Box::new(self.resolve_type(inner, module, env)?), *m),
+            TypeKind::Ref(m, inner) => {
+                Ty::Ref(Box::new(self.resolve_type(inner, module, env)?), *m)
+            }
             TypeKind::Ptr(inner) => Ty::Ptr(Box::new(self.resolve_type(inner, module, env)?)),
             TypeKind::Slice(inner) => Ty::Slice(Box::new(self.resolve_type(inner, module, env)?)),
             TypeKind::Array(inner, len) => {
                 let elem = self.resolve_type(inner, module, env)?;
                 let n = self.const_int(len, module)?;
                 if n < 0 {
-                    return Err(Diagnostic::new(len.span, "array length must be non-negative"));
+                    return Err(Diagnostic::new(
+                        len.span,
+                        "array length must be non-negative",
+                    ));
                 }
                 Ty::Array(Box::new(elem), n as u64)
             }
-            TypeKind::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| self.resolve_type(t, module, env)).collect::<Result<_>>()?),
+            TypeKind::Tuple(ts) => Ty::Tuple(
+                ts.iter()
+                    .map(|t| self.resolve_type(t, module, env))
+                    .collect::<Result<_>>()?,
+            ),
             TypeKind::Never => Ty::Never,
-            TypeKind::Infer => return Err(Diagnostic::new(t.span, "type placeholder `_` is not allowed here")),
-            TypeKind::SelfType => env.self_ty.clone().ok_or_else(|| Diagnostic::new(t.span, "`Self` is only available inside `impl` and `trait` blocks"))?,
+            TypeKind::Infer => {
+                return Err(Diagnostic::new(
+                    t.span,
+                    "type placeholder `_` is not allowed here",
+                ))
+            }
+            TypeKind::SelfType => env.self_ty.clone().ok_or_else(|| {
+                Diagnostic::new(
+                    t.span,
+                    "`Self` is only available inside `impl` and `trait` blocks",
+                )
+            })?,
             TypeKind::Path(path, args) => {
                 if path.len() == 1 {
                     let name = &path[0].name;
                     if let Some(ty) = env.names.get(name) {
                         if !args.is_empty() {
-                            return Err(Diagnostic::new(t.span, "type parameters cannot take generic arguments"));
+                            return Err(Diagnostic::new(
+                                t.span,
+                                "type parameters cannot take generic arguments",
+                            ));
                         }
                         return Ok(ty.clone());
                     }
                     if self.modules[module as usize].scope.get(name).is_none() {
                         if let Some(p) = prim_type(name) {
                             if !args.is_empty() {
-                                return Err(Diagnostic::new(t.span, format!("`{name}` takes no generic arguments")));
+                                return Err(Diagnostic::new(
+                                    t.span,
+                                    format!("`{name}` takes no generic arguments"),
+                                ));
                             }
                             return Ok(p);
                         }
                     }
                 }
                 let def = self.resolve_path_def(path, module)?;
-                let args: Vec<Ty> = args.iter().map(|a| self.resolve_type(a, module, env)).collect::<Result<_>>()?;
+                let args: Vec<Ty> = args
+                    .iter()
+                    .map(|a| self.resolve_type(a, module, env))
+                    .collect::<Result<_>>()?;
                 match def {
                     Def::Adt(id) => {
                         let a = &self.adts[id as usize];
@@ -972,11 +1278,19 @@ impl Checker {
 
     /// Struct field types of a concrete ADT instance.
     pub fn struct_fields(&self, id: AdtId, args: &[Ty]) -> Vec<Ty> {
-        self.adts[id as usize].fields.iter().map(|f| f.subst(args)).collect()
+        self.adts[id as usize]
+            .fields
+            .iter()
+            .map(|f| f.subst(args))
+            .collect()
     }
 
     pub fn enum_variants(&self, id: AdtId, args: &[Ty]) -> Vec<Vec<Ty>> {
-        self.adts[id as usize].variants.iter().map(|v| v.iter().map(|f| f.subst(args)).collect()).collect()
+        self.adts[id as usize]
+            .variants
+            .iter()
+            .map(|v| v.iter().map(|f| f.subst(args)).collect())
+            .collect()
     }
 
     pub fn is_copy(&self, t: &Ty) -> bool {
@@ -988,7 +1302,11 @@ impl Checker {
             Ty::Tuple(ts) => ts.iter().all(|t| self.is_copy(t)),
             Ty::Adt(id, args) => {
                 let a = &self.adts[*id as usize];
-                a.is_copy && a.fields.iter().chain(a.variants.iter().flatten()).all(|f| self.is_copy(&f.subst(args)))
+                a.is_copy
+                    && a.fields
+                        .iter()
+                        .chain(a.variants.iter().flatten())
+                        .all(|f| self.is_copy(&f.subst(args)))
             }
             Ty::Param(_) => false,
         }
@@ -1007,7 +1325,11 @@ impl Checker {
             Ty::Tuple(ts) => ts.iter().any(|t| self.needs_drop_depth(t, depth + 1)),
             Ty::Adt(id, args) => {
                 let a = &self.adts[*id as usize];
-                a.drop_impl.is_some() || a.fields.iter().chain(a.variants.iter().flatten()).any(|f| self.needs_drop_depth(&f.subst(args), depth + 1))
+                a.drop_impl.is_some()
+                    || a.fields
+                        .iter()
+                        .chain(a.variants.iter().flatten())
+                        .any(|f| self.needs_drop_depth(&f.subst(args), depth + 1))
             }
             _ => false,
         }
@@ -1029,12 +1351,21 @@ impl Checker {
                 if let Some(iid) = self.adts[*id as usize].drop_impl {
                     if !self.drop_fns.contains_key(t) {
                         let fid = self.impls[iid as usize].drop_fn.unwrap();
-                        let name = self.instance(FnKey { fid, targs: args.clone(), self_ty: None });
+                        let name = self.instance(FnKey {
+                            fid,
+                            targs: args.clone(),
+                            self_ty: None,
+                        });
                         self.drop_fns.insert(t.clone(), name);
                     }
                 }
                 let a = &self.adts[*id as usize];
-                let inner: Vec<Ty> = a.fields.iter().chain(a.variants.iter().flatten()).map(|f| f.subst(args)).collect();
+                let inner: Vec<Ty> = a
+                    .fields
+                    .iter()
+                    .chain(a.variants.iter().flatten())
+                    .map(|f| f.subst(args))
+                    .collect();
                 for f in inner {
                     self.ensure_drop(&f);
                 }
@@ -1076,7 +1407,9 @@ impl Checker {
         let module = self.impls[iid as usize].module;
         for (g, a) in generics.iter().zip(&args) {
             for b in &g.bounds {
-                let Ok(tid) = self.resolve_trait_ref(b, module) else { return None };
+                let Ok(tid) = self.resolve_trait_ref(b, module) else {
+                    return None;
+                };
                 if !self.implements(a, tid) {
                     return None;
                 }
@@ -1086,7 +1419,13 @@ impl Checker {
     }
 
     /// Check `T: Bound` requirements of generic params with concrete args.
-    pub fn check_bounds(&mut self, generics: &[GenericParam], args: &[Ty], module: ModId, span: Span) -> Result<()> {
+    pub fn check_bounds(
+        &mut self,
+        generics: &[GenericParam],
+        args: &[Ty],
+        module: ModId,
+        span: Span,
+    ) -> Result<()> {
         for (g, a) in generics.iter().zip(args) {
             for b in &g.bounds {
                 let tid = self.resolve_trait_ref(b, module)?;
@@ -1118,21 +1457,37 @@ impl Checker {
                     let im = &self.impls[iid as usize];
                     let n = im.generics.len();
                     let self_ty = im.self_ty.subst(&key.targs[..n.min(key.targs.len())]);
-                    let tr = im.trait_id.map(|t| format!(" as {}", self.traits[t as usize].name)).unwrap_or_default();
+                    let tr = im
+                        .trait_id
+                        .map(|t| format!(" as {}", self.traits[t as usize].name))
+                        .unwrap_or_default();
                     format!("<{}{}>.", self.ty_mangle(&self_ty), tr)
                 }
                 FnOwner::Trait(tid) => {
-                    format!("<{} as {}>.", self.ty_mangle(key.self_ty.as_ref().unwrap()), self.traits[tid as usize].name)
+                    format!(
+                        "<{} as {}>.",
+                        self.ty_mangle(key.self_ty.as_ref().unwrap()),
+                        self.traits[tid as usize].name
+                    )
                 }
             };
             let fn_targs = match f.owner {
-                FnOwner::Impl(iid) => &key.targs[self.impls[iid as usize].generics.len().min(key.targs.len())..],
+                FnOwner::Impl(iid) => {
+                    &key.targs[self.impls[iid as usize].generics.len().min(key.targs.len())..]
+                }
                 _ => &key.targs[..],
             };
             let targs = if fn_targs.is_empty() {
                 String::new()
             } else {
-                format!("<{}>", fn_targs.iter().map(|t| self.ty_mangle(t)).collect::<Vec<_>>().join(","))
+                format!(
+                    "<{}>",
+                    fn_targs
+                        .iter()
+                        .map(|t| self.ty_mangle(t))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
             };
             if owner.is_empty() {
                 format!("{}.{}{}", mpath, f.decl.name.name, targs)
@@ -1153,7 +1508,10 @@ impl Checker {
             count += 1;
             if count > 20000 {
                 let span = self.fns[key.fid as usize].decl.name.span;
-                self.error(Diagnostic::new(span, "too many generic instantiations (infinitely recursive generic function?)"));
+                self.error(Diagnostic::new(
+                    span,
+                    "too many generic instantiations (infinitely recursive generic function?)",
+                ));
                 return;
             }
             match expr::check_fn(self, &key, name) {
@@ -1198,7 +1556,15 @@ impl Checker {
             if !ffi_safe(&ret) && !ret.is_unit() && !ret.is_never() {
                 return Err(Diagnostic::new(decl.ret.as_ref().unwrap().span, "foreign functions may only return integers, floats, bool, raw pointers or nothing"));
             }
-            self.externs.insert(name.clone(), xir::Extern { name: name.clone(), params, ret, variadic: decl.variadic });
+            self.externs.insert(
+                name.clone(),
+                xir::Extern {
+                    name: name.clone(),
+                    params,
+                    ret,
+                    variadic: decl.variadic,
+                },
+            );
         }
         Ok(name)
     }
@@ -1211,13 +1577,22 @@ impl Checker {
         if let Some(t) = &self.statics[sid as usize].resolved {
             return Ok(t.clone());
         }
-        let (ty, module) = (self.statics[sid as usize].ty.clone(), self.statics[sid as usize].module);
+        let (ty, module) = (
+            self.statics[sid as usize].ty.clone(),
+            self.statics[sid as usize].module,
+        );
         let t = self.resolve_type(&ty, module, &Env::default())?;
         if self.needs_drop(&t) {
-            return Err(Diagnostic::new(ty.span, "statics cannot hold values that need `drop`"));
+            return Err(Diagnostic::new(
+                ty.span,
+                "statics cannot hold values that need `drop`",
+            ));
         }
         if contains_ref(&t) && !matches!(&t, Ty::Ref(inner, false) if **inner == Ty::Str) {
-            return Err(Diagnostic::new(ty.span, "statics cannot hold references (except `&str` literals)"));
+            return Err(Diagnostic::new(
+                ty.span,
+                "statics cannot hold references (except `&str` literals)",
+            ));
         }
         self.statics[sid as usize].resolved = Some(t.clone());
         Ok(t)
@@ -1225,7 +1600,10 @@ impl Checker {
 
     fn static_init(&mut self, sid: u32) -> Result<(Ty, xir::ConstVal)> {
         let ty = self.static_type(sid)?;
-        let (value, module) = (self.statics[sid as usize].value.clone(), self.statics[sid as usize].module);
+        let (value, module) = (
+            self.statics[sid as usize].value.clone(),
+            self.statics[sid as usize].module,
+        );
         let v = self.const_eval(&value, module, Some(&ty))?;
         let v = consteval::to_xir(self, &v, &ty, value.span)?;
         Ok((ty, v))
@@ -1262,20 +1640,6 @@ fn ffi_safe(t: &Ty) -> bool {
     matches!(t, Ty::Int(_) | Ty::Float(_) | Ty::Bool | Ty::Ptr(_))
 }
 
-fn direct_adts(t: &Ty, out: &mut Vec<AdtId>) {
-    match t {
-        Ty::Adt(id, args) => {
-            out.push(*id);
-            for a in args {
-                direct_adts(a, out);
-            }
-        }
-        Ty::Array(e, _) => direct_adts(e, out),
-        Ty::Tuple(ts) => ts.iter().for_each(|t| direct_adts(t, out)),
-        _ => {}
-    }
-}
-
 /// Could two impl self-type templates match the same concrete type?
 fn templates_overlap(a: &Ty, b: &Ty) -> bool {
     match (a, b) {
@@ -1283,8 +1647,12 @@ fn templates_overlap(a: &Ty, b: &Ty) -> bool {
         (Ty::Ref(x, m1), Ty::Ref(y, m2)) => m1 == m2 && templates_overlap(x, y),
         (Ty::Ptr(x), Ty::Ptr(y)) | (Ty::Slice(x), Ty::Slice(y)) => templates_overlap(x, y),
         (Ty::Array(x, n), Ty::Array(y, m)) => n == m && templates_overlap(x, y),
-        (Ty::Tuple(xs), Ty::Tuple(ys)) => xs.len() == ys.len() && xs.iter().zip(ys).all(|(x, y)| templates_overlap(x, y)),
-        (Ty::Adt(i, xs), Ty::Adt(j, ys)) => i == j && xs.iter().zip(ys).all(|(x, y)| templates_overlap(x, y)),
+        (Ty::Tuple(xs), Ty::Tuple(ys)) => {
+            xs.len() == ys.len() && xs.iter().zip(ys).all(|(x, y)| templates_overlap(x, y))
+        }
+        (Ty::Adt(i, xs), Ty::Adt(j, ys)) => {
+            i == j && xs.iter().zip(ys).all(|(x, y)| templates_overlap(x, y))
+        }
         _ => a == b,
     }
 }
@@ -1310,12 +1678,21 @@ pub fn xir_children(e: &xir::Expr, f: &mut dyn FnMut(&xir::Expr)) {
     }
     match &e.kind {
         K::Use(p, _) | K::Borrow(p, _) | K::Drop(p) | K::Is(p, _) => place(p, f),
-        K::Unary(_, a) | K::Cast(a, _) | K::ArrayToSlice(a) | K::ArrayRepeat(a, _) | K::Loop(a, _) => f(a),
+        K::Unary(_, a)
+        | K::Cast(a, _)
+        | K::ArrayToSlice(a)
+        | K::ArrayRepeat(a, _)
+        | K::Loop(a, _) => f(a),
         K::Binary(_, a, b) => {
             f(a);
             f(b);
         }
-        K::Call(_, args) | K::Intrinsic(_, args) | K::Struct(args) | K::Tuple(args) | K::Array(args) | K::Variant(_, args) => args.iter().for_each(|a| f(a)),
+        K::Call(_, args)
+        | K::Intrinsic(_, args)
+        | K::Struct(args)
+        | K::Tuple(args)
+        | K::Array(args)
+        | K::Variant(_, args) => args.iter().for_each(|a| f(a)),
         K::Assign(p, v) | K::CompoundAssign(_, p, v) => {
             place(p, f);
             f(v);

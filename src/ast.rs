@@ -36,9 +36,22 @@ pub enum ItemKind {
     Enum(EnumDecl),
     Trait(TraitDecl),
     Impl(ImplDecl),
-    TypeAlias { name: Ident, generics: Generics, ty: TypeExpr },
-    Const { name: Ident, ty: Option<TypeExpr>, value: Expr },
-    Static { name: Ident, mutable: bool, ty: TypeExpr, value: Expr },
+    TypeAlias {
+        name: Ident,
+        generics: Generics,
+        ty: TypeExpr,
+    },
+    Const {
+        name: Ident,
+        ty: Option<TypeExpr>,
+        value: Expr,
+    },
+    Static {
+        name: Ident,
+        mutable: bool,
+        ty: TypeExpr,
+        value: Expr,
+    },
 }
 
 #[derive(Debug)]
@@ -166,31 +179,67 @@ pub struct Block {
 
 #[derive(Clone, Debug)]
 pub enum Stmt {
-    Let { pat: Pattern, ty: Option<TypeExpr>, init: Expr, span: Span },
+    Let {
+        pat: Pattern,
+        ty: Option<TypeExpr>,
+        init: Expr,
+        span: Span,
+    },
     /// The bool records whether a `;` followed the expression.
     Expr(Expr, bool),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BinOp {
-    Add, Sub, Mul, Div, Rem,
-    BitAnd, BitOr, BitXor, Shl, Shr,
-    Eq, Ne, Lt, Le, Gt, Ge,
-    And, Or,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Rem,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    And,
+    Or,
 }
 
 impl BinOp {
     pub fn symbol(self) -> &'static str {
         match self {
-            BinOp::Add => "+", BinOp::Sub => "-", BinOp::Mul => "*", BinOp::Div => "/", BinOp::Rem => "%",
-            BinOp::BitAnd => "&", BinOp::BitOr => "|", BinOp::BitXor => "^", BinOp::Shl => "<<", BinOp::Shr => ">>",
-            BinOp::Eq => "==", BinOp::Ne => "!=", BinOp::Lt => "<", BinOp::Le => "<=", BinOp::Gt => ">", BinOp::Ge => ">=",
-            BinOp::And => "&&", BinOp::Or => "||",
+            BinOp::Add => "+",
+            BinOp::Sub => "-",
+            BinOp::Mul => "*",
+            BinOp::Div => "/",
+            BinOp::Rem => "%",
+            BinOp::BitAnd => "&",
+            BinOp::BitOr => "|",
+            BinOp::BitXor => "^",
+            BinOp::Shl => "<<",
+            BinOp::Shr => ">>",
+            BinOp::Eq => "==",
+            BinOp::Ne => "!=",
+            BinOp::Lt => "<",
+            BinOp::Le => "<=",
+            BinOp::Gt => ">",
+            BinOp::Ge => ">=",
+            BinOp::And => "&&",
+            BinOp::Or => "||",
         }
     }
 
     pub fn is_comparison(self) -> bool {
-        matches!(self, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
+        matches!(
+            self,
+            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+        )
     }
 }
 

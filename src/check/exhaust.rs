@@ -45,7 +45,10 @@ fn sub_tys(ck: &Checker, ty: &Ty, c: &Ctor) -> Vec<Ty> {
         (Ty::Adt(id, args), Ctor::Variant(i)) => {
             let a = &ck.adts[*id as usize];
             if a.is_enum() {
-                a.variants[*i as usize].iter().map(|f| f.subst(args)).collect()
+                a.variants[*i as usize]
+                    .iter()
+                    .map(|f| f.subst(args))
+                    .collect()
             } else {
                 a.fields.iter().map(|f| f.subst(args)).collect()
             }
@@ -162,14 +165,22 @@ fn useful(ck: &Checker, rows: Vec<Vec<Pat>>, q: Vec<Pat>, tys: &[Ty]) -> bool {
                 }
             }
             // default matrix
-            let def: Vec<Vec<Pat>> = rows.iter().filter(|r| ctor_of(&r[0]).is_none()).map(|r| r[1..].to_vec()).collect();
+            let def: Vec<Vec<Pat>> = rows
+                .iter()
+                .filter(|r| ctor_of(&r[0]).is_none())
+                .map(|r| r[1..].to_vec())
+                .collect();
             useful(ck, def, q[1..].to_vec(), rest_tys)
         }
     }
 }
 
 pub fn check(ck: &Checker, ty: &Ty, arms: &[Arm], span: Span) -> Result<()> {
-    let rows: Vec<Vec<Pat>> = arms.iter().filter(|a| a.guard.is_none()).map(|a| vec![a.pat.clone()]).collect();
+    let rows: Vec<Vec<Pat>> = arms
+        .iter()
+        .filter(|a| a.guard.is_none())
+        .map(|a| vec![a.pat.clone()])
+        .collect();
     if !useful(ck, rows.clone(), vec![Pat::Wild], std::slice::from_ref(ty)) {
         return Ok(());
     }
@@ -187,8 +198,16 @@ pub fn check(ck: &Checker, ty: &Ty, arms: &[Arm], span: Span) -> Result<()> {
                 missing.push(match (c, base_ty(ty)) {
                     (Ctor::Variant(i), Ty::Adt(id, _)) => {
                         let a = &ck.adts[*id as usize];
-                        let n = if a.is_enum() { a.variant_name(*i).to_string() } else { a.name.clone() };
-                        if arity > 0 { format!("`{n}(..)`") } else { format!("`{n}`") }
+                        let n = if a.is_enum() {
+                            a.variant_name(*i).to_string()
+                        } else {
+                            a.name.clone()
+                        };
+                        if arity > 0 {
+                            format!("`{n}(..)`")
+                        } else {
+                            format!("`{n}`")
+                        }
                     }
                     (Ctor::Bool(b), _) => format!("`{b}`"),
                     _ => "`_`".to_string(),
@@ -196,10 +215,15 @@ pub fn check(ck: &Checker, ty: &Ty, arms: &[Arm], span: Span) -> Result<()> {
             }
         }
     }
-    let msg = if missing.is_empty() || missing.len() == all_ctors(ck, ty).map(|a| a.len()).unwrap_or(0) && missing.len() > 4 {
+    let msg = if missing.is_empty()
+        || missing.len() == all_ctors(ck, ty).map(|a| a.len()).unwrap_or(0) && missing.len() > 4
+    {
         "non-exhaustive patterns: add a `_ => ...` arm to handle the remaining values".to_string()
     } else {
-        format!("non-exhaustive patterns: {} not covered", missing.join(", "))
+        format!(
+            "non-exhaustive patterns: {} not covered",
+            missing.join(", ")
+        )
     };
     Err(Diagnostic::new(span, msg))
 }

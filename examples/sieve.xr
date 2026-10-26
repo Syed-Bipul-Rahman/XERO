@@ -1,0 +1,27 @@
+// Sieve of Eratosthenes: counts primes below 50 million.
+
+fn count_primes(limit: usize) -> usize {
+    let mut composite: Vec<bool> = Vec.with_capacity(limit)
+    for _ in 0..limit {
+        composite.push(false)
+    }
+    let flags = composite.as_mut_slice()
+    let mut count: usize = 0
+    let mut i: usize = 2
+    while i < limit {
+        if !flags[i] {
+            count += 1
+            let mut j = i * i
+            while j < limit {
+                flags[j] = true
+                j += i
+            }
+        }
+        i += 1
+    }
+    count
+}
+
+fn main() {
+    println(count_primes(50000000))
+}

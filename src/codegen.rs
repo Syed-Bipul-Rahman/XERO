@@ -11,7 +11,10 @@ use std::fmt::Write;
 use crate::ast::{BinOp, UnOp};
 use crate::check::Checker;
 use crate::types::{FloatTy, IntTy, Ty};
-use crate::xir::{self, BindMode, ConstVal, Expr, ExprKind as K, Func, Intrinsic, LocalId, Pat, Place, Program, Stmt, UseKind};
+use crate::xir::{
+    self, BindMode, ConstVal, Expr, ExprKind as K, Func, Intrinsic, LocalId, Pat, Place, Program,
+    Stmt, UseKind,
+};
 
 struct LoopCg {
     id: u32,
@@ -60,7 +63,16 @@ pub fn generate(ck: &Checker, prog: &Program, triple: &str, ptr_bits: u32) -> St
         glue_done: HashSet::new(),
         glue_queue: Vec::new(),
         intrinsics: BTreeSet::new(),
-        externs: prog.externs.iter().map(|x| (x.name.clone(), (x.params.clone(), x.ret.clone(), x.variadic))).collect(),
+        externs: prog
+            .externs
+            .iter()
+            .map(|x| {
+                (
+                    x.name.clone(),
+                    (x.params.clone(), x.ret.clone(), x.variadic),
+                )
+            })
+            .collect(),
         func: None,
         body: String::new(),
         allocas: String::new(),
@@ -78,7 +90,11 @@ fn quote(name: &str) -> String {
 }
 
 fn float_lit(v: f64, ty: FloatTy) -> String {
-    let v = if ty == FloatTy::F32 { v as f32 as f64 } else { v };
+    let v = if ty == FloatTy::F32 {
+        v as f32 as f64
+    } else {
+        v
+    };
     format!("0x{:016X}", v.to_bits())
 }
 
@@ -87,7 +103,14 @@ impl<'a> Codegen<'a> {
         for s in &prog.statics {
             let init = self.const_val(&s.init, &s.ty);
             let kw = if s.mutable { "global" } else { "constant" };
-            let _ = writeln!(self.globals, "{} = internal {} {} {}", quote(&s.name), kw, self.llty(&s.ty), init);
+            let _ = writeln!(
+                self.globals,
+                "{} = internal {} {} {}",
+                quote(&s.name),
+                kw,
+                self.llty(&s.ty),
+                init
+            );
         }
         for e in &prog.externs {
             let params: Vec<String> = e.params.iter().map(|t| self.abi_param(t)).collect();
@@ -98,7 +121,13 @@ impl<'a> Codegen<'a> {
                 }
                 ps.push_str("...");
             }
-            let _ = writeln!(self.globals, "declare {} @{}({}) nounwind", self.ret_llty(&e.ret), e.name, ps);
+            let _ = writeln!(
+                self.globals,
+                "declare {} @{}({}) nounwind",
+                self.ret_llty(&e.ret),
+                e.name,
+                ps
+            );
         }
         for f in &prog.funcs {
             self.function(f);
@@ -109,9 +138,18 @@ impl<'a> Codegen<'a> {
         if let Some((name, ret)) = &prog.entry {
             let _ = writeln!(self.out, "define i32 @main() {{");
             if *ret == Ty::Int(IntTy::I32) {
-                let _ = writeln!(self.out, "  %r = call i32 {}()\n  ret i32 %r\n}}", quote(name));
+                let _ = writeln!(
+                    self.out,
+                    "  %r = call i32 {}()\n  ret i32 %r\n}}",
+                    quote(name)
+                );
             } else {
-                let _ = writeln!(self.out, "  call {} {}()\n  ret i32 0\n}}", self.ret_llty(ret), quote(name));
+                let _ = writeln!(
+                    self.out,
+                    "  call {} {}()\n  ret i32 0\n}}",
+                    self.ret_llty(ret),
+                    quote(name)
+                );
             }
         }
         let mut m = String::new();
@@ -213,7 +251,9 @@ impl<'a> Codegen<'a> {
                 let (s, a) = self.layout(e);
                 (s * n, a)
             }
-            Ty::Tuple(ts) => self.struct_layout(&ts.iter().map(|t| self.layout(t)).collect::<Vec<_>>()),
+            Ty::Tuple(ts) => {
+                self.struct_layout(&ts.iter().map(|t| self.layout(t)).collect::<Vec<_>>())
+            }
             Ty::Adt(id, args) => {
                 if self.ck.adts[*id as usize].is_enum() {
                     let (tag, payload) = self.enum_layout(t);
@@ -258,7 +298,10 @@ impl<'a> Codegen<'a> {
     fn enum_layout(&self, t: &Ty) -> (String, Option<(u64, String)>) {
         let Ty::Adt(id, args) = t else { unreachable!() };
         let a = &self.ck.adts[*id as usize];
-        let (lo, hi) = a.discriminants.iter().fold((0i128, 0i128), |(lo, hi), d| (lo.min(*d), hi.max(*d)));
+        let (lo, hi) = a
+            .discriminants
+            .iter()
+            .fold((0i128, 0i128), |(lo, hi), d| (lo.min(*d), hi.max(*d)));
         let tag = if lo >= -128 && hi <= 127 {
             "i8"
         } else if lo >= -32768 && hi <= 32767 {
@@ -360,7 +403,8 @@ impl<'a> Codegen<'a> {
     }
 
     fn trap(&mut self) {
-        self.intrinsics.insert("declare void @llvm.trap() cold noreturn nounwind".into());
+        self.intrinsics
+            .insert("declare void @llvm.trap() cold noreturn nounwind".into());
         self.ins("call void @llvm.trap()");
         self.term("unreachable");
     }
@@ -369,14 +413,17 @@ impl<'a> Codegen<'a> {
     fn check(&mut self, cond: &str) {
         let ok = self.new_label("ok");
         let fail = self.new_label("fail");
-        self.term(&format!("br i1 {cond}, label %{ok}, label %{fail}, !prof !0"));
+        self.term(&format!(
+            "br i1 {cond}, label %{ok}, label %{fail}, !prof !0"
+        ));
         let _ = writeln!(self.body, "{fail}:");
         self.terminated = false;
         self.trap();
         let _ = writeln!(self.body, "{ok}:");
         self.terminated = false;
         if !self.globals.contains("!0 = ") {
-            self.globals.push_str("!0 = !{!\"branch_weights\", i32 2000, i32 1}\n");
+            self.globals
+                .push_str("!0 = !{!\"branch_weights\", i32 2000, i32 1}\n");
         }
     }
 
@@ -395,7 +442,11 @@ impl<'a> Codegen<'a> {
         let mut params = Vec::new();
         for (i, &p) in f.params.iter().enumerate() {
             let t = &f.locals[p as usize].ty;
-            let pty = if f.export { self.abi_param(t) } else { self.llty(t) };
+            let pty = if f.export {
+                self.abi_param(t)
+            } else {
+                self.llty(t)
+            };
             params.push(format!("{pty} %p{i}"));
         }
         for (i, l) in f.locals.iter().enumerate() {
@@ -426,7 +477,18 @@ impl<'a> Codegen<'a> {
         }
         self.scopes.pop();
         let linkage = if f.export { "" } else { "internal " };
-        let _ = writeln!(self.out, "define {}{} {}({}) nounwind {{", linkage, self.ret_llty(&f.ret), if f.export { format!("@{}", f.name) } else { quote(&f.name) }, params.join(", "));
+        let _ = writeln!(
+            self.out,
+            "define {}{} {}({}) nounwind {{",
+            linkage,
+            self.ret_llty(&f.ret),
+            if f.export {
+                format!("@{}", f.name)
+            } else {
+                quote(&f.name)
+            },
+            params.join(", ")
+        );
         let _ = writeln!(self.out, "entry:");
         self.out.push_str(&self.allocas);
         self.out.push_str(&self.body);
@@ -495,7 +557,13 @@ impl<'a> Codegen<'a> {
 
     fn drop_glue(&mut self, t: &Ty) {
         // generated as a separate function; save per-function state
-        let saved = (std::mem::take(&mut self.body), std::mem::take(&mut self.allocas), self.tmp, self.label, self.terminated);
+        let saved = (
+            std::mem::take(&mut self.body),
+            std::mem::take(&mut self.allocas),
+            self.tmp,
+            self.label,
+            self.terminated,
+        );
         self.tmp = 0;
         self.label = 0;
         self.terminated = false;
@@ -511,7 +579,9 @@ impl<'a> Codegen<'a> {
                     let ety = self.llty(t);
                     let tag_ty = self.tag_ty(t);
                     let tp = self.fresh();
-                    self.ins(&format!("{tp} = getelementptr inbounds {ety}, ptr %p, i32 0, i32 0"));
+                    self.ins(&format!(
+                        "{tp} = getelementptr inbounds {ety}, ptr %p, i32 0, i32 0"
+                    ));
                     let tag = self.fresh();
                     self.ins(&format!("{tag} = load {tag_ty}, ptr {tp}"));
                     let end = self.new_label("end");
@@ -528,7 +598,9 @@ impl<'a> Codegen<'a> {
                         self.start(&yes);
                         let vty = self.struct_llty(fields);
                         let pp = self.fresh();
-                        self.ins(&format!("{pp} = getelementptr inbounds {ety}, ptr %p, i32 0, i32 1"));
+                        self.ins(&format!(
+                            "{pp} = getelementptr inbounds {ety}, ptr %p, i32 0, i32 1"
+                        ));
                         for (fi, ft) in fields.iter().enumerate() {
                             if self.needs_drop(ft) {
                                 let fp = self.fresh();
@@ -565,7 +637,9 @@ impl<'a> Codegen<'a> {
                 self.term(&format!("br i1 {c}, label %{bodyl}, label %{end}"));
                 self.start(&bodyl);
                 let ep = self.fresh();
-                self.ins(&format!("{ep} = getelementptr inbounds {aty}, ptr %p, {us} 0, {us} {iv}"));
+                self.ins(&format!(
+                    "{ep} = getelementptr inbounds {aty}, ptr %p, {us} 0, {us} {iv}"
+                ));
                 self.drop_at(&ep, e);
                 let nx = self.fresh();
                 self.ins(&format!("{nx} = add {us} {iv}, 1"));
@@ -579,11 +653,20 @@ impl<'a> Codegen<'a> {
             self.term("ret void");
         }
         let name = self.glue_name(t);
-        let _ = writeln!(self.out, "define internal void {name}(ptr %p) nounwind {{\nentry:");
+        let _ = writeln!(
+            self.out,
+            "define internal void {name}(ptr %p) nounwind {{\nentry:"
+        );
         self.out.push_str(&self.allocas);
         self.out.push_str(&self.body);
         let _ = writeln!(self.out, "}}\n");
-        (self.body, self.allocas, self.tmp, self.label, self.terminated) = saved;
+        (
+            self.body,
+            self.allocas,
+            self.tmp,
+            self.label,
+            self.terminated,
+        ) = saved;
     }
 
     fn drop_fields(&mut self, t: &Ty, fields: &[Ty]) {
@@ -591,7 +674,9 @@ impl<'a> Codegen<'a> {
         for (i, ft) in fields.iter().enumerate() {
             if self.needs_drop(ft) {
                 let fp = self.fresh();
-                self.ins(&format!("{fp} = getelementptr inbounds {sty}, ptr %p, i32 0, i32 {i}"));
+                self.ins(&format!(
+                    "{fp} = getelementptr inbounds {sty}, ptr %p, i32 0, i32 {i}"
+                ));
                 self.drop_at(&fp, ft);
             }
         }
@@ -642,10 +727,14 @@ impl<'a> Codegen<'a> {
             Place::Static(name, _) => PlacePtr::Thin(quote(name)),
             Place::Field(b, i) => {
                 let bt = self.place_ty_ctx(b);
-                let PlacePtr::Thin(bp) = self.place_ptr(b) else { unreachable!() };
+                let PlacePtr::Thin(bp) = self.place_ptr(b) else {
+                    unreachable!()
+                };
                 let r = self.fresh();
                 let sty = self.llty(&bt);
-                self.ins(&format!("{r} = getelementptr inbounds {sty}, ptr {bp}, i32 0, i32 {i}"));
+                self.ins(&format!(
+                    "{r} = getelementptr inbounds {sty}, ptr {bp}, i32 0, i32 {i}"
+                ));
                 PlacePtr::Thin(r)
             }
             Place::Index(b, idx) => {
@@ -661,7 +750,9 @@ impl<'a> Codegen<'a> {
                         let r = self.fresh();
                         let aty = self.llty(&bt);
                         let _ = e;
-                        self.ins(&format!("{r} = getelementptr inbounds {aty}, ptr {bp}, {us} 0, {us} {iv}"));
+                        self.ins(&format!(
+                            "{r} = getelementptr inbounds {aty}, ptr {bp}, {us} 0, {us} {iv}"
+                        ));
                         PlacePtr::Thin(r)
                     }
                     (Ty::Slice(e), PlacePtr::Fat(fv)) => {
@@ -675,7 +766,9 @@ impl<'a> Codegen<'a> {
                         self.check(&c);
                         let r = self.fresh();
                         let ety = self.llty(e);
-                        self.ins(&format!("{r} = getelementptr inbounds {ety}, ptr {data}, {us} {iv}"));
+                        self.ins(&format!(
+                            "{r} = getelementptr inbounds {ety}, ptr {data}, {us} {iv}"
+                        ));
                         PlacePtr::Thin(r)
                     }
                     _ => unreachable!("bad index base"),
@@ -711,13 +804,19 @@ impl<'a> Codegen<'a> {
                     Ty::Tuple(ts) => ts.clone(),
                     _ => Vec::new(),
                 };
-                if fields.iter().enumerate().any(|(j, f)| j as u32 != *i && self.needs_drop(f)) {
+                if fields
+                    .iter()
+                    .enumerate()
+                    .any(|(j, f)| j as u32 != *i && self.needs_drop(f))
+                {
                     let bp = self.thin(b);
                     let sty = self.llty(&bt);
                     for (j, f) in fields.iter().enumerate() {
                         if j as u32 != *i && self.needs_drop(f) {
                             let fp = self.fresh();
-                            self.ins(&format!("{fp} = getelementptr inbounds {sty}, ptr {bp}, i32 0, i32 {j}"));
+                            self.ins(&format!(
+                                "{fp} = getelementptr inbounds {sty}, ptr {bp}, i32 0, i32 {j}"
+                            ));
                             self.drop_at(&fp, f);
                         }
                     }
@@ -807,7 +906,11 @@ impl<'a> Codegen<'a> {
                     let v = self.expr(a);
                     vals.push(format!("{} {}", self.llty(&a.ty), v));
                 }
-                let callee = if self.is_extern_name(name) { format!("@{name}") } else { quote(name) };
+                let callee = if self.is_extern_name(name) {
+                    format!("@{name}")
+                } else {
+                    quote(name)
+                };
                 let rt = self.ret_llty(&e.ty);
                 let variadic = self.extern_sig(name);
                 let call_ty = match variadic {
@@ -823,7 +926,10 @@ impl<'a> Codegen<'a> {
                     self.unit()
                 } else {
                     let r = self.fresh();
-                    self.ins(&format!("{r} = call {call_ty} {callee}({})", vals.join(", ")));
+                    self.ins(&format!(
+                        "{r} = call {call_ty} {callee}({})",
+                        vals.join(", ")
+                    ));
                     r
                 }
             }
@@ -893,7 +999,9 @@ impl<'a> Codegen<'a> {
                 self.term(&format!("br i1 {c}, label %{body}, label %{end}"));
                 self.start(&body);
                 let ep = self.fresh();
-                self.ins(&format!("{ep} = getelementptr inbounds {lt}, ptr {arr}, {us} 0, {us} {iv}"));
+                self.ins(&format!(
+                    "{ep} = getelementptr inbounds {lt}, ptr {arr}, {us} 0, {us} {iv}"
+                ));
                 self.ins(&format!("store {et} {v}, ptr {ep}"));
                 let nx = self.fresh();
                 self.ins(&format!("{nx} = add {us} {iv}, 1"));
@@ -906,21 +1014,32 @@ impl<'a> Codegen<'a> {
             }
             K::Variant(idx, fields) => {
                 let lt = self.llty(&e.ty);
-                let vals: Vec<(String, Ty)> = fields.iter().map(|f| (self.expr(f), f.ty.clone())).collect();
+                let vals: Vec<(String, Ty)> = fields
+                    .iter()
+                    .map(|f| (self.expr(f), f.ty.clone()))
+                    .collect();
                 let tmp = self.alloca(&lt);
-                let Ty::Adt(id, _) = &e.ty else { unreachable!() };
+                let Ty::Adt(id, _) = &e.ty else {
+                    unreachable!()
+                };
                 let disc = self.ck.adts[*id as usize].discriminants[*idx as usize];
                 let tag_ty = self.tag_ty(&e.ty);
                 let tp = self.fresh();
-                self.ins(&format!("{tp} = getelementptr inbounds {lt}, ptr {tmp}, i32 0, i32 0"));
+                self.ins(&format!(
+                    "{tp} = getelementptr inbounds {lt}, ptr {tmp}, i32 0, i32 0"
+                ));
                 self.ins(&format!("store {tag_ty} {disc}, ptr {tp}"));
                 if !vals.is_empty() {
                     let vty = self.variant_llty(&e.ty, *idx);
                     let pp = self.fresh();
-                    self.ins(&format!("{pp} = getelementptr inbounds {lt}, ptr {tmp}, i32 0, i32 1"));
+                    self.ins(&format!(
+                        "{pp} = getelementptr inbounds {lt}, ptr {tmp}, i32 0, i32 1"
+                    ));
                     for (i, (v, t)) in vals.iter().enumerate() {
                         let fp = self.fresh();
-                        self.ins(&format!("{fp} = getelementptr inbounds {vty}, ptr {pp}, i32 0, i32 {i}"));
+                        self.ins(&format!(
+                            "{fp} = getelementptr inbounds {vty}, ptr {pp}, i32 0, i32 {i}"
+                        ));
                         let ft = self.llty(t);
                         self.ins(&format!("store {ft} {v}, ptr {fp}"));
                     }
@@ -967,7 +1086,11 @@ impl<'a> Codegen<'a> {
                 let else_l = self.new_label("else");
                 let end_l = self.new_label("endif");
                 let has_val = !(e.ty.is_unit() || e.ty.is_never());
-                let slot = if has_val { Some(self.alloca(&self.llty(&e.ty))) } else { None };
+                let slot = if has_val {
+                    Some(self.alloca(&self.llty(&e.ty)))
+                } else {
+                    None
+                };
                 self.term(&format!("br i1 {cv}, label %{then_l}, label %{else_l}"));
                 self.start(&then_l);
                 let tv = self.expr(t);
@@ -1004,8 +1127,18 @@ impl<'a> Codegen<'a> {
                 let head = self.new_label("loop");
                 let exit = self.new_label("endloop");
                 let has_val = !(e.ty.is_unit() || e.ty.is_never());
-                let slot = if has_val { Some(self.alloca(&self.llty(&e.ty))) } else { None };
-                self.loops.push(LoopCg { id: *id, head: head.clone(), exit: exit.clone(), depth: self.scopes.len(), slot: slot.clone() });
+                let slot = if has_val {
+                    Some(self.alloca(&self.llty(&e.ty)))
+                } else {
+                    None
+                };
+                self.loops.push(LoopCg {
+                    id: *id,
+                    head: head.clone(),
+                    exit: exit.clone(),
+                    depth: self.scopes.len(),
+                    slot: slot.clone(),
+                });
                 self.start(&head);
                 self.expr(body);
                 if !self.terminated {
@@ -1123,7 +1256,13 @@ impl<'a> Codegen<'a> {
                 let _ = write!(lit, "\\{b:02X}");
             }
         }
-        let _ = writeln!(self.globals, "{name} = private unnamed_addr constant [{} x i8] c\"{}\"", s.len(), lit);
+        // a hidden NUL terminator makes every literal a valid C string too
+        let _ = writeln!(
+            self.globals,
+            "{name} = private unnamed_addr constant [{} x i8] c\"{}\\00\"",
+            s.len() + 1,
+            lit
+        );
         self.strings.insert(s.to_vec(), name.clone());
         name
     }
@@ -1154,7 +1293,10 @@ impl<'a> Codegen<'a> {
                 }
                 Stmt::Expr(x) => {
                     let v = self.expr(x);
-                    if !self.terminated && self.needs_drop(&x.ty) && !matches!(x.kind, K::Use(_, UseKind::Copy)) {
+                    if !self.terminated
+                        && self.needs_drop(&x.ty)
+                        && !matches!(x.kind, K::Use(_, UseKind::Copy))
+                    {
                         let lt = self.llty(&x.ty);
                         let tmp = self.alloca(&lt);
                         self.ins(&format!("store {lt} {v}, ptr {tmp}"));
@@ -1206,7 +1348,14 @@ impl<'a> Codegen<'a> {
         if op.is_comparison() {
             return self.compare(op, &l, &r, &a.ty);
         }
-        self.arith(op, &l, &r, ty, &b.ty, matches!(b.kind, K::Int(n) if n != 0 && n != -1))
+        self.arith(
+            op,
+            &l,
+            &r,
+            ty,
+            &b.ty,
+            matches!(b.kind, K::Int(n) if n != 0 && n != -1),
+        )
     }
 
     fn compare(&mut self, op: BinOp, l: &str, r: &str, ty: &Ty) -> String {
@@ -1240,10 +1389,34 @@ impl<'a> Codegen<'a> {
                 let pred = match op {
                     BinOp::Eq => "eq",
                     BinOp::Ne => "ne",
-                    BinOp::Lt => if signed { "slt" } else { "ult" },
-                    BinOp::Le => if signed { "sle" } else { "ule" },
-                    BinOp::Gt => if signed { "sgt" } else { "ugt" },
-                    _ => if signed { "sge" } else { "uge" },
+                    BinOp::Lt => {
+                        if signed {
+                            "slt"
+                        } else {
+                            "ult"
+                        }
+                    }
+                    BinOp::Le => {
+                        if signed {
+                            "sle"
+                        } else {
+                            "ule"
+                        }
+                    }
+                    BinOp::Gt => {
+                        if signed {
+                            "sgt"
+                        } else {
+                            "ugt"
+                        }
+                    }
+                    _ => {
+                        if signed {
+                            "sge"
+                        } else {
+                            "uge"
+                        }
+                    }
                 };
                 let t = self.llty(ty);
                 self.ins(&format!("{res} = icmp {pred} {t} {l}, {r}"));
@@ -1254,7 +1427,15 @@ impl<'a> Codegen<'a> {
 
     /// Integer arithmetic wraps (two's complement); division by zero and
     /// `MIN / -1` trap; shift amounts are masked to the bit width.
-    fn arith(&mut self, op: BinOp, l: &str, r: &str, ty: &Ty, rty: &Ty, divisor_safe: bool) -> String {
+    fn arith(
+        &mut self,
+        op: BinOp,
+        l: &str,
+        r: &str,
+        ty: &Ty,
+        rty: &Ty,
+        divisor_safe: bool,
+    ) -> String {
         let t = self.llty(ty);
         let res = self.fresh();
         match ty {
@@ -1275,7 +1456,13 @@ impl<'a> Codegen<'a> {
                     let c = self.fresh();
                     let signed = matches!(rty, Ty::Int(it) if it.signed());
                     let (rb, ub) = (rty_bits(rty, self.ptr_bits), self.ptr_bits);
-                    let ins = if rb > ub { "trunc" } else if signed { "sext" } else { "zext" };
+                    let ins = if rb > ub {
+                        "trunc"
+                    } else if signed {
+                        "sext"
+                    } else {
+                        "zext"
+                    };
                     self.ins(&format!("{c} = {ins} {rt} {r} to {us}"));
                     c
                 } else {
@@ -1288,7 +1475,12 @@ impl<'a> Codegen<'a> {
                 } else {
                     off
                 };
-                let et = if inner.is_unsized() || matches!(**inner, Ty::Tuple(ref v) if v.is_empty()) { "i8".to_string() } else { self.llty(inner) };
+                let et =
+                    if inner.is_unsized() || matches!(**inner, Ty::Tuple(ref v) if v.is_empty()) {
+                        "i8".to_string()
+                    } else {
+                        self.llty(inner)
+                    };
                 self.ins(&format!("{res} = getelementptr {et}, ptr {l}, {us} {off}"));
             }
             Ty::Bool => {
@@ -1380,7 +1572,13 @@ impl<'a> Codegen<'a> {
                 if fb == tb {
                     return v;
                 }
-                let ins = if fb > tb { "trunc" } else if fi.signed() { "sext" } else { "zext" };
+                let ins = if fb > tb {
+                    "trunc"
+                } else if fi.signed() {
+                    "sext"
+                } else {
+                    "zext"
+                };
                 self.ins(&format!("{r} = {ins} {ft} {v} to {tt}"));
             }
             (Ty::Bool, Ty::Int(_)) => self.ins(&format!("{r} = zext i1 {v} to {tt}")),
@@ -1389,12 +1587,22 @@ impl<'a> Codegen<'a> {
                 self.ins(&format!("{r} = {ins} {ft} {v} to {tt}"));
             }
             (Ty::Float(_), Ty::Int(ti)) => {
-                let name = format!("llvm.fpto{}i.sat.{}.{}", if ti.signed() { "s" } else { "u" }, tt, if ft == "float" { "f32" } else { "f64" });
-                self.intrinsics.insert(format!("declare {tt} @{name}({ft}) nounwind readnone"));
+                let name = format!(
+                    "llvm.fpto{}i.sat.{}.{}",
+                    if ti.signed() { "s" } else { "u" },
+                    tt,
+                    if ft == "float" { "f32" } else { "f64" }
+                );
+                self.intrinsics
+                    .insert(format!("declare {tt} @{name}({ft}) nounwind readnone"));
                 self.ins(&format!("{r} = call {tt} @{name}({ft} {v})"));
             }
-            (Ty::Float(FloatTy::F32), Ty::Float(FloatTy::F64)) => self.ins(&format!("{r} = fpext float {v} to double")),
-            (Ty::Float(FloatTy::F64), Ty::Float(FloatTy::F32)) => self.ins(&format!("{r} = fptrunc double {v} to float")),
+            (Ty::Float(FloatTy::F32), Ty::Float(FloatTy::F64)) => {
+                self.ins(&format!("{r} = fpext float {v} to double"))
+            }
+            (Ty::Float(FloatTy::F64), Ty::Float(FloatTy::F32)) => {
+                self.ins(&format!("{r} = fptrunc double {v} to float"))
+            }
             (Ty::Ptr(_) | Ty::Ref(..), Ty::Ptr(_)) => return v,
             (Ty::Ptr(_), Ty::Int(_)) => self.ins(&format!("{r} = ptrtoint ptr {v} to {tt}")),
             (Ty::Int(_), Ty::Ptr(_)) => self.ins(&format!("{r} = inttoptr {ft} {v} to ptr")),
@@ -1424,8 +1632,13 @@ impl<'a> Codegen<'a> {
                 "poison".into()
             }
             Intrinsic::Asm(s) => {
-                let esc = s.replace('\\', "\\5C").replace('"', "\\22").replace('\n', "\\0A");
-                self.ins(&format!("call void asm sideeffect \"{esc}\", \"~{{memory}}\"()"));
+                let esc = s
+                    .replace('\\', "\\5C")
+                    .replace('"', "\\22")
+                    .replace('\n', "\\0A");
+                self.ins(&format!(
+                    "call void asm sideeffect \"{esc}\", \"~{{memory}}\"()"
+                ));
                 self.unit()
             }
             Intrinsic::MakeFat => {
@@ -1451,18 +1664,28 @@ impl<'a> Codegen<'a> {
                 self.ins(&format!("{r} = extractvalue {lt} {v}, 1"));
                 r
             }
-            Intrinsic::PtrRead => {
+            Intrinsic::PtrRead | Intrinsic::VolatileLoad => {
                 let p = self.expr(&args[0]);
                 let lt = self.llty(ty);
                 let r = self.fresh();
-                self.ins(&format!("{r} = load {lt}, ptr {p}"));
+                let vol = if matches!(i, Intrinsic::VolatileLoad) {
+                    "volatile "
+                } else {
+                    ""
+                };
+                self.ins(&format!("{r} = load {vol}{lt}, ptr {p}"));
                 r
             }
-            Intrinsic::PtrWrite => {
+            Intrinsic::PtrWrite | Intrinsic::VolatileStore => {
                 let p = self.expr(&args[0]);
                 let v = self.expr(&args[1]);
                 let lt = self.llty(&args[1].ty);
-                self.ins(&format!("store {lt} {v}, ptr {p}"));
+                let vol = if matches!(i, Intrinsic::VolatileStore) {
+                    "volatile "
+                } else {
+                    ""
+                };
+                self.ins(&format!("store {vol}{lt} {v}, ptr {p}"));
                 self.unit()
             }
             Intrinsic::DropInPlace(t) => {
@@ -1491,7 +1714,11 @@ impl<'a> Codegen<'a> {
         let sty = self.place_ty_ctx(p);
         let ptr = self.thin(p);
         let has_val = !(ty.is_unit() || ty.is_never());
-        let slot = if has_val { Some(self.alloca(&self.llty(ty))) } else { None };
+        let slot = if has_val {
+            Some(self.alloca(&self.llty(ty)))
+        } else {
+            None
+        };
         let end = self.new_label("endmatch");
         for arm in arms {
             let next = self.new_label("arm");
@@ -1542,7 +1769,9 @@ impl<'a> Codegen<'a> {
     fn pat_moves(&self, p: &Pat) -> bool {
         match p {
             Pat::Bind(id, BindMode::Value) => !self.ck.is_copy(&self.local_ty(*id)),
-            Pat::Tuple(ps) | Pat::Variant(_, ps) | Pat::Or(ps) => ps.iter().any(|p| self.pat_moves(p)),
+            Pat::Tuple(ps) | Pat::Variant(_, ps) | Pat::Or(ps) => {
+                ps.iter().any(|p| self.pat_moves(p))
+            }
             _ => false,
         }
     }
@@ -1572,9 +1801,15 @@ impl<'a> Codegen<'a> {
                 let x = self.fresh();
                 self.ins(&format!("{x} = load {t}, ptr {ptr}"));
                 let a = self.fresh();
-                self.ins(&format!("{a} = icmp {} {t} {x}, {lo}", if signed { "sge" } else { "uge" }));
+                self.ins(&format!(
+                    "{a} = icmp {} {t} {x}, {lo}",
+                    if signed { "sge" } else { "uge" }
+                ));
                 let b = self.fresh();
-                self.ins(&format!("{b} = icmp {} {t} {x}, {hi}", if signed { "sle" } else { "ule" }));
+                self.ins(&format!(
+                    "{b} = icmp {} {t} {x}, {hi}",
+                    if signed { "sle" } else { "ule" }
+                ));
                 let c = self.fresh();
                 self.ins(&format!("{c} = and i1 {a}, {b}"));
                 self.cond_br(&c, fail);
@@ -1587,19 +1822,25 @@ impl<'a> Codegen<'a> {
                         continue;
                     }
                     let fp = self.fresh();
-                    self.ins(&format!("{fp} = getelementptr inbounds {lt}, ptr {ptr}, i32 0, i32 {i}"));
+                    self.ins(&format!(
+                        "{fp} = getelementptr inbounds {lt}, ptr {ptr}, i32 0, i32 {i}"
+                    ));
                     self.pat_test(p, &fp, t, fail);
                 }
             }
             Pat::Variant(idx, ps) => {
-                let Ty::Adt(id, args) = ty else { unreachable!() };
+                let Ty::Adt(id, args) = ty else {
+                    unreachable!()
+                };
                 let a = &self.ck.adts[*id as usize];
                 let lt = self.llty(ty);
                 if a.is_enum() {
                     let disc = a.discriminants[*idx as usize];
                     let tag_ty = self.tag_ty(ty);
                     let tp = self.fresh();
-                    self.ins(&format!("{tp} = getelementptr inbounds {lt}, ptr {ptr}, i32 0, i32 0"));
+                    self.ins(&format!(
+                        "{tp} = getelementptr inbounds {lt}, ptr {ptr}, i32 0, i32 0"
+                    ));
                     let tag = self.fresh();
                     self.ins(&format!("{tag} = load {tag_ty}, ptr {tp}"));
                     let c = self.fresh();
@@ -1609,13 +1850,17 @@ impl<'a> Codegen<'a> {
                         let fields = self.ck.enum_variants(*id, args)[*idx as usize].clone();
                         let vty = self.struct_llty(&fields);
                         let pp = self.fresh();
-                        self.ins(&format!("{pp} = getelementptr inbounds {lt}, ptr {ptr}, i32 0, i32 1"));
+                        self.ins(&format!(
+                            "{pp} = getelementptr inbounds {lt}, ptr {ptr}, i32 0, i32 1"
+                        ));
                         for (i, (p, t)) in ps.iter().zip(&fields).enumerate() {
                             if matches!(p, Pat::Wild | Pat::Bind(..)) {
                                 continue;
                             }
                             let fp = self.fresh();
-                            self.ins(&format!("{fp} = getelementptr inbounds {vty}, ptr {pp}, i32 0, i32 {i}"));
+                            self.ins(&format!(
+                                "{fp} = getelementptr inbounds {vty}, ptr {pp}, i32 0, i32 {i}"
+                            ));
                             self.pat_test(p, &fp, t, fail);
                         }
                     }
@@ -1626,7 +1871,9 @@ impl<'a> Codegen<'a> {
                             continue;
                         }
                         let fp = self.fresh();
-                        self.ins(&format!("{fp} = getelementptr inbounds {lt}, ptr {ptr}, i32 0, i32 {i}"));
+                        self.ins(&format!(
+                            "{fp} = getelementptr inbounds {lt}, ptr {ptr}, i32 0, i32 {i}"
+                        ));
                         self.pat_test(p, &fp, t, fail);
                     }
                 }
@@ -1634,7 +1881,11 @@ impl<'a> Codegen<'a> {
             Pat::Or(alts) => {
                 let ok = self.new_label("or_ok");
                 for (i, alt) in alts.iter().enumerate() {
-                    let next = if i + 1 == alts.len() { fail.to_string() } else { self.new_label("or_next") };
+                    let next = if i + 1 == alts.len() {
+                        fail.to_string()
+                    } else {
+                        self.new_label("or_next")
+                    };
                     self.pat_test(alt, ptr, ty, &next);
                     self.br(&ok);
                     if i + 1 != alts.len() {
@@ -1681,7 +1932,9 @@ impl<'a> Codegen<'a> {
                         continue;
                     }
                     let fp = self.fresh();
-                    self.ins(&format!("{fp} = getelementptr inbounds {lt}, ptr {ptr}, i32 0, i32 {i}"));
+                    self.ins(&format!(
+                        "{fp} = getelementptr inbounds {lt}, ptr {ptr}, i32 0, i32 {i}"
+                    ));
                     self.pat_bind(p, &fp, t);
                 }
             }
@@ -1689,12 +1942,16 @@ impl<'a> Codegen<'a> {
                 if !ps.iter().any(pat_has_binds) {
                     return;
                 }
-                let Ty::Adt(id, args) = ty else { unreachable!() };
+                let Ty::Adt(id, args) = ty else {
+                    unreachable!()
+                };
                 let lt = self.llty(ty);
                 let (base, fields, sty) = if self.ck.adts[*id as usize].is_enum() {
                     let fields = self.ck.enum_variants(*id, args)[*idx as usize].clone();
                     let pp = self.fresh();
-                    self.ins(&format!("{pp} = getelementptr inbounds {lt}, ptr {ptr}, i32 0, i32 1"));
+                    self.ins(&format!(
+                        "{pp} = getelementptr inbounds {lt}, ptr {ptr}, i32 0, i32 1"
+                    ));
                     let vty = self.struct_llty(&fields);
                     (pp, fields, vty)
                 } else {
@@ -1705,7 +1962,9 @@ impl<'a> Codegen<'a> {
                         continue;
                     }
                     let fp = self.fresh();
-                    self.ins(&format!("{fp} = getelementptr inbounds {sty}, ptr {base}, i32 0, i32 {i}"));
+                    self.ins(&format!(
+                        "{fp} = getelementptr inbounds {sty}, ptr {base}, i32 0, i32 {i}"
+                    ));
                     self.pat_bind(p, &fp, t);
                 }
             }
@@ -1738,7 +1997,9 @@ impl<'a> Codegen<'a> {
                         continue;
                     }
                     let fp = self.fresh();
-                    self.ins(&format!("{fp} = getelementptr inbounds {lt}, ptr {ptr}, i32 0, i32 {i}"));
+                    self.ins(&format!(
+                        "{fp} = getelementptr inbounds {lt}, ptr {ptr}, i32 0, i32 {i}"
+                    ));
                     self.drop_unbound(p, &fp, t);
                 }
             }
@@ -1751,7 +2012,9 @@ impl<'a> Codegen<'a> {
                 let (base, fields, sty) = if self.ck.adts[*id as usize].is_enum() {
                     let fields = self.ck.enum_variants(*id, args)[*idx as usize].clone();
                     let pp = self.fresh();
-                    self.ins(&format!("{pp} = getelementptr inbounds {lt}, ptr {ptr}, i32 0, i32 1"));
+                    self.ins(&format!(
+                        "{pp} = getelementptr inbounds {lt}, ptr {ptr}, i32 0, i32 1"
+                    ));
                     let vty = self.struct_llty(&fields);
                     (pp, fields, vty)
                 } else {
@@ -1762,7 +2025,9 @@ impl<'a> Codegen<'a> {
                         continue;
                     }
                     let fp = self.fresh();
-                    self.ins(&format!("{fp} = getelementptr inbounds {sty}, ptr {base}, i32 0, i32 {i}"));
+                    self.ins(&format!(
+                        "{fp} = getelementptr inbounds {sty}, ptr {base}, i32 0, i32 {i}"
+                    ));
                     self.drop_unbound(p, &fp, t);
                 }
             }
@@ -1785,7 +2050,10 @@ impl<'a> Codegen<'a> {
             }
             (ConstVal::Array(items), Ty::Array(et, _)) => {
                 let et_l = self.llty(et);
-                let parts: Vec<String> = items.iter().map(|i| format!("{et_l} {}", self.const_val(i, et))).collect();
+                let parts: Vec<String> = items
+                    .iter()
+                    .map(|i| format!("{et_l} {}", self.const_val(i, et)))
+                    .collect();
                 format!("[{}]", parts.join(", "))
             }
             (ConstVal::Repeat(item, n), Ty::Array(et, _)) => {
@@ -1801,7 +2069,11 @@ impl<'a> Codegen<'a> {
                 if items.is_empty() {
                     return "zeroinitializer".into();
                 }
-                let parts: Vec<String> = items.iter().zip(ts).map(|(i, t)| format!("{} {}", self.llty(t), self.const_val(i, t))).collect();
+                let parts: Vec<String> = items
+                    .iter()
+                    .zip(ts)
+                    .map(|(i, t)| format!("{} {}", self.llty(t), self.const_val(i, t)))
+                    .collect();
                 format!("{{ {} }}", parts.join(", "))
             }
             _ => "zeroinitializer".into(),
@@ -1824,4 +2096,3 @@ fn pat_has_binds(p: &Pat) -> bool {
         _ => false,
     }
 }
-

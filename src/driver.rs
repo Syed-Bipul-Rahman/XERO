@@ -60,12 +60,20 @@ impl Frontend {
             out.push('\n');
         }
         let n = ds.len();
-        out.push_str(&format!("error: could not compile due to {} previous error{}\n", n, if n == 1 { "" } else { "s" }));
+        out.push_str(&format!(
+            "error: could not compile due to {} previous error{}\n",
+            n,
+            if n == 1 { "" } else { "s" }
+        ));
         out
     }
 }
 
-fn parse_file(sm: &mut SourceMap, path: String, text: String) -> Result<crate::ast::Module, Diagnostic> {
+fn parse_file(
+    sm: &mut SourceMap,
+    path: String,
+    text: String,
+) -> Result<crate::ast::Module, Diagnostic> {
     let file = sm.add(path, text);
     let toks = crate::lexer::lex(file, &sm.file(file).text)?;
     crate::parser::parse_module(file, toks)
@@ -73,38 +81,67 @@ fn parse_file(sm: &mut SourceMap, path: String, text: String) -> Result<crate::a
 
 /// Load the root file and everything it (transitively) imports.
 pub fn load(fe: &mut Frontend, root: &Path) -> Result<(Vec<ParsedModule>, usize), FrontendError> {
-    let text = std::fs::read_to_string(root).map_err(|e| FrontendError::Io(format!("cannot read `{}`: {e}", root.display())))?;
+    let text = std::fs::read_to_string(root)
+        .map_err(|e| FrontendError::Io(format!("cannot read `{}`: {e}", root.display())))?;
     let root_dir = root.parent().map(|p| p.to_path_buf()).unwrap_or_default();
-    let ast = parse_file(&mut fe.sm, root.display().to_string(), text).map_err(|d| FrontendError::Diags(vec![d]))?;
-    let root_name = ast.name.as_ref().map(|n| n.name.clone()).unwrap_or_else(|| "main".into());
-    let mut modules = vec![ParsedModule { path: root_name.clone(), ast, is_std: false }];
+    let ast = parse_file(&mut fe.sm, root.display().to_string(), text)
+        .map_err(|d| FrontendError::Diags(vec![d]))?;
+    let root_name = ast
+        .name
+        .as_ref()
+        .map(|n| n.name.clone())
+        .unwrap_or_else(|| "main".into());
+    let mut modules = vec![ParsedModule {
+        path: root_name.clone(),
+        ast,
+        is_std: false,
+    }];
     let mut seen: HashSet<String> = HashSet::new();
     seen.insert(root_name);
     let mut queue: VecDeque<usize> = VecDeque::from([0]);
-    let mut want = |name: &str, span: Span, modules: &mut Vec<ParsedModule>, queue: &mut VecDeque<usize>, sm: &mut SourceMap| -> Result<(), Diagnostic> {
+    let mut want = |name: &str,
+                    span: Span,
+                    modules: &mut Vec<ParsedModule>,
+                    queue: &mut VecDeque<usize>,
+                    sm: &mut SourceMap|
+     -> Result<(), Diagnostic> {
         if !seen.insert(name.to_string()) {
             return Ok(());
         }
-        let (path, text, is_std) = if let Some((_, src)) = STD_MODULES.iter().find(|(n, _)| *n == name) {
-            (format!("<{name}>"), src.to_string(), true)
-        } else if name.starts_with("std.") {
-            return Err(Diagnostic::new(span, format!("unknown standard library module `{name}`")));
-        } else {
-            let mut p = root_dir.clone();
-            for seg in name.split('.') {
-                p.push(seg);
-            }
-            p.set_extension("xr");
-            let text = std::fs::read_to_string(&p).map_err(|_| Diagnostic::new(span, format!("module `{name}` not found (looked for `{}`)", p.display())))?;
-            (p.display().to_string(), text, false)
-        };
+        let (path, text, is_std) =
+            if let Some((_, src)) = STD_MODULES.iter().find(|(n, _)| *n == name) {
+                (format!("<{name}>"), src.to_string(), true)
+            } else if name.starts_with("std.") {
+                return Err(Diagnostic::new(
+                    span,
+                    format!("unknown standard library module `{name}`"),
+                ));
+            } else {
+                let mut p = root_dir.clone();
+                for seg in name.split('.') {
+                    p.push(seg);
+                }
+                p.set_extension("xr");
+                let text = std::fs::read_to_string(&p).map_err(|_| {
+                    Diagnostic::new(
+                        span,
+                        format!("module `{name}` not found (looked for `{}`)", p.display()),
+                    )
+                })?;
+                (p.display().to_string(), text, false)
+            };
         let ast = parse_file(sm, path, text)?;
-        modules.push(ParsedModule { path: name.to_string(), ast, is_std });
+        modules.push(ParsedModule {
+            path: name.to_string(),
+            ast,
+            is_std,
+        });
         queue.push_back(modules.len() - 1);
         Ok(())
     };
     for m in ["std.prelude", "std.mem", "std.vec", "std.string"] {
-        want(m, Span::default(), &mut modules, &mut queue, &mut fe.sm).map_err(|d| FrontendError::Diags(vec![d]))?;
+        want(m, Span::default(), &mut modules, &mut queue, &mut fe.sm)
+            .map_err(|d| FrontendError::Diags(vec![d]))?;
     }
     while let Some(i) = queue.pop_front() {
         let imports: Vec<(String, Span)> = modules[i]
@@ -112,23 +149,42 @@ pub fn load(fe: &mut Frontend, root: &Path) -> Result<(Vec<ParsedModule>, usize)
             .items
             .iter()
             .filter_map(|it| match &it.kind {
-                crate::ast::ItemKind::Import(imp) => Some((imp.path.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join("."), it.span)),
+                crate::ast::ItemKind::Import(imp) => Some((
+                    imp.path
+                        .iter()
+                        .map(|s| s.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join("."),
+                    it.span,
+                )),
                 _ => None,
             })
             .collect();
         for (name, span) in imports {
-            want(&name, span, &mut modules, &mut queue, &mut fe.sm).map_err(|d| FrontendError::Diags(vec![d]))?;
+            want(&name, span, &mut modules, &mut queue, &mut fe.sm)
+                .map_err(|d| FrontendError::Diags(vec![d]))?;
         }
     }
     Ok((modules, 0))
 }
 
 /// Run the front end and produce LLVM IR.
-pub fn compile_to_llvm(fe: &mut Frontend, opts: &Options) -> Result<(String, String), FrontendError> {
+pub fn compile_to_llvm(
+    fe: &mut Frontend,
+    opts: &Options,
+) -> Result<(String, String), FrontendError> {
     let (modules, root) = load(fe, &opts.input)?;
-    let ck = Checker::new(Target { ptr_bits: opts.target.ptr_bits });
-    let (prog, ck) = ck.run(modules, root, opts.lib).map_err(FrontendError::Diags)?;
-    let xir_dump = if opts.emit == Emit::Xir { format!("{:#?}", prog) } else { String::new() };
+    let ck = Checker::new(Target {
+        ptr_bits: opts.target.ptr_bits,
+    });
+    let (prog, ck) = ck
+        .run(modules, root, opts.lib)
+        .map_err(FrontendError::Diags)?;
+    let xir_dump = if opts.emit == Emit::Xir {
+        format!("{:#?}", prog)
+    } else {
+        String::new()
+    };
     let ll = crate::codegen::generate(&ck, &prog, opts.target.triple, opts.target.ptr_bits);
     Ok((ll, xir_dump))
 }
@@ -147,13 +203,20 @@ pub fn clang() -> String {
 
 /// Build according to `opts`. Returns the output path.
 pub fn build(opts: &Options) -> Result<PathBuf, String> {
-    let mut fe = Frontend { sm: SourceMap::default() };
+    let mut fe = Frontend {
+        sm: SourceMap::default(),
+    };
     let (ll, xir) = match compile_to_llvm(&mut fe, opts) {
         Ok(r) => r,
         Err(FrontendError::Diags(ds)) => return Err(fe.render(&ds)),
         Err(FrontendError::Io(e)) => return Err(format!("error: {e}\n")),
     };
-    let stem = opts.input.file_stem().and_then(|s| s.to_str()).unwrap_or("out").to_string();
+    let stem = opts
+        .input
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("out")
+        .to_string();
     let default_out = match opts.emit {
         Emit::Exe => {
             if opts.target.triple.contains("windows") {
@@ -169,14 +232,19 @@ pub fn build(opts: &Options) -> Result<PathBuf, String> {
         Emit::Llvm | Emit::LlvmRaw => format!("{stem}.ll"),
         Emit::Xir => format!("{stem}.xir"),
     };
-    let out = opts.output.clone().unwrap_or_else(|| PathBuf::from(default_out));
+    let out = opts
+        .output
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(default_out));
     match opts.emit {
         Emit::LlvmRaw => {
-            std::fs::write(&out, ll).map_err(|e| format!("error: cannot write `{}`: {e}\n", out.display()))?;
+            std::fs::write(&out, ll)
+                .map_err(|e| format!("error: cannot write `{}`: {e}\n", out.display()))?;
             return Ok(out);
         }
         Emit::Xir => {
-            std::fs::write(&out, xir).map_err(|e| format!("error: cannot write `{}`: {e}\n", out.display()))?;
+            std::fs::write(&out, xir)
+                .map_err(|e| format!("error: cannot write `{}`: {e}\n", out.display()))?;
             return Ok(out);
         }
         _ => {}
@@ -186,7 +254,14 @@ pub fn build(opts: &Options) -> Result<PathBuf, String> {
     let ll_path = tmpdir.join(format!("{stem}.ll"));
     std::fs::write(&ll_path, &ll).map_err(|e| format!("error: {e}\n"))?;
     let mut cmd = Command::new(clang());
-    cmd.arg("-Wno-override-module").arg(format!("--target={}", opts.target.triple)).arg(format!("-O{}", opts.opt_level)).arg("-x").arg("ir").arg(&ll_path).arg("-o").arg(&out);
+    cmd.arg("-Wno-override-module")
+        .arg(format!("--target={}", opts.target.triple))
+        .arg(format!("-O{}", opts.opt_level))
+        .arg("-x")
+        .arg("ir")
+        .arg(&ll_path)
+        .arg("-o")
+        .arg(&out);
     let is_x86 = opts.target.triple.starts_with("x86_64");
     match opts.emit {
         Emit::Asm => {
@@ -203,11 +278,13 @@ pub fn build(opts: &Options) -> Result<PathBuf, String> {
         }
         Emit::Exe => {
             if opts.target.triple.starts_with("wasm") {
-                cmd.arg("-nostdlib").arg("-Wl,--no-entry").arg("-Wl,--export-dynamic");
+                cmd.arg("-nostdlib")
+                    .arg("-Wl,--no-entry")
+                    .arg("-Wl,--export-dynamic");
             } else if !opts.target.hosted {
                 return Err(format!("error: target `{}` has no operating system; use `--emit obj` and link with your own startup code\n", opts.target.name));
             }
-            if opts.lib {
+            if opts.lib && !opts.target.triple.starts_with("wasm") {
                 return Err("error: `--lib` produces an object; use `--emit obj`\n".into());
             }
         }
@@ -216,7 +293,9 @@ pub fn build(opts: &Options) -> Result<PathBuf, String> {
     if opts.target.triple.starts_with("wasm") || !opts.target.hosted {
         cmd.arg("-ffreestanding");
     }
-    let output = cmd.output().map_err(|e| format!("error: failed to run clang ({e}); install LLVM/clang or set XERO_CLANG\n"))?;
+    let output = cmd.output().map_err(|e| {
+        format!("error: failed to run clang ({e}); install LLVM/clang or set XERO_CLANG\n")
+    })?;
     let _ = std::fs::remove_dir_all(&tmpdir);
     if !output.status.success() {
         return Err(format!(

@@ -1,0 +1,81 @@
+// Unsafe code, raw pointers, slices, inline assembly, C interop.
+
+unsafe fn strlen(s: *u8) -> usize
+unsafe fn printf(fmt: *u8, ...) -> i32
+
+export fn checksum(data: *u8, len: usize) -> u32 {
+    let bytes = unsafe { slice_from_raw(data, len) }
+    let mut h: u32 = 2166136261
+    for b in bytes {
+        h = (h ^ *b as u32) * 16777619
+    }
+    h
+}
+
+fn fill(buf: &mut [i32], value: i32) {
+    for slot in buf {
+        *slot = value
+    }
+}
+
+fn sum(xs: &[i32]) -> i32 {
+    let mut t = 0
+    let mut i: usize = 0
+    while i < xs.len() {
+        t += xs[i]
+        i += 1
+    }
+    t
+}
+
+copy struct Header {
+    tag: u8
+    size: u32
+}
+
+fn main() {
+    let mut arr = [0; 8]
+    fill(&mut arr, 5)
+    arr[2] = 10
+    println(sum(&arr))
+    println(arr.len())
+
+    let msg = "zero-cost"
+    let n = unsafe { strlen(msg as *u8) }
+    println(n)
+    println(checksum("abc" as *u8, 3))
+
+    let mut x: i64 = 41
+    let p = &mut x as *i64
+    unsafe {
+        *p += 1
+        asm("nop")
+    }
+    println(x)
+
+    let words = [10u16, 20, 30]
+    let base = &words as *u16
+    unsafe {
+        println(*(base + 2))
+    }
+
+    println(size_of<Header>())
+    println(align_of<u64>())
+    println(size_of<Option<u8>>())
+    println(size_of<&str>())
+    unsafe {
+        printf("%d-%s\n" as *u8, 7, "c-interop" as *u8)
+    }
+}
+// output:
+// 45
+// 8
+// 9
+// 440920331
+// 42
+// 30
+// 8
+// 8
+// 2
+// 16
+// 7-c-interop
