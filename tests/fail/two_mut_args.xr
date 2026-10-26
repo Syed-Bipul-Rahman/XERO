@@ -1,0 +1,7 @@
+fn both(a: &mut i32, b: &mut i32) {}
+
+fn main() {
+    let mut x = 1
+    both(&mut x, &mut x)
+}
+// error: cannot mutably borrow `x` because it is also borrowed by another argument

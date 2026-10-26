@@ -1,0 +1,123 @@
+// Generics are monomorphized: each instantiation is specialized code.
+
+struct Stack<T> {
+    items: Vec<T>
+}
+
+impl<T> Stack<T> {
+    fn new() -> Stack<T> {
+        Stack { items: Vec.new() }
+    }
+
+    fn push(&mut self, value: T) {
+        self.items.push(value)
+    }
+
+    fn pop(&mut self) -> Option<T> {
+        self.items.pop()
+    }
+
+    fn len(&self) -> usize {
+        self.items.len()
+    }
+}
+
+fn largest<T>(values: &[T]) -> T {
+    let mut best = values[0]
+    for v in values {
+        if *v > best {
+            best = *v
+        }
+    }
+    best
+}
+
+copy struct Point<T> {
+    x: T
+    y: T
+}
+
+impl<T> Point<T> {
+    fn swap(self) -> Point<T> {
+        Point { x: self.y, y: self.x }
+    }
+}
+
+trait Describe {
+    fn describe(&self) -> &str
+}
+
+impl Describe for i32 {
+    fn describe(&self) -> &str { "an i32" }
+}
+
+impl Describe for bool {
+    fn describe(&self) -> &str { "a bool" }
+}
+
+fn show<T>(value: T) where T: Describe + Print {
+    print(value)
+    print(" is ")
+    println(value.describe())
+}
+
+// extension method on a built-in type
+impl i32 {
+    fn squared(self) -> i32 { self * self }
+}
+
+fn main() {
+    let mut s = Stack<i32>.new()
+    s.push(1)
+    s.push(2)
+    s.push(3)
+    println(s.len())
+    println(s.pop().unwrap())
+    println(s.pop())
+    let mut names: Stack<String> = Stack.new()
+    names.push(String.from("xero"))
+    println(names.pop().unwrap())
+    println(names.pop())
+
+    let nums = [3, 9, 2, 7]
+    println(largest(&nums))
+    let floats = [1.5, -2.0, 0.25]
+    println(largest(&floats))
+
+    let p = Point { x: 1, y: 2 }.swap()
+    println(p.x)
+    let q = Point(1.5, 2.5).swap()
+    println(q.y)
+
+    show(42)
+    show(true)
+    println(7.squared())
+
+    let mut v: Vec<i64> = Vec.new()
+    for i in 0..10i64 {
+        v.push(i * i)
+    }
+    let mut total: i64 = 0
+    for x in v.as_slice() {
+        total += *x
+    }
+    println(total)
+    println(v.get(3))
+    println(v.get(30))
+}
+// output:
+// 3
+// 3
+// Some(2)
+// xero
+// None
+// 9
+// 1.5
+// 2
+// 1.5
+// 42 is an i32
+// true is a bool
+// 49
+// 285
+// Some(9)
+// None

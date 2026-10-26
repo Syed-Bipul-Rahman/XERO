@@ -1,0 +1,9 @@
+fn main() {
+    let mut r = &0
+    {
+        let x = 5
+        r = &x
+    }
+    println(*r)
+}
+// error: `x` does not live long enough

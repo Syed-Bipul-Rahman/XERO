@@ -1,0 +1,12 @@
+trait Speak {
+    fn speak(&self)
+}
+
+fn talk<T: Speak>(x: T) {
+    x.speak()
+}
+
+fn main() {
+    talk(5)
+}
+// error: the trait `Speak` is not implemented for `i32`

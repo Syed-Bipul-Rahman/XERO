@@ -1,0 +1,174 @@
+// A growable, heap-allocated array.
+
+module std.vec
+
+import std.mem
+
+pub struct Vec<T> {
+    ptr: *T
+    len: usize
+    cap: usize
+}
+
+impl<T> Vec<T> {
+    pub fn new() -> Vec<T> {
+        Vec { ptr: 0 as *T, len: 0, cap: 0 }
+    }
+
+    pub fn with_capacity(capacity: usize) -> Vec<T> {
+        if capacity == 0 {
+            return Vec.new()
+        }
+        unsafe { Vec { ptr: mem.alloc<T>(capacity), len: 0, cap: capacity } }
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.cap
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    fn grow(&mut self) {
+        let new_cap = if self.cap == 0 { 4 } else { self.cap * 2 }
+        unsafe {
+            if self.cap == 0 {
+                self.ptr = mem.alloc<T>(new_cap)
+            } else {
+                self.ptr = mem.realloc_array(self.ptr, new_cap)
+            }
+        }
+        self.cap = new_cap
+    }
+
+    pub fn reserve(&mut self, additional: usize) {
+        while self.cap - self.len < additional {
+            self.grow()
+        }
+    }
+
+    pub fn push(&mut self, value: T) {
+        if self.len == self.cap {
+            self.grow()
+        }
+        unsafe { ptr_write(self.ptr + self.len, value) }
+        self.len += 1
+    }
+
+    pub fn pop(&mut self) -> Option<T> {
+        if self.len == 0 {
+            return None
+        }
+        self.len -= 1
+        unsafe { Some(ptr_read(self.ptr + self.len)) }
+    }
+
+    /// Bounds-checked access; `None` when out of range.
+    pub fn get(&self, index: usize) -> Option<&T> {
+        if index >= self.len {
+            return None
+        }
+        unsafe { Some(&*(self.ptr + index)) }
+    }
+
+    pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
+        if index >= self.len {
+            return None
+        }
+        unsafe { Some(&mut *(self.ptr + index)) }
+    }
+
+    /// Reference to element `index`; panics when out of range.
+    pub fn at(&self, index: usize) -> &T {
+        if index >= self.len {
+            panic("Vec index out of bounds")
+        }
+        unsafe { &*(self.ptr + index) }
+    }
+
+    pub fn at_mut(&mut self, index: usize) -> &mut T {
+        if index >= self.len {
+            panic("Vec index out of bounds")
+        }
+        unsafe { &mut *(self.ptr + index) }
+    }
+
+    /// Replace element `index`, dropping the old value.
+    pub fn set(&mut self, index: usize, value: T) {
+        if index >= self.len {
+            panic("Vec index out of bounds")
+        }
+        unsafe { *(self.ptr + index) = value }
+    }
+
+    pub fn swap(&mut self, a: usize, b: usize) {
+        if a >= self.len || b >= self.len {
+            panic("Vec index out of bounds")
+        }
+        if a != b {
+            unsafe {
+                let pa = self.ptr + a
+                let pb = self.ptr + b
+                let tmp = ptr_read(pa)
+                ptr_write(pa, ptr_read(pb))
+                ptr_write(pb, tmp)
+            }
+        }
+    }
+
+    pub fn as_slice(&self) -> &[T] {
+        if self.len == 0 {
+            return unsafe { slice_from_raw(self.ptr, 0) }
+        }
+        unsafe { slice_from_raw(self.ptr, self.len) }
+    }
+
+    pub fn as_mut_slice(&mut self) -> &mut [T] {
+        unsafe { slice_from_raw_mut(self.ptr, self.len) }
+    }
+
+    pub fn clear(&mut self) {
+        while self.len > 0 {
+            self.len -= 1
+            unsafe { drop_in_place(self.ptr + self.len) }
+        }
+    }
+
+    pub fn insert(&mut self, index: usize, value: T) {
+        if index > self.len {
+            panic("Vec insert index out of bounds")
+        }
+        if self.len == self.cap {
+            self.grow()
+        }
+        unsafe {
+            mem.copy_values(self.ptr + index, self.ptr + index + 1, self.len - index)
+            ptr_write(self.ptr + index, value)
+        }
+        self.len += 1
+    }
+
+    pub fn remove(&mut self, index: usize) -> T {
+        if index >= self.len {
+            panic("Vec remove index out of bounds")
+        }
+        unsafe {
+            let value = ptr_read(self.ptr + index)
+            mem.copy_values(self.ptr + index + 1, self.ptr + index, self.len - index - 1)
+            self.len -= 1
+            value
+        }
+    }
+
+    drop {
+        self.clear()
+        if self.cap > 0 {
+            unsafe { mem.dealloc(self.ptr) }
+        }
+    }
+}

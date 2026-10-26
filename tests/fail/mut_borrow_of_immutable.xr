@@ -1,0 +1,7 @@
+fn inc(x: &mut i32) { *x += 1 }
+
+fn main() {
+    let x = 5
+    inc(&mut x)
+}
+// error: cannot mutate immutable variable `x`

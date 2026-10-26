@@ -1,0 +1,10 @@
+struct Token { id: i32 }
+
+fn take(t: Token) {}
+
+fn main() {
+    let t = Token { id: 1 }
+    take(t)
+    take(t)
+}
+// error: use of moved value `t`

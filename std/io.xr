@@ -1,0 +1,38 @@
+// Low-level I/O on file descriptors (POSIX).
+
+module std.io
+
+unsafe fn read(fd: i32, buf: *u8, count: usize) -> isize
+unsafe fn write(fd: i32, buf: *u8, count: usize) -> isize
+unsafe fn exit(code: i32) -> !
+
+pub const STDIN: i32 = 0
+pub const STDOUT: i32 = 1
+pub const STDERR: i32 = 2
+
+/// Read up to `buf.len()` bytes; returns the count, or `Err(())` on failure.
+pub fn read_into(fd: i32, buf: &mut [u8]) -> Result<usize, i32> {
+    let n = unsafe { read(fd, buf as *u8, buf.len()) }
+    if n < 0 {
+        return Err(n as i32)
+    }
+    Ok(n as usize)
+}
+
+/// Write all bytes; returns the number of bytes written.
+pub fn write_all(fd: i32, bytes: &[u8]) -> Result<usize, i32> {
+    let mut done: usize = 0
+    while done < bytes.len() {
+        let n = unsafe { write(fd, (bytes as *u8) + done, bytes.len() - done) }
+        if n < 0 {
+            return Err(n as i32)
+        }
+        done += n as usize
+    }
+    Ok(done)
+}
+
+/// Terminate the process immediately with `code`.
+pub fn exit_process(code: i32) -> ! {
+    unsafe { exit(code) }
+}

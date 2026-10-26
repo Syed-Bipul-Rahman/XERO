@@ -1,0 +1,5 @@
+fn main() {
+    let v: Vec<i32> = Vec.new()
+    println(v.len)
+}
+// error: field `len` of struct `Vec` is private

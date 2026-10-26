@@ -1,0 +1,6 @@
+fn main() {
+    spawn {
+        println(1)
+    }
+}
+// error: `spawn` is reserved

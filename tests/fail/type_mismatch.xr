@@ -1,0 +1,4 @@
+fn main() {
+    let x: i32 = "hello"
+}
+// error: mismatched types: expected `i32`, found `&str`

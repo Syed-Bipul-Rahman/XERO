@@ -1,0 +1,7 @@
+fn dangle() -> &i32 {
+    let x = 5
+    &x
+}
+
+fn main() {}
+// error: returns a reference to `x`

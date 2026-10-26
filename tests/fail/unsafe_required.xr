@@ -1,0 +1,5 @@
+fn main() {
+    let p = 0 as *i32
+    let v = *p
+}
+// error: dereferencing a raw pointer is unsafe

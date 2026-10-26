@@ -1,0 +1,7 @@
+struct Token { id: i32 }
+
+fn main() {
+    let t = Token { id: 1 }
+    let u = copy t
+}
+// error: `copy` requires a copyable type

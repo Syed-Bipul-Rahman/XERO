@@ -1,0 +1,6 @@
+static mut COUNTER: i32 = 0
+
+fn main() {
+    COUNTER += 1
+}
+// error: accessing a `static mut` (a potential data race) is unsafe
