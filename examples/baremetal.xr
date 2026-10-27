@@ -1,0 +1,41 @@
+// Bare-metal: no OS, no libc, no allocator, no runtime.
+//
+//   xeroc build examples/baremetal.xr --target thumbv7em-none --lib --emit obj
+//   xeroc build examples/baremetal.xr --target riscv64-none --lib --emit obj
+//
+// Link the object with your board's startup code and linker script.
+
+const UART_BASE: usize = 0x4000_C000
+const UART_DATA: usize = UART_BASE + 0x00
+const UART_STATUS: usize = UART_BASE + 0x18
+const TX_FULL: u32 = 1 << 5
+
+static mut TICKS: u64 = 0
+
+fn uart_putc(byte: u8) {
+    let status = UART_STATUS as *u32
+    let data = UART_DATA as *u32
+    unsafe {
+        while volatile_load(status) & TX_FULL != 0 {}
+        volatile_store(data, byte as u32)
+    }
+}
+
+fn uart_puts(s: &str) {
+    for b in s.as_bytes() {
+        uart_putc(*b)
+    }
+}
+
+/// Called by the vector table on every timer interrupt.
+export fn systick_handler() {
+    unsafe { TICKS += 1 }
+}
+
+/// Entry point called by the reset handler.
+export fn kernel_main() {
+    uart_puts("Xero on bare metal\r\n")
+    loop {
+        unsafe { asm("wfi") }
+    }
+}

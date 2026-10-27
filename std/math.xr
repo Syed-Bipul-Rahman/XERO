@@ -1,0 +1,90 @@
+// Numeric helpers. Generic functions are templates: they work for any type
+// that supports the operators they use, with no runtime dispatch.
+
+module std.math
+
+pub const PI: f64 = 3.141592653589793
+pub const E: f64 = 2.718281828459045
+
+pub fn min<T>(a: T, b: T) -> T {
+    if a < b { a } else { b }
+}
+
+pub fn max<T>(a: T, b: T) -> T {
+    if a > b { a } else { b }
+}
+
+pub fn clamp<T>(value: T, lo: T, hi: T) -> T {
+    if value < lo {
+        lo
+    } else if value > hi {
+        hi
+    } else {
+        value
+    }
+}
+
+pub fn abs<T>(value: T) -> T {
+    if value < (value - value) { (value - value) - value } else { value }
+}
+
+/// Integer square root (floor).
+pub fn isqrt(n: u64) -> u64 {
+    if n < 2 {
+        return n
+    }
+    let mut lo: u64 = 1
+    let mut hi: u64 = if n < 4294967295 { n } else { 4294967295 }
+    while lo <= hi {
+        let mid = lo + (hi - lo) / 2
+        if mid <= n / mid {
+            lo = mid + 1
+        } else {
+            hi = mid - 1
+        }
+    }
+    hi
+}
+
+/// Square root by Newton iteration (no libm dependency).
+pub fn sqrt(x: f64) -> f64 {
+    if x <= 0.0 {
+        return 0.0
+    }
+    let mut g = if x > 1.0 { x / 2.0 } else { 1.0 }
+    let mut i = 0
+    while i < 64 {
+        let next = 0.5 * (g + x / g)
+        if next == g {
+            return g
+        }
+        g = next
+        i += 1
+    }
+    g
+}
+
+pub fn pow_int(base: i64, exp: u32) -> i64 {
+    let mut result: i64 = 1
+    let mut b = base
+    let mut e = exp
+    while e > 0 {
+        if e & 1 == 1 {
+            result *= b
+        }
+        b *= b
+        e >>= 1
+    }
+    result
+}
+
+pub fn gcd(a: u64, b: u64) -> u64 {
+    let mut x = a
+    let mut y = b
+    while y != 0 {
+        let t = x % y
+        x = y
+        y = t
+    }
+    x
+}

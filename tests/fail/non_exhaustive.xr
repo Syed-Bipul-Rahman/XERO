@@ -1,0 +1,11 @@
+enum Dir { North, South, East, West }
+
+fn name(d: Dir) -> &str {
+    match d {
+        Dir.North => "n"
+        Dir.South => "s"
+    }
+}
+
+fn main() {}
+// error: non-exhaustive patterns: `East`, `West` not covered

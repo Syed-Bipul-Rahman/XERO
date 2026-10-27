@@ -1,0 +1,358 @@
+// The Xero prelude: imported into every module automatically.
+//
+// Everything here is ordinary Xero code. Generic functions are instantiated
+// only when used, so a program that never prints never links `write`.
+
+module std.prelude
+
+// ------------------------------------------------------------ Option
+
+pub copy enum Option<T> {
+    Some(T)
+    None
+}
+
+impl<T> Option<T> {
+    pub fn is_some(&self) -> bool {
+        match self {
+            Some(_) => true
+            None => false
+        }
+    }
+
+    pub fn is_none(&self) -> bool {
+        !self.is_some()
+    }
+
+    pub fn unwrap(self) -> T {
+        match self {
+            Some(value) => value
+            None => panic("called `unwrap` on a `None` value")
+        }
+    }
+
+    pub fn expect(self, message: &str) -> T {
+        match self {
+            Some(value) => value
+            None => panic(message)
+        }
+    }
+
+    pub fn unwrap_or(self, default: T) -> T {
+        match self {
+            Some(value) => value
+            None => default
+        }
+    }
+
+    pub fn ok_or<E>(self, error: E) -> Result<T, E> {
+        match self {
+            Some(value) => Ok(value)
+            None => Err(error)
+        }
+    }
+}
+
+// ------------------------------------------------------------ Result
+
+pub copy enum Result<T, E> {
+    Ok(T)
+    Err(E)
+}
+
+impl<T, E> Result<T, E> {
+    pub fn is_ok(&self) -> bool {
+        match self {
+            Ok(_) => true
+            Err(_) => false
+        }
+    }
+
+    pub fn is_err(&self) -> bool {
+        !self.is_ok()
+    }
+
+    pub fn unwrap(self) -> T {
+        match self {
+            Ok(value) => value
+            Err(_) => panic("called `unwrap` on an `Err` value")
+        }
+    }
+
+    pub fn expect(self, message: &str) -> T {
+        match self {
+            Ok(value) => value
+            Err(_) => panic(message)
+        }
+    }
+
+    pub fn unwrap_err(self) -> E {
+        match self {
+            Ok(_) => panic("called `unwrap_err` on an `Ok` value")
+            Err(error) => error
+        }
+    }
+
+    pub fn unwrap_or(self, default: T) -> T {
+        match self {
+            Ok(value) => value
+            Err(_) => default
+        }
+    }
+
+    pub fn ok(self) -> Option<T> {
+        match self {
+            Ok(value) => Some(value)
+            Err(_) => None
+        }
+    }
+
+    pub fn err(self) -> Option<E> {
+        match self {
+            Ok(_) => None
+            Err(error) => Some(error)
+        }
+    }
+}
+
+// ------------------------------------------------------------ output
+
+unsafe fn write(fd: i32, buf: *u8, count: usize) -> isize
+unsafe fn abort() -> !
+
+/// Types that can be printed with `print`/`println`.
+pub trait Print {
+    fn write_to(&self, fd: i32)
+}
+
+pub fn print<T: Print>(value: T) {
+    value.write_to(1)
+}
+
+pub fn println<T: Print>(value: T) {
+    value.write_to(1)
+    write_str(1, "\n")
+}
+
+pub fn eprint<T: Print>(value: T) {
+    value.write_to(2)
+}
+
+pub fn eprintln<T: Print>(value: T) {
+    value.write_to(2)
+    write_str(2, "\n")
+}
+
+/// Abort the program with a message. Xero has no unwinding: a panic is a
+/// bug report, not control flow. Use `Result` for recoverable errors.
+pub fn panic(message: &str) -> ! {
+    write_str(2, "panic: ")
+    write_str(2, message)
+    write_str(2, "\n")
+    unsafe { abort() }
+}
+
+pub fn assert(condition: bool, message: &str) {
+    if !condition {
+        panic(message)
+    }
+}
+
+pub fn write_str(fd: i32, s: &str) {
+    let mut ptr = s as *u8
+    let mut left = s.len()
+    while left > 0 {
+        let n = unsafe { write(fd, ptr, left) }
+        if n <= 0 {
+            return
+        }
+        ptr = ptr + n as usize
+        left -= n as usize
+    }
+}
+
+pub fn write_u64(fd: i32, value: u64) {
+    let mut buf = [0u8; 20]
+    let mut i: usize = 20
+    let mut v = value
+    if v == 0 {
+        i -= 1
+        buf[i] = '0'
+    }
+    while v > 0 {
+        i -= 1
+        buf[i] = '0' + (v % 10) as u8
+        v /= 10
+    }
+    unsafe { write_str(fd, str_from_raw((&buf as *u8) + i, 20 - i)) }
+}
+
+pub fn write_i64(fd: i32, value: i64) {
+    if value < 0 {
+        write_str(fd, "-")
+        // two's complement negation also handles i64 minimum
+        write_u64(fd, (0 - (value as u64)))
+    } else {
+        write_u64(fd, value as u64)
+    }
+}
+
+pub fn write_f64(fd: i32, value: f64) {
+    if value != value {
+        write_str(fd, "NaN")
+        return
+    }
+    let mut v = value
+    if v < 0.0 {
+        write_str(fd, "-")
+        v = -v
+    }
+    if v > 18446744073709551615.0 {
+        write_str(fd, "inf")
+        return
+    }
+    // six decimal places, rounded
+    let scaled = v * 1000000.0 + 0.5
+    let whole = (scaled / 1000000.0) as u64
+    let mut frac = (scaled - (whole as f64) * 1000000.0) as u64
+    if frac >= 1000000 {
+        frac = 999999
+    }
+    write_u64(fd, whole)
+    write_str(fd, ".")
+    let mut digits = [0u8; 6]
+    let mut i: usize = 6
+    while i > 0 {
+        i -= 1
+        digits[i] = '0' + (frac % 10) as u8
+        frac /= 10
+    }
+    // trim trailing zeros, keep at least one digit
+    let mut n: usize = 6
+    while n > 1 && digits[n - 1] == '0' {
+        n -= 1
+    }
+    unsafe { write_str(fd, str_from_raw(&digits as *u8, n)) }
+}
+
+impl Print for str {
+    fn write_to(&self, fd: i32) {
+        write_str(fd, self)
+    }
+}
+
+impl<T: Print> Print for &T {
+    fn write_to(&self, fd: i32) {
+        (**self).write_to(fd)
+    }
+}
+
+impl<T: Print> Print for &mut T {
+    fn write_to(&self, fd: i32) {
+        (**self).write_to(fd)
+    }
+}
+
+impl Print for bool {
+    fn write_to(&self, fd: i32) {
+        if *self {
+            write_str(fd, "true")
+        } else {
+            write_str(fd, "false")
+        }
+    }
+}
+
+impl Print for i8 {
+    fn write_to(&self, fd: i32) { write_i64(fd, *self as i64) }
+}
+
+impl Print for i16 {
+    fn write_to(&self, fd: i32) { write_i64(fd, *self as i64) }
+}
+
+impl Print for i32 {
+    fn write_to(&self, fd: i32) { write_i64(fd, *self as i64) }
+}
+
+impl Print for i64 {
+    fn write_to(&self, fd: i32) { write_i64(fd, *self) }
+}
+
+impl Print for isize {
+    fn write_to(&self, fd: i32) { write_i64(fd, *self as i64) }
+}
+
+impl Print for u8 {
+    fn write_to(&self, fd: i32) { write_u64(fd, *self as u64) }
+}
+
+impl Print for u16 {
+    fn write_to(&self, fd: i32) { write_u64(fd, *self as u64) }
+}
+
+impl Print for u32 {
+    fn write_to(&self, fd: i32) { write_u64(fd, *self as u64) }
+}
+
+impl Print for u64 {
+    fn write_to(&self, fd: i32) { write_u64(fd, *self) }
+}
+
+impl Print for usize {
+    fn write_to(&self, fd: i32) { write_u64(fd, *self as u64) }
+}
+
+impl Print for f64 {
+    fn write_to(&self, fd: i32) { write_f64(fd, *self) }
+}
+
+impl Print for f32 {
+    fn write_to(&self, fd: i32) { write_f64(fd, *self as f64) }
+}
+
+impl<T: Print> Print for Option<T> {
+    fn write_to(&self, fd: i32) {
+        match self {
+            Some(value) => {
+                write_str(fd, "Some(")
+                value.write_to(fd)
+                write_str(fd, ")")
+            }
+            None => write_str(fd, "None")
+        }
+    }
+}
+
+// ------------------------------------------------------------ strings
+
+/// Byte-wise string equality; `a == b` on `&str` calls this.
+pub fn str_eq(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
+        return false
+    }
+    let pa = a as *u8
+    let pb = b as *u8
+    let mut i: usize = 0
+    while i < a.len() {
+        if unsafe { *(pa + i) != *(pb + i) } {
+            return false
+        }
+        i += 1
+    }
+    true
+}
+
+impl str {
+    pub fn as_bytes(&self) -> &[u8] {
+        unsafe { slice_from_raw(self as *u8, self.len()) }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn byte_at(&self, index: usize) -> u8 {
+        self.as_bytes()[index]
+    }
+}

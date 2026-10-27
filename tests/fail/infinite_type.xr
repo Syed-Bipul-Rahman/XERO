@@ -1,0 +1,7 @@
+struct Node {
+    value: i32
+    next: Node
+}
+
+fn main() {}
+// error: recursive type `Node` has infinite size

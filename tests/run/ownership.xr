@@ -1,0 +1,122 @@
+// Ownership, moves, borrowing and deterministic destruction (RAII).
+
+struct Resource {
+    id: i32
+}
+
+impl Resource {
+    fn new(id: i32) -> Resource {
+        print("acquire ")
+        println(id)
+        Resource { id: id }
+    }
+
+    drop {
+        print("release ")
+        println(self.id)
+    }
+}
+
+struct Pair {
+    left: Resource
+    right: Resource
+}
+
+fn consume(r: Resource) {
+    print("consuming ")
+    println(r.id)
+}
+
+fn peek(r: &Resource) -> i32 {
+    r.id
+}
+
+fn bump(r: &mut Resource) {
+    r.id += 100
+}
+
+fn make_and_return() -> Resource {
+    let r = Resource.new(7)
+    r
+}
+
+fn main() {
+    let a = Resource.new(1)
+    let b = Resource.new(2)
+    {
+        let inner = Resource.new(3)
+        println(peek(&inner))
+    }
+    println("after block")
+
+    let moved = move a
+    consume(moved)
+    println("after consume")
+
+    let mut c = Resource.new(4)
+    bump(&mut c)
+    println(c.id)
+
+    let d = make_and_return()
+    println(d.id)
+
+    // reassignment drops the old value first
+    let mut e = Resource.new(5)
+    e = Resource.new(6)
+    println(e.id)
+
+    // explicit early drop
+    drop b
+    println("dropped b early")
+
+    // conditional move: drop flag decides at scope end
+    let f = Resource.new(8)
+    if c.id > 1000 {
+        consume(f)
+    }
+
+    // moving a field out consumes the struct, destroying the siblings now
+    let p = Pair { left: Resource.new(9), right: Resource.new(10) }
+    let l = p.left
+    println("took left")
+    println(l.id)
+
+    let boxed = Box.new(Resource.new(11))
+    println(boxed.get().id)
+    println("end of main")
+}
+// output:
+// acquire 1
+// acquire 2
+// acquire 3
+// 3
+// release 3
+// after block
+// consuming 1
+// release 1
+// after consume
+// acquire 4
+// 104
+// acquire 7
+// 7
+// acquire 5
+// acquire 6
+// release 5
+// 6
+// release 2
+// dropped b early
+// acquire 8
+// acquire 9
+// acquire 10
+// release 10
+// took left
+// 9
+// acquire 11
+// 11
+// end of main
+// release 11
+// release 9
+// release 8
+// release 6
+// release 7
+// release 104

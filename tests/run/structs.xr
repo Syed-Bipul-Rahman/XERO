@@ -1,0 +1,138 @@
+// Structs, methods, traits, enums and pattern matching.
+
+struct User {
+    name: String
+    age: u32
+}
+
+impl User {
+    fn new(name: &str, age: u32) -> User {
+        User { name: String.from(name), age: age }
+    }
+
+    fn greet(&self) {
+        print("Hello, ")
+        print(&self.name)
+        print("! You are ")
+        print(self.age)
+        println(" years old.")
+    }
+
+    fn birthday(&mut self) {
+        self.age += 1
+    }
+}
+
+trait Shape {
+    fn area(&self) -> f64
+    fn name(&self) -> &str
+
+    fn describe(&self) {
+        print(self.name())
+        print(" with area ")
+        println(self.area())
+    }
+}
+
+copy struct Circle {
+    radius: f64
+}
+
+copy struct Rect {
+    w: f64
+    h: f64
+}
+
+impl Shape for Circle {
+    fn area(&self) -> f64 { 3.0 * self.radius * self.radius }
+    fn name(&self) -> &str { "circle" }
+}
+
+impl Shape for Rect {
+    fn area(&self) -> f64 { self.w * self.h }
+    fn name(&self) -> &str { "rect" }
+}
+
+fn total_area<A: Shape, B: Shape>(a: &A, b: &B) -> f64 {
+    a.area() + b.area()
+}
+
+enum Command {
+    Move(i32, i32)
+    Say(String)
+    Quit
+}
+
+fn run(cmd: &Command) -> i32 {
+    match cmd {
+        Command.Move(dx, dy) => *dx + *dy
+        Command.Say(text) => {
+            println(text)
+            0
+        }
+        Command.Quit => -1
+    }
+}
+
+copy enum Color {
+    Red
+    Green = 5
+    Blue
+}
+
+fn main() {
+    let mut user = User.new("Bipul", 25)
+    user.greet()
+    user.birthday()
+    user.greet()
+
+    let c = Circle { radius: 2.0 }
+    let r = Rect(3.0, 4.0)
+    c.describe()
+    r.describe()
+    println(total_area(&c, &r))
+
+    let cmds = [Command.Move(3, 4), Command.Say(String.from("hi there")), Command.Quit]
+    for cmd in &cmds {
+        println(run(cmd))
+    }
+
+    let color = Color.Green
+    println(color as i32)
+    println(Color.Blue as i32)
+    if color == Color.Green {
+        println("green!")
+    }
+
+    let n = 42
+    let kind = match n {
+        0 => "zero"
+        1..=9 => "small"
+        10 | 20 | 30 => "round"
+        _ => "big"
+    }
+    println(kind)
+
+    let pair = (1, "two")
+    let (one, two) = pair
+    println(one)
+    println(two)
+    println(pair.0 + 10)
+}
+// output:
+// Hello, Bipul! You are 25 years old.
+// Hello, Bipul! You are 26 years old.
+// circle with area 12.0
+// rect with area 12.0
+// 24.0
+// 7
+// hi there
+// 0
+// -1
+// 5
+// 6
+// green!
+// big
+// 1
+// two
+// 11

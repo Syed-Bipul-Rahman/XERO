@@ -1,0 +1,7 @@
+fn main() {
+    let x: Option<i32> = Some(1)
+    match x {
+        Some(v) => println(v)
+    }
+}
+// error: `None` not covered

@@ -1,0 +1,146 @@
+// A tour of Xero.
+
+import std.math
+
+// --- structs, methods, extension methods --------------------------------
+
+copy struct Vec2 {
+    x: f64
+    y: f64
+}
+
+impl Vec2 {
+    fn new(x: f64, y: f64) -> Vec2 {
+        Vec2 { x: x, y: y }
+    }
+
+    fn length(self) -> f64 {
+        math.sqrt(self.x * self.x + self.y * self.y)
+    }
+}
+
+impl i32 {
+    fn is_even(self) -> bool {
+        self % 2 == 0
+    }
+}
+
+// --- traits and generics (monomorphized, statically dispatched) ---------
+
+trait Animal {
+    fn name(&self) -> &str
+    fn sound(&self) -> &str
+
+    fn speak(&self) {
+        print(self.name())
+        print(" says ")
+        println(self.sound())
+    }
+}
+
+struct Dog {}
+struct Cat {}
+
+impl Animal for Dog {
+    fn name(&self) -> &str { "Dog" }
+    fn sound(&self) -> &str { "woof" }
+}
+
+impl Animal for Cat {
+    fn name(&self) -> &str { "Cat" }
+    fn sound(&self) -> &str { "meow" }
+}
+
+fn chorus<A: Animal, B: Animal>(a: &A, b: &B) {
+    a.speak()
+    b.speak()
+}
+
+// --- enums and pattern matching ------------------------------------------
+
+enum Token {
+    Number(i64)
+    Plus
+    Times
+}
+
+fn eval(tokens: &[Token]) -> i64 {
+    // evaluates "a op b op c ..." left to right
+    let mut acc: i64 = 0
+    let mut op = Token.Plus
+    for t in tokens {
+        match t {
+            Token.Number(n) => {
+                acc = match op {
+                    Token.Times => acc * *n
+                    _ => acc + *n
+                }
+            }
+            Token.Plus => op = Token.Plus
+            Token.Times => op = Token.Times
+        }
+    }
+    acc
+}
+
+// --- errors as values ----------------------------------------------------
+
+fn checked_div(a: i32, b: i32) -> Result<i32, &str> {
+    if b == 0 {
+        throw "division by zero"
+    }
+    Ok(a / b)
+}
+
+fn compute(a: i32, b: i32, c: i32) -> Result<i32, &str> {
+    let x = try checked_div(a, b)
+    let y = try checked_div(x, c)
+    Ok(y)
+}
+
+fn main() {
+    let v = Vec2.new(3.0, 4.0)
+    println(v.length())
+    println(10.is_even())
+
+    chorus(&Dog {}, &Cat {})
+
+    let program = [Token.Number(2), Token.Plus, Token.Number(3), Token.Times, Token.Number(4)]
+    println(eval(&program))
+
+    match compute(100, 5, 2) {
+        Ok(v) => println(v)
+        Err(e) => println(e)
+    }
+    let r = compute(1, 0, 1) catch e {
+        print("error: ")
+        println(e)
+        -1
+    }
+    println(r)
+
+    // Option instead of null
+    let mut found: Option<usize> = None
+    let haystack = [4, 8, 15, 16, 23, 42]
+    for i in 0..haystack.len() {
+        if haystack[i] == 16 {
+            found = Some(i)
+        }
+    }
+    if found is Some(index) {
+        print("found at ")
+        println(index)
+    }
+
+    // a growable vector and an owned string
+    let mut squares: Vec<u64> = Vec.new()
+    for i in 1..=5u64 {
+        squares.push(i * i)
+    }
+    let mut text = String.from("squares:")
+    for s in squares.as_slice() {
+        text.push_str(" ")
+        text.push_int(*s as i64)
+    }
+    println(&text)
+}

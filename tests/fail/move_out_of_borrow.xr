@@ -1,0 +1,8 @@
+struct Token { id: i32 }
+
+fn steal(t: &Token) -> Token {
+    *t
+}
+
+fn main() {}
+// error: cannot move a `Token` out of a reference

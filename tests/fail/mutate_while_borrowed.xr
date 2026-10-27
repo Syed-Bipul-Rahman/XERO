@@ -1,0 +1,8 @@
+fn main() {
+    let mut items: Vec<i32> = Vec.new()
+    items.push(1)
+    let first = items.at(0)
+    items.push(2)
+    println(*first)
+}
+// error: cannot mutably borrow `items` because it is borrowed

@@ -1,0 +1,6 @@
+fn set(x: &i32) {
+    *x = 1
+}
+
+fn main() {}
+// error: cannot mutate through a `&` reference

@@ -1,0 +1,19 @@
+[package]
+name = "xeroc"
+version = "0.1.0"
+edition = "2021"
+description = "The Xero compiler: a minimal, native, zero-runtime-cost systems language"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "xeroc"
+path = "src/main.rs"
+
+[lib]
+name = "xeroc"
+path = "src/lib.rs"
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
