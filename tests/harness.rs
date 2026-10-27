@@ -54,7 +54,7 @@ fn run_programs() {
     for f in files("tests/run") {
         let src = std::fs::read_to_string(&f).unwrap();
         let (want, want_code) = expected_output(&src);
-        let exe = tmp.join(f.file_stem().unwrap());
+        let exe = tmp.join(f.file_stem().unwrap()).with_extension(std::env::consts::EXE_EXTENSION);
         let build = Command::new(xeroc())
             .arg("build")
             .arg(&f)
@@ -71,7 +71,8 @@ fn run_programs() {
             continue;
         }
         let run = Command::new(&exe).output().unwrap();
-        let got = String::from_utf8_lossy(&run.stdout).to_string();
+        // the Windows C runtime writes text-mode stdout with CRLF line endings
+        let got = String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n");
         let code = run.status.code().unwrap_or(-1);
         if got != want || code != want_code {
             failures.push(format!("{}: output mismatch (exit {code}, want {want_code})\n--- want\n{want}--- got\n{got}", f.display()));
