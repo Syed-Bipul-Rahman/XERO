@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Install Xero</title>
+<style>
+  :root { --bg: #ffffff; --fg: #1a1a1a; --muted: #5b5b5b; --code: #f3f3f3; --accent: #0b6bcb; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) { --bg: #111214; --fg: #e8e8e8; --muted: #a0a0a0; --code: #1d1f22; --accent: #6cb1ff; }
+  }
+  :root[data-theme="dark"] { --bg: #111214; --fg: #e8e8e8; --muted: #a0a0a0; --code: #1d1f22; --accent: #6cb1ff; }
+  body { background: var(--bg); color: var(--fg); font: 16px/1.6 system-ui, -apple-system, Segoe UI, sans-serif; margin: 0; }
+  main { max-width: 720px; margin: 0 auto; padding: 48px 16px; }
+  h1 { font-size: 2.2rem; margin: 0 0 4px; }
+  p.tag { color: var(--muted); margin: 0 0 32px; }
+  h2 { font-size: 1.1rem; margin: 28px 0 8px; }
+  pre { background: var(--code); padding: 14px 16px; border-radius: 8px; overflow-x: auto; font-size: 14px; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Xero</h1>
+  <p class="tag">A minimal, native, zero-runtime-cost systems language.</p>
+
+  <h2>Linux &amp; macOS</h2>
+  <pre>curl -fsSL https://download.xerolang.org/install.sh | sudo bash</pre>
+  <p>Without root, it installs to <code>~/.xero</code>: <code>curl -fsSL https://download.xerolang.org/install.sh | bash</code></p>
+
+  <h2>Windows (PowerShell)</h2>
+  <pre>irm https://download.xerolang.org/install.ps1 | iex</pre>
+
+  <h2>Then</h2>
+  <pre>xeroc run hello.xr</pre>
+
+  <p>The installers download the latest <a href="https://github.com/Syed-Bipul-Rahman/XERO/releases">release</a>,
+  verify its SHA-256 checksum, and install <code>clang</code> (Xero's LLVM back end) if it is missing.
+  See <a href="https://github.com/Syed-Bipul-Rahman/XERO/blob/main/INSTALL.md">INSTALL.md</a> for options.</p>
+</main>
+</body>
+</html>

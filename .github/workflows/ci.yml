@@ -2,7 +2,9 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   test:
@@ -33,3 +35,71 @@ jobs:
         run: |
           ./target/release/xeroc run examples/hello.xr
           ./target/release/xeroc run examples/tour.xr
+
+  installers:
+    # Builds a release-style archive and installs it with the real install scripts.
+    name: installer (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: cargo build --release
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          case "$(uname -s)-$(uname -m)" in
+            Linux-x86_64) p=linux-x86_64 ;;
+            Linux-aarch64) p=linux-aarch64 ;;
+            Darwin-arm64) p=macos-arm64 ;;
+            Darwin-x86_64) p=macos-x86_64 ;;
+          esac
+          mkdir "xeroc-$p"
+          cp target/release/xeroc README.md INSTALL.md "xeroc-$p/"
+          cp -r docs examples "xeroc-$p/"
+          tar czf "$RUNNER_TEMP/xeroc.tar.gz" "xeroc-$p"
+      - name: Install system-wide with sudo (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          sudo XERO_ARCHIVE="$RUNNER_TEMP/xeroc.tar.gz" bash install/install.sh
+          /usr/local/bin/xeroc run /usr/local/share/xero/examples/hello.xr
+      - name: Install per-user without sudo, then uninstall (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          XERO_ARCHIVE="$RUNNER_TEMP/xeroc.tar.gz" bash install/install.sh --no-deps
+          "$HOME/.xero/bin/xeroc" run "$HOME/.xero/share/xero/examples/tour.xr"
+          bash install/install.sh --uninstall
+          test ! -e "$HOME/.xero/bin/xeroc"
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory xeroc-windows-x86_64 | Out-Null
+          Copy-Item target/release/xeroc.exe, README.md, INSTALL.md xeroc-windows-x86_64/
+          Copy-Item -Recurse docs, examples xeroc-windows-x86_64/
+          Compress-Archive xeroc-windows-x86_64 "$env:RUNNER_TEMP/xeroc.zip"
+      - name: Install (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:XERO_ARCHIVE = "$env:RUNNER_TEMP/xeroc.zip"
+          Get-Content -Raw install/install.ps1 | Invoke-Expression
+          xeroc run "$env:LOCALAPPDATA\Programs\Xero\examples\hello.xr"
+
+  ci-passed:
+    # Single required status check for branch protection: every PR into
+    # `main` must pass the tests on all platforms and the installer checks.
+    name: CI passed
+    if: always()
+    needs: [test, installers]
+    runs-on: ubuntu-latest
+    steps:
+      - name: All jobs succeeded
+        run: |
+          if [ "${{ needs.test.result }}" != "success" ] || [ "${{ needs.installers.result }}" != "success" ]; then
+            echo "test: ${{ needs.test.result }}, installers: ${{ needs.installers.result }}"
+            exit 1
+          fi
