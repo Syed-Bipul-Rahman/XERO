@@ -156,7 +156,11 @@ fn main() {
     let run = cmd == "run";
     let output = if run && output.is_none() {
         let stem = input.file_stem().and_then(|s| s.to_str()).unwrap_or("prog");
-        Some(std::env::temp_dir().join(format!("xero-run-{}-{stem}", std::process::id())))
+        Some(
+            std::env::temp_dir()
+                .join(format!("xero-run-{}-{stem}", std::process::id()))
+                .with_extension(std::env::consts::EXE_EXTENSION),
+        )
     } else {
         output
     };

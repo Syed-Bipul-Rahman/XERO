@@ -115,8 +115,10 @@ destruction, and targets bare metal (x86-64, ARM64, RISC-V and WebAssembly).
 
 ## Getting started
 
-Requirements: a Rust toolchain (to build the compiler) and `clang` from LLVM 17
-or newer (the code generator back end). Set `XERO_CLANG` if clang is not on your `PATH`.
+Download a prebuilt `xeroc` for Linux, macOS or Windows from the
+[Releases page](https://github.com/Syed-Bipul-Rahman/XERO/releases), or build it
+from source with a Rust toolchain. Either way you also need `clang` from LLVM 17
+or newer, which is the code-generation back end. See [INSTALL.md](INSTALL.md).
 
 ```console
 $ cargo build --release
