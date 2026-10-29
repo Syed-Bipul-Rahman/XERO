@@ -115,10 +115,21 @@ destruction, and targets bare metal (x86-64, ARM64, RISC-V and WebAssembly).
 
 ## Getting started
 
-Download a prebuilt `xeroc` for Linux, macOS or Windows from the
-[Releases page](https://github.com/Syed-Bipul-Rahman/XERO/releases), or build it
-from source with a Rust toolchain. Either way you also need `clang` from LLVM 17
-or newer, which is the code-generation back end. See [INSTALL.md](INSTALL.md).
+Install with one command:
+
+```sh
+# Linux / macOS
+curl -fsSL https://download.xerolang.org/install.sh | sudo bash
+```
+
+```powershell
+# Windows (PowerShell)
+irm https://download.xerolang.org/install.ps1 | iex
+```
+
+The installer also sets up `clang` (LLVM 17+), which is Xero's code-generation
+back end. See [INSTALL.md](INSTALL.md) for options and manual installation.
+To build from source:
 
 ```console
 $ cargo build --release

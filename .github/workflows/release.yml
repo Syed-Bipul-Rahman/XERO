@@ -1,14 +1,15 @@
 name: Release
 
-# Push a tag like `v0.1.0` to build xeroc for every platform and publish a
-# GitHub release with the archives attached.
+# Push a tag like `v0.1.0` to build xeroc for every platform, publish a
+# GitHub release (archives, SHA256SUMS, install scripts) and deploy the
+# installer site to GitHub Pages (download.xerolang.org).
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag (e.g. v0.1.0)"
+        description: "Release tag to create (e.g. v0.1.0)"
         required: true
 
 permissions:
@@ -23,36 +24,47 @@ jobs:
         include:
           - name: linux-x86_64
             os: ubuntu-22.04
+            target: x86_64-unknown-linux-musl
+            test: true
           - name: linux-aarch64
             os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-musl
+            test: true
           - name: macos-arm64
             os: macos-14
+            target: aarch64-apple-darwin
+            test: true
           - name: macos-x86_64
-            os: macos-13
+            os: macos-14
+            target: x86_64-apple-darwin
+            test: false
           - name: windows-x86_64
             os: windows-2022
+            target: x86_64-pc-windows-msvc
+            test: true
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - name: Install LLVM (Linux)
+      - name: Install LLVM and musl (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang lld
-      - name: Build
-        run: cargo build --release
+          sudo apt-get install -y clang lld musl-tools
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
+      - name: Build (static where possible)
+        run: cargo build --release --target ${{ matrix.target }}
       - name: Test
+        if: matrix.test
         run: cargo test --release
       - name: Package
         shell: bash
         run: |
           dir="xeroc-${{ matrix.name }}"
           mkdir -p "$dir"
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            cp target/release/xeroc.exe "$dir/"
-          else
-            cp target/release/xeroc "$dir/"
-          fi
+          exe=xeroc
+          if [ "${{ runner.os }}" = "Windows" ]; then exe=xeroc.exe; fi
+          cp "target/${{ matrix.target }}/release/$exe" "$dir/"
           cp -r README.md INSTALL.md docs examples "$dir/"
           if [ "${{ runner.os }}" = "Windows" ]; then
             7z a "$dir.zip" "$dir" > /dev/null
@@ -70,17 +82,61 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+      - name: Checksums and install scripts
+        run: |
+          cp install/install.sh install/install.ps1 dist/
+          cd dist
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
+          cat > notes.md <<NOTES
+          ## Install
+
+          **Linux / macOS**
+          \`\`\`
+          curl -fsSL https://download.xerolang.org/install.sh | sudo bash
+          \`\`\`
+
+          **Windows (PowerShell)**
+          \`\`\`
+          irm https://download.xerolang.org/install.ps1 | iex
+          \`\`\`
+
+          The installers pick the right archive below, verify it against \`SHA256SUMS\`,
+          and install clang (Xero's LLVM back end) if it is missing.
+          Manual install: see INSTALL.md inside each archive.
+          NOTES
           gh release create "$TAG" dist/* \
             --repo "${{ github.repository }}" \
             --target "${{ github.sha }}" \
             --title "Xero $TAG" \
-            --notes "Prebuilt \`xeroc\` compilers. See INSTALL.md in each archive: Xero needs clang (LLVM 17+) installed as its code-generation backend."
+            --notes-file notes.md
+
+  pages:
+    # Serves install.sh / install.ps1 at download.xerolang.org.
+    # Requires Settings → Pages → Source: "GitHub Actions" (one-time setup).
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: install
+      - id: deploy
+        uses: actions/deploy-pages@v4
