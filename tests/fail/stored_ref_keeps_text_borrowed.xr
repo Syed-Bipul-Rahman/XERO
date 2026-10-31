@@ -1,0 +1,13 @@
+fn first(v: &Vec<&str>) -> &str {
+    *v.at(0)
+}
+
+fn main() {
+    let mut text = String.from("a b")
+    let mut v: Vec<&str> = Vec.new()
+    v.push(text.as_str())
+    let f = first(&v)
+    text.clear()
+    println(f)
+}
+// error: cannot mutably borrow `text` because it is borrowed

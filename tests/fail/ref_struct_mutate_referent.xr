@@ -1,0 +1,12 @@
+struct View { s: &str }
+
+fn make(s: &str) -> View { View { s: s } }
+
+fn main() {
+    let mut text = String.from("hello")
+    let v = make(text.as_str())
+    let moved = v
+    text.clear()
+    println(moved.s)
+}
+// error: cannot mutably borrow `text` because it is borrowed

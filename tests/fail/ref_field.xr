@@ -1,6 +1,0 @@
-struct Holder {
-    r: &i32
-}
-
-fn main() {}
-// error: fields cannot be references

@@ -11,7 +11,7 @@ mod exhaust;
 mod expr;
 mod pat;
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 use crate::ast::{self, FnDecl, GenericParam, Ident, ItemKind, SelfKind, TypeExpr, TypeKind, Vis};
 use crate::diag::{Diagnostic, Result, Span};
@@ -253,6 +253,9 @@ pub struct Checker {
     /// Stable ids: (enclosing function symbol, closure span) -> closure id,
     /// so re-checking a function reuses its closures' ids.
     pub closure_ids: HashMap<(String, Span), u32>,
+    /// What each function's result borrows from: (parameter index,
+    /// `true` if only data the parameter refers to, not the parameter's own memory).
+    pub summaries: HashMap<String, BTreeSet<(usize, bool)>>,
 }
 
 /// One closure expression, after checking.
@@ -298,6 +301,7 @@ impl Checker {
             alias_depth: 0,
             closures: Vec::new(),
             closure_ids: HashMap::new(),
+            summaries: HashMap::new(),
         }
     }
 
@@ -822,14 +826,6 @@ impl Checker {
                 }
             }
             for f in fields.iter().chain(variants.iter().flatten()) {
-                if contains_ref(f) {
-                    let span = self.adts[id].span;
-                    errs.push(Diagnostic::new(
-                        span,
-                        "struct and enum fields cannot be references in this version of Xero (no lifetime parameters yet); store an owned value or a raw pointer",
-                    ));
-                    break;
-                }
                 if f.is_unsized() {
                     let span = self.adts[id].span;
                     errs.push(Diagnostic::new(span, "fields must have a statically known size (use `&str`/`&[T]` behind a pointer)"));
@@ -1375,6 +1371,36 @@ impl Checker {
         }
     }
 
+    /// Can a value of type `t` hold references (and so keep borrows alive)?
+    /// Looks through struct/enum fields and closure captures.
+    pub fn has_refs(&self, t: &Ty) -> bool {
+        self.has_refs_depth(t, 0)
+    }
+
+    fn has_refs_depth(&self, t: &Ty, depth: u32) -> bool {
+        if depth > 64 {
+            return true;
+        }
+        match t {
+            Ty::Ref(..) => true,
+            // memory owned through a raw pointer (a Vec's buffer) counts too
+            Ty::Array(e, _) | Ty::Slice(e) | Ty::Ptr(e) => self.has_refs_depth(e, depth + 1),
+            Ty::Tuple(ts) => ts.iter().any(|t| self.has_refs_depth(t, depth + 1)),
+            Ty::Closure(id) => self.closures[*id as usize]
+                .fields
+                .iter()
+                .any(|t| self.has_refs_depth(t, depth + 1)),
+            Ty::Adt(id, args) => {
+                let a = &self.adts[*id as usize];
+                a.fields
+                    .iter()
+                    .chain(a.variants.iter().flatten())
+                    .any(|f| self.has_refs_depth(&f.subst(args), depth + 1))
+            }
+            _ => false,
+        }
+    }
+
     pub fn needs_drop(&self, t: &Ty) -> bool {
         self.needs_drop_depth(t, 0)
     }
@@ -1686,10 +1712,6 @@ impl Checker {
                             tys.push(l.ty.clone());
                         }
                         collect_expr_tys(&f.body, &mut tys);
-                        match crate::borrowck::check(self, &f) {
-                            Ok(()) => {}
-                            Err(ds) => self.diags.extend(ds),
-                        }
                         for t in tys {
                             self.ensure_drop(&t);
                         }
@@ -1697,6 +1719,14 @@ impl Checker {
                     }
                 }
                 Err(d) => self.error(d),
+            }
+        }
+        // Borrow checking runs once every function is known, so calls can use
+        // what each callee's result borrows from.
+        self.summaries = crate::borrowck::summaries(self, &self.out_funcs);
+        for i in 0..self.out_funcs.len() {
+            if let Err(ds) = crate::borrowck::check(self, &self.out_funcs[i]) {
+                self.diags.extend(ds);
             }
         }
     }
@@ -1754,7 +1784,7 @@ impl Checker {
                 "statics cannot hold values that need `drop`",
             ));
         }
-        if contains_ref(&t) && !matches!(&t, Ty::Ref(inner, false) if **inner == Ty::Str) {
+        if self.has_refs(&t) && !matches!(&t, Ty::Ref(inner, false) if **inner == Ty::Str) {
             return Err(Diagnostic::new(
                 ty.span,
                 "statics cannot hold references (except `&str` literals)",
@@ -1802,6 +1832,8 @@ pub fn prim_type(name: &str) -> Option<Ty> {
     })
 }
 
+/// Does `t` mention a reference anywhere in its type arguments? (Shallow:
+/// use `Checker::has_refs` to also look inside struct and closure fields.)
 pub fn contains_ref(t: &Ty) -> bool {
     match t {
         Ty::Ref(..) => true,
