@@ -21,6 +21,9 @@ unsafe fn memmove(dst: *u8, src: *u8, count: usize) -> *u8
 
 unsafe fn pthread_create(thread: *usize, attr: *u8, start: fn(*u8) -> *u8, arg: *u8) -> i32
 unsafe fn pthread_join(thread: usize, result: *u8) -> i32
+unsafe fn pthread_attr_init(attr: *u8) -> i32
+unsafe fn pthread_attr_setstacksize(attr: *u8, size: usize) -> i32
+unsafe fn pthread_attr_destroy(attr: *u8) -> i32
 unsafe fn pthread_mutex_init(m: *u8, attr: *u8) -> i32
 unsafe fn pthread_mutex_lock(m: *u8) -> i32
 unsafe fn pthread_mutex_unlock(m: *u8) -> i32
@@ -37,8 +40,15 @@ pub const THREADS: bool = true
 
 /// Start a thread running `entry(arg)`; returns its handle.
 pub unsafe fn thread_start(entry: fn(*u8) -> *u8, arg: *u8) -> usize {
+    // 8 MiB stacks everywhere (macOS defaults to 512 KiB for new threads)
+    let mut attr = [0u64; 16]
+    let a = (&mut attr as *u64) as *u8
+    pthread_attr_init(a)
+    pthread_attr_setstacksize(a, 8388608)
     let mut t: usize = 0
-    if pthread_create(&mut t as *usize, 0 as *u8, entry, arg) != 0 {
+    let r = pthread_create(&mut t as *usize, a, entry, arg)
+    pthread_attr_destroy(a)
+    if r != 0 {
         panic("could not start a thread")
     }
     t

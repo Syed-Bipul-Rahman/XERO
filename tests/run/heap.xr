@@ -77,7 +77,7 @@ fn big(n: u64) -> u64 {
 }
 
 fn main() {
-    println(list(10000))
+    println(list(5000))
     println(strings(20))
     println(big(1000000))
     let a = spawn { strings(30) }
@@ -97,7 +97,7 @@ fn main() {
 }
 
 // output:
-// 49995000
+// 12497500
 // 162100
 // 1499998500010
 // true

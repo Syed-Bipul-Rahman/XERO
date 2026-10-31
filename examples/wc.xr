@@ -1,0 +1,71 @@
+// A small `wc`: count the lines, words and bytes of the files named on the
+// command line.
+//
+//   xeroc build examples/wc.xr -o wc
+//   ./wc README.md docs/LANGUAGE.md
+//
+// On Linux the result is a static executable of a few kilobytes that uses
+// no C library, and `--target aarch64-linux` builds one for ARM64.
+
+import std.env
+import std.fs
+
+struct Counts {
+    lines: u64
+    words: u64
+    bytes: u64
+}
+
+fn count(data: &[u8]) -> Counts {
+    let mut c = Counts { lines: 0, words: 0, bytes: data.len() as u64 }
+    let mut in_word = false
+    for b in data {
+        if *b == '\n' {
+            c.lines += 1
+        }
+        let space = *b == ' ' || (*b >= 9 && *b <= 13)   // space, \t \n \v \f \r
+        if !space && !in_word {
+            c.words += 1
+        }
+        in_word = !space
+    }
+    c
+}
+
+fn show(c: &Counts, name: &str) {
+    print(c.lines)
+    print(" ")
+    print(c.words)
+    print(" ")
+    print(c.bytes)
+    print(" ")
+    println(name)
+}
+
+fn main() -> i32 {
+    if env.arg_count() < 2 {
+        eprintln("usage: wc <file>...")
+        return 2
+    }
+    let mut total = Counts { lines: 0, words: 0, bytes: 0 }
+    let mut status = 0
+    let args = env.args()
+    for name in &args.as_slice()[1..] {
+        let data = fs.read(*name) catch e {
+            eprint(*name)
+            eprint(": ")
+            eprintln(e)
+            status = 1
+            continue
+        }
+        let c = count(data.as_slice())
+        show(&c, *name)
+        total.lines += c.lines
+        total.words += c.words
+        total.bytes += c.bytes
+    }
+    if env.arg_count() > 2 {
+        show(&total, "total")
+    }
+    status
+}

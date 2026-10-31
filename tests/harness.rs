@@ -99,11 +99,28 @@ fn run_programs() {
         }
     }
     let _ = std::fs::remove_dir_all(&tmp);
+    annotate(&failures);
     if !failures.is_empty() {
         panic!(
             "{} program(s) failed:\n\n{}",
             failures.len(),
             failures.join("\n")
+        );
+    }
+}
+
+/// On GitHub Actions, report each failure as an error annotation too.
+fn annotate(failures: &[String]) {
+    if std::env::var_os("GITHUB_ACTIONS").is_none() {
+        return;
+    }
+    for f in failures {
+        let msg: String = f.chars().take(4000).collect();
+        println!(
+            "::error title=xero test::{}",
+            msg.replace('%', "%25")
+                .replace('\r', "")
+                .replace('\n', "%0A")
         );
     }
 }
@@ -141,6 +158,7 @@ fn rejected_programs() {
             }
         }
     }
+    annotate(&failures);
     if !failures.is_empty() {
         panic!(
             "{} program(s) failed:\n\n{}",

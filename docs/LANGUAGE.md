@@ -1,4 +1,4 @@
-# The Xero Language Reference (v0.3)
+# The Xero Language Reference (v0.4)
 
 This document describes the language as implemented by `xeroc` 0.3. Features
 that are reserved but not implemented yet are marked **(reserved)**.
@@ -414,9 +414,12 @@ control flow.
   `drop_in_place`, `slice_from_raw`, `slice_from_raw_mut`, `str_from_raw`,
   `forget(value)` (skip a destructor), `asm("...")`, and atomics on integers
   and pointers: `atomic_load`, `atomic_store`, `atomic_swap`, `atomic_add`,
-  `atomic_sub`, `atomic_cas` (all sequentially consistent).
+  `atomic_sub`, `atomic_cas` (all sequentially consistent);
+* `syscall(number, args...)`: a raw Linux system call with up to six integer
+  or raw-pointer arguments, returning `isize` (`-errno` on failure).
 
-Safe intrinsics: `size_of<T>()`, `align_of<T>()`, `trap()`, `fence()`.
+Safe intrinsics: `size_of<T>()`, `align_of<T>()`, `trap()`, `fence()`,
+`os_argc()` and `os_argv()` (the raw command line; `std.env` wraps them).
 
 ```xero
 unsafe fn printf(fmt: *u8, ...) -> i32          // C variadic
@@ -441,15 +444,58 @@ pointers and `usize`. Pointer arithmetic: `p + n` and `p - n` advance by whole e
 | prelude | `Option`, `Result`, `Print`, `print`/`println`/`eprint`/`eprintln`, `panic`, `assert`, operator traits (`Eq`, `Ord`, `Add`, `Sub`, `Mul`, `Div`, `Rem`, `Neg`), `Ordering`, `compare`, `str` methods (`as_bytes`, `is_empty`, `byte_at`) |
 | `std.mem` | `Box<T>`, `alloc`, `realloc_array`, `dealloc`, `swap`, `replace`, `copy_values` |
 | `std.vec` | `Vec<T>`: `push pop get get_mut at at_mut set swap insert remove clear reserve as_slice as_mut_slice`, and with closures `map filter for_each any all count position sort_by sort` |
-| `std.string` | `String`: `from new push_str push_byte push_int as_str len equals clear` |
+| `std.string` | `String`: `from new from_utf8 push_str push_byte push_int as_str as_bytes into_bytes len equals clear`, and `is_utf8` |
 | `std.math` | `min max clamp abs isqrt sqrt pow_int gcd PI E` |
-| `std.io` | `read_into write_all exit_process STDIN STDOUT STDERR` |
+| `std.io` | `read_into write_all exit_process STDIN STDOUT STDERR` (errors are `errno` values) |
+| `std.fs` | `File` (`open`, `create`, `append`, `read`, `read_all`, `read_to_string`, `write`, `write_str`; closed when destroyed), `read_to_string`, `read`, `write`, `remove`, `Error` (`code`, `message`, printable) |
+| `std.env` | `args`, `arg`, `arg_count` |
+| `std.os` | `NAME` (`"linux"`, `"macos"`, `"windows"`, `"wasm"`, `"none"`), `ARCH`, `POINTER_BITS` |
 | `std.thread` | `start` (what `spawn` calls), `Thread<T, F>` with `join`, `sleep_ms`, `yield_now` |
 | `std.sync` | `Mutex<T>` (`lock`, `with`, `into_inner`; guards `get`, `get_mut`, `set`), `Channel<T>` (`send`, `recv`, `try_recv`, `close`, `len`), `Atomic<T>` (`load`, `store`, `swap`, `fetch_add`, `fetch_sub`, `compare_exchange`), `AtomicBool` |
 
 The standard library is written in Xero. Code you don't call is never compiled
-into your program, so a freestanding program doesn't depend on libc unless it
-uses something that needs it (printing or allocation).
+into your program.
+
+```xero
+import std.env
+import std.fs
+
+fn main() {
+    if env.arg(1) is Some(path) {
+        let text = fs.read_to_string(path) catch e {
+            eprint("cannot read the file: ")
+            eprintln(e)              // e.g. "no such file or directory"
+            return
+        }
+        print(&text)
+    }
+}
+```
+
+### The runtime
+
+On **Linux**, Xero programs don't use the C library. The standard library
+talks to the kernel with system calls, and brings its own heap (an
+`mmap`-based allocator with per-thread arenas), threads (`clone` and
+futexes) and program entry point. An executable is static, starts
+instantly, and runs on any Linux kernel of the same architecture: "hello,
+world" is about 9 KB. Because no C library is involved, building for another
+architecture needs nothing but `lld`:
+
+```console
+$ xeroc build app.xr --target aarch64-linux     # also riscv64-linux
+```
+
+A program that declares C functions (`unsafe fn puts(s: *u8) -> i32`) is
+linked with the system C library instead, and so is a library or object
+(`--lib`, `--emit obj`) that someone else links. `--libc` and `--no-libc`
+choose explicitly.
+
+On **macOS** programs use the system library (`libSystem`), which is the only
+supported way to talk to the macOS kernel. On **Windows** they use the C
+runtime and `kernel32`. On bare-metal and wasm targets there is no OS: a
+program that prints or allocates must provide `write`, `malloc`, `free`,
+`realloc`, `memmove` and `abort` itself.
 
 ## 11. Concurrency
 
@@ -509,6 +555,7 @@ fn main() {
   `Atomic<T>` from `std.sync`. They are used through shared references and
   synchronize internally.
 * There is no unwinding: a panic in any thread ends the whole program.
-* Threads use POSIX threads on Linux and macOS and `kernel32` on Windows. On
-  bare-metal and wasm targets, starting a thread is a runtime error.
+* Threads are Xero's own (`clone` and futexes) on Linux, POSIX threads on
+  macOS and `kernel32` threads on Windows. On bare-metal and wasm targets,
+  starting a thread is a runtime error.
 * `async` and `await` are still reserved.
