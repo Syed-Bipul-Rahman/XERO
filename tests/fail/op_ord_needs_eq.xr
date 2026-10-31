@@ -1,0 +1,8 @@
+struct P { x: i32 }
+
+impl Ord for P {
+    fn cmp(&self, other: &P) -> Ordering { compare(self.x, other.x) }
+}
+
+fn main() {}
+// error: trait `Ord` extends `Eq`, but `P` does not implement `Eq`

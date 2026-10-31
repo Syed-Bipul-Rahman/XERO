@@ -1,0 +1,9 @@
+fn main() {
+    let mut names: Vec<&str> = Vec.new()
+    {
+        let s = String.from("temp")
+        names.push(s.as_str())
+    }
+    println(names.len())
+}
+// error: `s` does not live long enough

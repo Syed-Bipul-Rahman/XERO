@@ -1,0 +1,11 @@
+struct Holder { r: &i32 }
+
+impl Holder {
+    fn set_local(&mut self) {
+        let x = 5
+        self.r = &x
+    }
+}
+
+fn main() {}
+// error: `x` does not live long enough: a reference to it would be stored in memory that outlives this function

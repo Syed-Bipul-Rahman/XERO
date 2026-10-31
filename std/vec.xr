@@ -165,6 +165,120 @@ impl<T> Vec<T> {
         }
     }
 
+    // ---------------------------------------------------- with closures
+
+    /// Call `f` on each element in order.
+    pub fn for_each<F: FnMut(&T)>(&self, mut f: F) {
+        for x in self.as_slice() {
+            f(x)
+        }
+    }
+
+    /// A new vector with `f` applied to each element.
+    pub fn map<U, F: Fn(&T) -> U>(&self, f: F) -> Vec<U> {
+        let mut out: Vec<U> = Vec.with_capacity(self.len)
+        for x in self.as_slice() {
+            out.push(f(x))
+        }
+        out
+    }
+
+    /// A new vector with the elements for which `keep` is true
+    /// (for element types that can be copied).
+    pub fn filter<F: Fn(&T) -> bool>(&self, keep: F) -> Vec<T> {
+        let mut out: Vec<T> = Vec.new()
+        for x in self.as_slice() {
+            if keep(x) {
+                out.push(*x)
+            }
+        }
+        out
+    }
+
+    pub fn any<F: Fn(&T) -> bool>(&self, f: F) -> bool {
+        for x in self.as_slice() {
+            if f(x) {
+                return true
+            }
+        }
+        false
+    }
+
+    pub fn all<F: Fn(&T) -> bool>(&self, f: F) -> bool {
+        for x in self.as_slice() {
+            if !f(x) {
+                return false
+            }
+        }
+        true
+    }
+
+    /// How many elements satisfy `f`.
+    pub fn count<F: Fn(&T) -> bool>(&self, f: F) -> usize {
+        let mut n: usize = 0
+        for x in self.as_slice() {
+            if f(x) {
+                n += 1
+            }
+        }
+        n
+    }
+
+    /// Index of the first element satisfying `f`.
+    pub fn position<F: Fn(&T) -> bool>(&self, f: F) -> Option<usize> {
+        let mut i: usize = 0
+        while i < self.len {
+            if f(self.at(i)) {
+                return Some(i)
+            }
+            i += 1
+        }
+        None
+    }
+
+    /// Sort in place by `cmp` (heap sort: O(n log n), no allocation, not stable).
+    pub fn sort_by<F: Fn(&T, &T) -> Ordering>(&mut self, cmp: F) {
+        let n = self.len
+        if n < 2 {
+            return
+        }
+        let mut start = n / 2
+        while start > 0 {
+            start -= 1
+            self.sift_down(start, n, &cmp)
+        }
+        let mut end = n
+        while end > 1 {
+            end -= 1
+            self.swap(0, end)
+            self.sift_down(0, end, &cmp)
+        }
+    }
+
+    fn sift_down<F: Fn(&T, &T) -> Ordering>(&mut self, start: usize, end: usize, cmp: &F) {
+        let mut root = start
+        loop {
+            let mut child = 2 * root + 1
+            if child >= end {
+                return
+            }
+            if child + 1 < end && cmp(self.at(child), self.at(child + 1)) is Ordering.Less {
+                child += 1
+            }
+            if cmp(self.at(root), self.at(child)) is Ordering.Less {
+                self.swap(root, child)
+                root = child
+            } else {
+                return
+            }
+        }
+    }
+
+    /// Sort in place, for element types that implement `Ord`.
+    pub fn sort(&mut self) {
+        self.sort_by(|a, b| a.cmp(b))
+    }
+
     drop {
         self.clear()
         if self.cap > 0 {

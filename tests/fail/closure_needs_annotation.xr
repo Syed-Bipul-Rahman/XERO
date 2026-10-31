@@ -1,0 +1,4 @@
+fn main() {
+    let f = |x| x + 1
+}
+// error: cannot infer the type of closure parameter `x`

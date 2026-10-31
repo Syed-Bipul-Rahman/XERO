@@ -1,0 +1,8 @@
+struct P { x: i32 }
+
+fn main() {
+    let a = P { x: 1 }
+    let b = P { x: 1 }
+    println(a == b)
+}
+// error: operator `==` is not defined for `P`; implement `Eq` for it

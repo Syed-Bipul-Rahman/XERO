@@ -209,7 +209,8 @@ pub fn find_clang() -> Result<String, String> {
         }
     }
     let mut too_old = None;
-    let candidates = std::iter::once("clang".to_string()).chain((MIN_LLVM..=24).rev().map(|v| format!("clang-{v}")));
+    let candidates = std::iter::once("clang".to_string())
+        .chain((MIN_LLVM..=24).rev().map(|v| format!("clang-{v}")));
     for c in candidates {
         match clang_major(&c) {
             Some(v) if v >= MIN_LLVM => return Ok(c),

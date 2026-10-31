@@ -1,3 +1,18 @@
+## 0.2.0
+
+* Adds closures: `|a, b| a + b`, `|x: i32| -> i32 { ... }` and `move |x| ...`, captured by reference (`&mut` when mutated) or by value.
+* Adds `Fn(A) -> R` and `FnMut(A) -> R` bounds; generic functions taking closures are specialized per closure and inlined.
+* Adds function pointer types `fn(A) -> R`: named functions and closures without captures can be stored, passed and returned.
+* Adds calling closures stored in struct fields: `self.on_click(x)`.
+* Adds operator traits `Eq`, `Ord`, `Add`, `Sub`, `Mul`, `Div`, `Rem` and `Neg`, so `==`, `<`, `+` and the rest work on your own types, plus `Ordering` and `compare`.
+* Adds slicing with ranges: `&arr[1..3]`, `&text[7..]`, `&v[..n]`, `&arr[a..=b]`, including `&mut` slices.
+* Adds references inside structs and enums (`struct Parser { input: &str }`) without lifetime annotations.
+* Adds `Vec` methods `map`, `filter`, `for_each`, `any`, `all`, `count`, `position`, `sort_by` and `sort`.
+* Infers the type of untyped literals from later use: `let mut total = 0` becomes `u64` after `total += x` with `x: u64`.
+* Fixes references read out of containers or returned from functions not keeping their data borrowed, which could allow a dangling reference.
+* Fixes `v.push(&local)` into a `Vec<&T>` from an inner scope not being rejected.
+* Fixes `&mut` call arguments skipping the mutability check.
+
 ## 0.1.0
 
 * Initial release of Xero and its compiler, `xeroc`, which generates native code through LLVM.

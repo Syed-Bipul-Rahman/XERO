@@ -1,0 +1,110 @@
+// Structs and enums that hold references.
+
+struct Parser {
+    input: &str
+    pos: usize
+}
+
+impl Parser {
+    fn new(input: &str) -> Parser {
+        Parser { input: input, pos: 0 }
+    }
+
+    fn peek(&self) -> u8 {
+        self.input.byte_at(self.pos)
+    }
+
+    fn at_end(&self) -> bool {
+        self.pos >= self.input.len()
+    }
+
+    /// The next run of non-space bytes.
+    fn word(&mut self) -> &str {
+        while !self.at_end() && self.peek() == ' ' {
+            self.pos += 1
+        }
+        let start = self.pos
+        while !self.at_end() && self.peek() != ' ' {
+            self.pos += 1
+        }
+        &self.input[start..self.pos]
+    }
+}
+
+struct Counter {
+    target: &mut i32
+}
+
+impl Counter {
+    fn bump(&mut self, by: i32) {
+        *self.target += by
+    }
+}
+
+enum Token {
+    Word(&str)
+    Number(i64)
+}
+
+fn classify(w: &str) -> Token {
+    let b = w.as_bytes()
+    if b.len() > 0 && b[0] >= '0' && b[0] <= '9' {
+        let mut n: i64 = 0
+        for c in b {
+            n = n * 10 + (*c - '0') as i64
+        }
+        return Token.Number(n)
+    }
+    Token.Word(w)
+}
+
+fn longest(words: &Vec<&str>) -> &str {
+    let mut best = *words.at(0)
+    for w in words.as_slice() {
+        if w.len() > best.len() {
+            best = *w
+        }
+    }
+    best
+}
+
+fn main() {
+    let text = String.from("the quick brown fox 42")
+    let mut p = Parser.new(text.as_str())
+    let mut words: Vec<&str> = Vec.new()
+    while !p.at_end() {
+        words.push(p.word())
+    }
+    println(words.len())
+    println(longest(&words))
+
+    for w in words.as_slice() {
+        match classify(*w) {
+            Token.Word(s) => {
+                print("word ")
+                println(s)
+            }
+            Token.Number(n) => {
+                print("number ")
+                println(n)
+            }
+        }
+    }
+
+    let mut hits = 0
+    {
+        let mut c = Counter { target: &mut hits }
+        c.bump(2)
+        c.bump(3)
+    }
+    println(hits)
+}
+// output:
+// 5
+// quick
+// word the
+// word quick
+// word brown
+// word fox
+// number 42
+// 5

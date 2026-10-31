@@ -1,0 +1,106 @@
+// Operators on user types through the prelude's operator traits.
+
+copy struct Vec2 {
+    x: f64
+    y: f64
+}
+
+impl Add for Vec2 {
+    fn add(self, other: Vec2) -> Vec2 { Vec2 { x: self.x + other.x, y: self.y + other.y } }
+}
+
+impl Sub for Vec2 {
+    fn sub(self, other: Vec2) -> Vec2 { Vec2 { x: self.x - other.x, y: self.y - other.y } }
+}
+
+impl Mul for Vec2 {
+    fn mul(self, other: Vec2) -> Vec2 { Vec2 { x: self.x * other.x, y: self.y * other.y } }
+}
+
+impl Neg for Vec2 {
+    fn neg(self) -> Vec2 { Vec2 { x: -self.x, y: -self.y } }
+}
+
+impl Eq for Vec2 {
+    fn eq(&self, other: &Vec2) -> bool { self.x == other.x && self.y == other.y }
+}
+
+// A move-only type: comparisons borrow, so the values stay usable.
+struct Version {
+    major: u32
+    minor: u32
+    label: String
+}
+
+impl Eq for Version {
+    fn eq(&self, other: &Version) -> bool {
+        self.major == other.major && self.minor == other.minor
+    }
+}
+
+impl Ord for Version {
+    fn cmp(&self, other: &Version) -> Ordering {
+        match compare(self.major, other.major) {
+            Ordering.Equal => compare(self.minor, other.minor)
+            o => o
+        }
+    }
+}
+
+fn largest<T: Ord>(items: &[T]) -> &T {
+    let mut best = &items[0]
+    for it in items {
+        if *it > *best {
+            best = it
+        }
+    }
+    best
+}
+
+fn main() {
+    let a = Vec2 { x: 1.0, y: 2.0 }
+    let b = Vec2 { x: 3.0, y: 4.0 }
+    let c = a + b * b - a
+    println(c.x)
+    println(c.y)
+    println((-a).x)
+    println(a == Vec2 { x: 1.0, y: 2.0 })
+    println(a != b)
+
+    let mut p = a
+    p += b
+    p -= Vec2 { x: 0.5, y: 0.5 }
+    println(p.y)
+
+    let v1 = Version { major: 1, minor: 4, label: String.from("old") }
+    let v2 = Version { major: 2, minor: 0, label: String.from("new") }
+    println(v1 < v2)
+    println(v1 >= v2)
+    println(v2 > v1)
+    println(v1 == v1)
+    println(&v1.label)      // still usable: comparisons borrow
+
+    let all = [Version { major: 0, minor: 9, label: String.from("a") }, Version { major: 3, minor: 1, label: String.from("b") }, Version { major: 3, minor: 0, label: String.from("c") }]
+    println(&largest(&all).label)
+    println(*largest(&[4, 9, 2]))
+
+    match compare(3, 7) {
+        Ordering.Less => println("less")
+        _ => println("not less")
+    }
+}
+// output:
+// 9.0
+// 16.0
+// -1.0
+// true
+// true
+// 5.5
+// true
+// false
+// true
+// true
+// old
+// b
+// 9
+// less

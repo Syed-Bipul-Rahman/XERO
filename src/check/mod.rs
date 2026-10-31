@@ -5,12 +5,13 @@
 //! instance is type-checked with concrete types, so the produced XIR is fully
 //! monomorphic and all trait method calls are statically dispatched.
 
+mod closure;
 mod consteval;
 mod exhaust;
 mod expr;
 mod pat;
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 use crate::ast::{self, FnDecl, GenericParam, Ident, ItemKind, SelfKind, TypeExpr, TypeKind, Vis};
 use crate::diag::{Diagnostic, Result, Span};
@@ -247,6 +248,27 @@ pub struct Checker {
     used_statics: HashSet<u32>,
     pub drop_fns: HashMap<Ty, String>,
     alias_depth: u32,
+    /// Closure types, indexed by `Ty::Closure(id)`.
+    pub closures: Vec<ClosureDef>,
+    /// Stable ids: (enclosing function symbol, closure span) -> closure id,
+    /// so re-checking a function reuses its closures' ids.
+    pub closure_ids: HashMap<(String, Span), u32>,
+    /// What each function's result borrows from: (parameter index,
+    /// `true` if only data the parameter refers to, not the parameter's own memory).
+    pub summaries: HashMap<String, BTreeSet<(usize, bool)>>,
+}
+
+/// One closure expression, after checking.
+#[derive(Clone, Debug)]
+pub struct ClosureDef {
+    /// Types of the captured values (the closure's environment struct).
+    pub fields: Vec<Ty>,
+    pub params: Vec<Ty>,
+    pub ret: Ty,
+    /// Symbol of the generated function `(env, params...) -> ret`.
+    pub fn_name: String,
+    /// It mutates its environment, so calling it needs `&mut` (FnMut).
+    pub mutates: bool,
 }
 
 /// Input to the checker: parsed modules, by module path.
@@ -277,6 +299,9 @@ impl Checker {
             used_statics: HashSet::new(),
             drop_fns: HashMap::new(),
             alias_depth: 0,
+            closures: Vec::new(),
+            closure_ids: HashMap::new(),
+            summaries: HashMap::new(),
         }
     }
 
@@ -801,14 +826,6 @@ impl Checker {
                 }
             }
             for f in fields.iter().chain(variants.iter().flatten()) {
-                if contains_ref(f) {
-                    let span = self.adts[id].span;
-                    errs.push(Diagnostic::new(
-                        span,
-                        "struct and enum fields cannot be references in this version of Xero (no lifetime parameters yet); store an owned value or a raw pointer",
-                    ));
-                    break;
-                }
                 if f.is_unsized() {
                     let span = self.adts[id].span;
                     errs.push(Diagnostic::new(span, "fields must have a statically known size (use `&str`/`&[T]` behind a pointer)"));
@@ -1193,6 +1210,19 @@ impl Checker {
                     .collect::<Result<_>>()?,
             ),
             TypeKind::Never => Ty::Never,
+            TypeKind::FnPtr(ps, r) => Ty::FnPtr(
+                ps.iter().map(|t| self.resolve_type(t, module, env)).collect::<Result<_>>()?,
+                Box::new(match r {
+                    Some(r) => self.resolve_type(r, module, env)?,
+                    None => Ty::unit(),
+                }),
+            ),
+            TypeKind::FnTrait(..) => {
+                return Err(Diagnostic::new(
+                    t.span,
+                    "`Fn(...)` is a bound for generic parameters (`F: Fn(i32) -> i32`); for a value type use a function pointer `fn(i32) -> i32`",
+                ))
+            }
             TypeKind::Infer => {
                 return Err(Diagnostic::new(
                     t.span,
@@ -1309,6 +1339,65 @@ impl Checker {
                         .all(|f| self.is_copy(&f.subst(args)))
             }
             Ty::Param(_) => false,
+            Ty::FnPtr(..) => true,
+            Ty::Closure(id) => self.closures[*id as usize]
+                .fields
+                .iter()
+                .all(|f| self.is_copy(f)),
+        }
+    }
+
+    /// Field types of a struct, tuple or closure environment.
+    pub fn fields_of(&self, t: &Ty) -> Option<Vec<Ty>> {
+        match t {
+            Ty::Adt(id, args) if !self.adts[*id as usize].is_enum() => {
+                Some(self.struct_fields(*id, args))
+            }
+            Ty::Tuple(ts) => Some(ts.clone()),
+            Ty::Closure(id) => Some(self.closures[*id as usize].fields.clone()),
+            _ => None,
+        }
+    }
+
+    /// Parameter types, return type and FnMut-ness of a callable type.
+    pub fn callable_sig(&self, t: &Ty) -> Option<(Vec<Ty>, Ty, bool)> {
+        match t {
+            Ty::Closure(id) => {
+                let c = &self.closures[*id as usize];
+                Some((c.params.clone(), c.ret.clone(), c.mutates))
+            }
+            Ty::FnPtr(ps, r) => Some((ps.clone(), (**r).clone(), false)),
+            _ => None,
+        }
+    }
+
+    /// Can a value of type `t` hold references (and so keep borrows alive)?
+    /// Looks through struct/enum fields and closure captures.
+    pub fn has_refs(&self, t: &Ty) -> bool {
+        self.has_refs_depth(t, 0)
+    }
+
+    fn has_refs_depth(&self, t: &Ty, depth: u32) -> bool {
+        if depth > 64 {
+            return true;
+        }
+        match t {
+            Ty::Ref(..) => true,
+            // memory owned through a raw pointer (a Vec's buffer) counts too
+            Ty::Array(e, _) | Ty::Slice(e) | Ty::Ptr(e) => self.has_refs_depth(e, depth + 1),
+            Ty::Tuple(ts) => ts.iter().any(|t| self.has_refs_depth(t, depth + 1)),
+            Ty::Closure(id) => self.closures[*id as usize]
+                .fields
+                .iter()
+                .any(|t| self.has_refs_depth(t, depth + 1)),
+            Ty::Adt(id, args) => {
+                let a = &self.adts[*id as usize];
+                a.fields
+                    .iter()
+                    .chain(a.variants.iter().flatten())
+                    .any(|f| self.has_refs_depth(&f.subst(args), depth + 1))
+            }
+            _ => false,
         }
     }
 
@@ -1323,6 +1412,10 @@ impl Checker {
         match t {
             Ty::Array(e, n) => *n > 0 && self.needs_drop_depth(e, depth + 1),
             Ty::Tuple(ts) => ts.iter().any(|t| self.needs_drop_depth(t, depth + 1)),
+            Ty::Closure(id) => self.closures[*id as usize]
+                .fields
+                .iter()
+                .any(|t| self.needs_drop_depth(t, depth + 1)),
             Ty::Adt(id, args) => {
                 let a = &self.adts[*id as usize];
                 a.drop_impl.is_some()
@@ -1344,6 +1437,11 @@ impl Checker {
             Ty::Array(e, _) => self.ensure_drop(e),
             Ty::Tuple(ts) => {
                 for t in ts.clone() {
+                    self.ensure_drop(&t);
+                }
+            }
+            Ty::Closure(id) => {
+                for t in self.closures[*id as usize].fields.clone() {
                     self.ensure_drop(&t);
                 }
             }
@@ -1405,12 +1503,10 @@ impl Checker {
         // check bounds
         let generics = self.impls[iid as usize].generics.clone();
         let module = self.impls[iid as usize].module;
+        let env = generic_env(&generics, &args);
         for (g, a) in generics.iter().zip(&args) {
             for b in &g.bounds {
-                let Ok(tid) = self.resolve_trait_ref(b, module) else {
-                    return None;
-                };
-                if !self.implements(a, tid) {
+                if !self.bound_holds(b, module, &env, a).unwrap_or(false) {
                     return None;
                 }
             }
@@ -1426,8 +1522,53 @@ impl Checker {
         module: ModId,
         span: Span,
     ) -> Result<()> {
+        self.check_bounds_in(generics, args, module, span, Env::default())
+    }
+
+    /// `check_bounds` where the bounds may also mention names from `base`
+    /// (the enclosing impl's generic parameters and `Self`).
+    pub fn check_bounds_in(
+        &mut self,
+        generics: &[GenericParam],
+        args: &[Ty],
+        module: ModId,
+        span: Span,
+        base: Env,
+    ) -> Result<()> {
+        let mut env = base;
+        env.names.extend(generic_env(generics, args).names);
         for (g, a) in generics.iter().zip(args) {
             for b in &g.bounds {
+                if let TypeKind::FnTrait(mutable, ..) = &b.kind {
+                    if !self.bound_holds(b, module, &env, a)? {
+                        let want = self.fn_bound_str(b, module, &env)?;
+                        let have = match self.callable_sig(a) {
+                            Some((ps, r, m)) => format!(
+                                "{}({}) -> {}",
+                                if m { "FnMut" } else { "Fn" },
+                                ps.iter()
+                                    .map(|t| self.ty_str(t))
+                                    .collect::<Vec<_>>()
+                                    .join(", "),
+                                self.ty_str(&r)
+                            ),
+                            None => format!("`{}`, which is not callable", self.ty_str(a)),
+                        };
+                        let hint = if !mutable && self.callable_sig(a).is_some_and(|s| s.2) {
+                            "; the closure mutates captured state, so the bound must be `FnMut`"
+                        } else {
+                            ""
+                        };
+                        return Err(Diagnostic::new(
+                            span,
+                            format!(
+                                "expected a callable `{}: {want}`, found {have}{hint}",
+                                g.name.name
+                            ),
+                        ));
+                    }
+                    continue;
+                }
                 let tid = self.resolve_trait_ref(b, module)?;
                 if !self.implements(a, tid) {
                     let tys = self.ty_str(a);
@@ -1437,6 +1578,54 @@ impl Checker {
             }
         }
         Ok(())
+    }
+
+    /// Does `arg` satisfy bound `b` (a trait or an `Fn(...)`/`FnMut(...)` bound)?
+    pub fn bound_holds(
+        &mut self,
+        b: &TypeExpr,
+        module: ModId,
+        env: &Env,
+        arg: &Ty,
+    ) -> Result<bool> {
+        if let TypeKind::FnTrait(mutable, ps, r) = &b.kind {
+            let Some((aps, ar, amut)) = self.callable_sig(arg) else {
+                return Ok(false);
+            };
+            let ps: Vec<Ty> = ps
+                .iter()
+                .map(|t| self.resolve_type(t, module, env))
+                .collect::<Result<_>>()?;
+            let r = match r {
+                Some(r) => self.resolve_type(r, module, env)?,
+                None => Ty::unit(),
+            };
+            return Ok(ps == aps && r == ar && (*mutable || !amut));
+        }
+        let tid = self.resolve_trait_ref(b, module)?;
+        Ok(self.implements(arg, tid))
+    }
+
+    fn fn_bound_str(&mut self, b: &TypeExpr, module: ModId, env: &Env) -> Result<String> {
+        let TypeKind::FnTrait(mutable, ps, r) = &b.kind else {
+            return Ok(String::new());
+        };
+        let ps: Vec<String> = ps
+            .iter()
+            .map(|t| self.resolve_type(t, module, env).map(|t| self.ty_str(&t)))
+            .collect::<Result<_>>()?;
+        let r = match r {
+            Some(r) => {
+                let t = self.resolve_type(r, module, env)?;
+                self.ty_str(&t)
+            }
+            None => "()".into(),
+        };
+        Ok(format!(
+            "{}({}) -> {r}",
+            if *mutable { "FnMut" } else { "Fn" },
+            ps.join(", ")
+        ))
     }
 
     // ------------------------------------------------------------- instances
@@ -1515,22 +1704,29 @@ impl Checker {
                 return;
             }
             match expr::check_fn(self, &key, name) {
-                Ok(f) => {
-                    let mut tys = Vec::new();
-                    for l in &f.locals {
-                        tys.push(l.ty.clone());
+                Ok((f, closures)) => {
+                    // a function and the closures defined in it
+                    for f in std::iter::once(f).chain(closures) {
+                        let mut tys = Vec::new();
+                        for l in &f.locals {
+                            tys.push(l.ty.clone());
+                        }
+                        collect_expr_tys(&f.body, &mut tys);
+                        for t in tys {
+                            self.ensure_drop(&t);
+                        }
+                        self.out_funcs.push(f);
                     }
-                    collect_expr_tys(&f.body, &mut tys);
-                    match crate::borrowck::check(self, &f) {
-                        Ok(()) => {}
-                        Err(ds) => self.diags.extend(ds),
-                    }
-                    for t in tys {
-                        self.ensure_drop(&t);
-                    }
-                    self.out_funcs.push(f);
                 }
                 Err(d) => self.error(d),
+            }
+        }
+        // Borrow checking runs once every function is known, so calls can use
+        // what each callee's result borrows from.
+        self.summaries = crate::borrowck::summaries(self, &self.out_funcs);
+        for i in 0..self.out_funcs.len() {
+            if let Err(ds) = crate::borrowck::check(self, &self.out_funcs[i]) {
+                self.diags.extend(ds);
             }
         }
     }
@@ -1588,7 +1784,7 @@ impl Checker {
                 "statics cannot hold values that need `drop`",
             ));
         }
-        if contains_ref(&t) && !matches!(&t, Ty::Ref(inner, false) if **inner == Ty::Str) {
+        if self.has_refs(&t) && !matches!(&t, Ty::Ref(inner, false) if **inner == Ty::Str) {
             return Err(Diagnostic::new(
                 ty.span,
                 "statics cannot hold references (except `&str` literals)",
@@ -1614,6 +1810,15 @@ fn fid_is_main(f: &FnDef) -> bool {
     f.decl.name.name == "main" && f.owner == FnOwner::Free
 }
 
+/// Map generic parameter names to concrete arguments.
+fn generic_env(generics: &[GenericParam], args: &[Ty]) -> Env {
+    let mut env = Env::default();
+    for (g, a) in generics.iter().zip(args) {
+        env.names.insert(g.name.name.clone(), a.clone());
+    }
+    env
+}
+
 pub fn prim_type(name: &str) -> Option<Ty> {
     if let Some(i) = IntTy::from_name(name) {
         return Some(Ty::Int(i));
@@ -1627,6 +1832,8 @@ pub fn prim_type(name: &str) -> Option<Ty> {
     })
 }
 
+/// Does `t` mention a reference anywhere in its type arguments? (Shallow:
+/// use `Checker::has_refs` to also look inside struct and closure fields.)
 pub fn contains_ref(t: &Ty) -> bool {
     match t {
         Ty::Ref(..) => true,
@@ -1637,7 +1844,10 @@ pub fn contains_ref(t: &Ty) -> bool {
 }
 
 fn ffi_safe(t: &Ty) -> bool {
-    matches!(t, Ty::Int(_) | Ty::Float(_) | Ty::Bool | Ty::Ptr(_))
+    matches!(
+        t,
+        Ty::Int(_) | Ty::Float(_) | Ty::Bool | Ty::Ptr(_) | Ty::FnPtr(..)
+    )
 }
 
 /// Could two impl self-type templates match the same concrete type?
@@ -1673,6 +1883,15 @@ pub fn xir_children(e: &xir::Expr, f: &mut dyn FnMut(&xir::Expr)) {
                 f(i);
             }
             xir::Place::Deref(e) => f(e),
+            xir::Place::Slice(b, lo, hi) => {
+                place(b, f);
+                if let Some(lo) = lo {
+                    f(lo);
+                }
+                if let Some(hi) = hi {
+                    f(hi);
+                }
+            }
             _ => {}
         }
     }
@@ -1686,6 +1905,10 @@ pub fn xir_children(e: &xir::Expr, f: &mut dyn FnMut(&xir::Expr)) {
         K::Binary(_, a, b) => {
             f(a);
             f(b);
+        }
+        K::CallPtr(callee, args) => {
+            f(callee);
+            args.iter().for_each(|a| f(a));
         }
         K::Call(_, args)
         | K::Intrinsic(_, args)
@@ -1728,6 +1951,7 @@ pub fn xir_children(e: &xir::Expr, f: &mut dyn FnMut(&xir::Expr)) {
                 f(&a.body);
             }
         }
+        K::FnRef(_) => {}
         K::Int(_) | K::Float(_) | K::Bool(_) | K::Str(_) | K::Unit | K::Continue(_) => {}
     }
 }

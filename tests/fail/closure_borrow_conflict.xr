@@ -1,0 +1,7 @@
+fn main() {
+    let mut c = 0
+    let mut inc = || c += 1
+    println(c)
+    inc()
+}
+// error: cannot use `c` because it is mutably borrowed

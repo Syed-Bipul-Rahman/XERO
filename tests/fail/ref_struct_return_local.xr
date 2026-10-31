@@ -1,0 +1,9 @@
+struct View { s: &str }
+
+fn make() -> View {
+    let local = String.from("gone")
+    View { s: local.as_str() }
+}
+
+fn main() {}
+// error: returns a reference to `local`

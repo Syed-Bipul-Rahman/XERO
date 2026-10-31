@@ -101,6 +101,10 @@ pub enum Ty {
     Adt(AdtId, Vec<Ty>),
     /// A generic parameter inside a signature/field template.
     Param(u32),
+    /// The unique type of one closure expression (its captures live in the checker).
+    Closure(u32),
+    /// A plain function pointer: `fn(A, B) -> R`.
+    FnPtr(Vec<Ty>, Box<Ty>),
 }
 
 impl Ty {
@@ -146,6 +150,7 @@ impl Ty {
             Ty::Param(_) => true,
             Ty::Ref(t, _) | Ty::Ptr(t) | Ty::Array(t, _) | Ty::Slice(t) => t.has_params(),
             Ty::Tuple(ts) | Ty::Adt(_, ts) => ts.iter().any(|t| t.has_params()),
+            Ty::FnPtr(ps, r) => ps.iter().any(|t| t.has_params()) || r.has_params(),
             _ => false,
         }
     }
@@ -163,6 +168,10 @@ impl Ty {
             Ty::Slice(t) => Ty::Slice(Box::new(t.subst(args))),
             Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| t.subst(args)).collect()),
             Ty::Adt(id, ts) => Ty::Adt(*id, ts.iter().map(|t| t.subst(args)).collect()),
+            Ty::FnPtr(ps, r) => Ty::FnPtr(
+                ps.iter().map(|t| t.subst(args)).collect(),
+                Box::new(r.subst(args)),
+            ),
             _ => self.clone(),
         }
     }
@@ -203,6 +212,11 @@ pub fn match_template(pat: &Ty, ty: &Ty, out: &mut Vec<Option<Ty>>) -> bool {
             i1 == i2
                 && a.len() == b.len()
                 && a.iter().zip(b).all(|(x, y)| match_template(x, y, out))
+        }
+        (Ty::FnPtr(a, r1), Ty::FnPtr(b, r2)) => {
+            a.len() == b.len()
+                && a.iter().zip(b).all(|(x, y)| match_template(x, y, out))
+                && match_template(r1, r2, out)
         }
         _ => pat == ty,
     }
@@ -265,6 +279,21 @@ impl fmt::Display for TyFmt<'_> {
                 Ok(())
             }
             Ty::Param(i) => write!(f, "{}", (self.param_name)(*i)),
+            Ty::Closure(id) => write!(f, "closure#{id}"),
+            Ty::FnPtr(ps, r) => {
+                write!(f, "fn(")?;
+                for (i, t) in ps.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", sub(t))?;
+                }
+                write!(f, ")")?;
+                if !r.is_unit() {
+                    write!(f, " -> {}", sub(r))?;
+                }
+                Ok(())
+            }
         }
     }
 }

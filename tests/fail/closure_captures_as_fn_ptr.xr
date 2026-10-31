@@ -1,0 +1,6 @@
+fn adder(n: i32) -> fn(i32) -> i32 {
+    |x| x + n
+}
+
+fn main() {}
+// error: this closure captures variables, so it cannot be used as the plain function pointer

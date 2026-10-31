@@ -1,6 +1,6 @@
-# The Xero Language Reference (v0.1)
+# The Xero Language Reference (v0.2)
 
-This document describes the language as implemented by `xeroc` 0.1. Features
+This document describes the language as implemented by `xeroc` 0.2. Features
 that are reserved but not implemented yet are marked **(reserved)**.
 
 ## 1. Lexical structure
@@ -86,6 +86,7 @@ The **prelude** is imported everywhere. It provides `Option`, `Some`, `None`,
 | `&[T]`, `&mut [T]` | slices (pointer + length) |
 | `&str` | string slice (UTF-8 bytes + length) |
 | `*T` | raw pointer (dereferencing requires `unsafe`) |
+| `fn(A, B) -> R` | function pointer: a named function or a closure without captures |
 | `struct`, `enum` | user-defined types |
 
 There is **no null**. An optional value is an `Option<T>`.
@@ -103,6 +104,26 @@ let u = User(String.from("Bipul"), 25)                 // positional
 ```
 
 Struct layout follows the C layout rules, so a struct can be shared with C as-is.
+
+Fields can be references. A struct holding a reference borrows what it points
+to, and the borrow checker keeps that borrow alive for as long as the struct
+is used, with no lifetime annotations:
+
+```xero
+struct Parser {
+    input: &str
+    pos: usize
+}
+
+impl Parser {
+    fn word(&mut self) -> &str { ... }   // returns part of `input`
+}
+
+let text = String.from("the quick fox")
+let mut p = Parser { input: text.as_str(), pos: 0 }
+let w = p.word()      // borrows `text`, not `p`: `p` stays usable
+// text.clear()       // error: `text` is borrowed while `p` or `w` is in use
+```
 
 ### Enums
 
@@ -182,9 +203,17 @@ The rules in detail:
   borrow only becomes active when the call starts.
 * `drop x` destroys `x` immediately.
 * Assigning to a variable that owns a value drops the old value first.
-* **References in fields**: struct and enum fields can't be references in
-  v0.1, because there are no lifetime parameters yet. Generic containers can
-  still hold references, for example `Option<&T>` as returned by `Vec.get`.
+* **References in values**: a struct, enum, closure or container that holds
+  references (`Parser { input: &str }`, `Vec<&str>`, `Option<&T>`) keeps
+  their borrows alive when it is moved, returned or stored. Passing such a
+  value by `&mut` along with other borrows (`names.push(s.as_str())`) makes it
+  hold those borrows too.
+* **What a returned reference borrows** is worked out from the function body,
+  so no lifetime annotations are needed. `fn field(&self) -> &T { &self.f }`
+  keeps the receiver borrowed; `fn word(&mut self) -> &str` that returns part
+  of `self.input` keeps only the text borrowed.
+* A reference to a local can never be stored behind a reference
+  (`self.r = &local`), because that memory may outlive the local.
 
 ### Data-race freedom
 
@@ -213,6 +242,39 @@ impl i32 {                                    // extension methods on any type
 
 Method calls borrow or dereference the receiver automatically (`u.rename("y")`
 borrows `u` mutably). All calls are statically dispatched.
+
+### Closures
+
+```xero
+let k = 10
+let scale = |x: i32| x * k              // captures `k` by reference
+let mut total = 0
+let mut add = |x: i32| total += x       // mutates a capture: an FnMut closure
+let name = String.from("xero")
+let greet = move || println(&name)      // `move` takes ownership of captures
+
+fn apply<F: Fn(i32) -> i32>(f: F, x: i32) -> i32 { f(x) }
+apply(|x| x + 1, 5)                     // parameter types come from the bound
+
+fn twice(f: fn(i32) -> i32, x: i32) -> i32 { f(f(x)) }
+twice(double, 3)                        // named functions are values
+twice(|x| x - 1, 3)                     // so are closures without captures
+```
+
+* Each closure has its own type, a struct holding its captures, plus a
+  generated function. A parameter `F: Fn(A) -> R` (or `FnMut`) is
+  monomorphized per closure, so calls are direct and usually inlined: no
+  allocation and no dynamic dispatch.
+* Captures are by reference, or by `&mut` when the body mutates them, which
+  makes the closure `FnMut`. Calling an `FnMut` closure needs a `let mut`
+  binding. `move` closures own their captures, and the borrow checker treats
+  captures like any other borrow.
+* Parameter types are inferred from an `Fn(...)` bound or a `fn(...)`
+  parameter; otherwise annotate them (`|x: i32|`). A closure that uses
+  `return` needs a return type: `|x: i32| -> i32 { ... }`.
+* `fn(A) -> R` values are plain function pointers, compatible with C callbacks.
+  Only closures without captures convert to them.
+* A field holding a closure is called like a method: `self.on_click(x)`.
 
 ## 6. Traits and generics
 
@@ -260,7 +322,38 @@ impl<T: Print> Print for Stack<T> { ... }
   · `..` · `|` · `^` · `&` · `<< >>` · `+ -` · `* / %` · `as` · unary
   `- ! * & move copy try` · calls, fields and indexing.
 * `x += 1` and the other compound assignments: `-= *= /= %= &= |= ^= <<= >>=`.
-* `a == b` works on numbers, `bool`, raw pointers, field-less enums and `&str`.
+* Slicing: `&arr[a..b]`, `&arr[a..]`, `&arr[..b]`, `&arr[a..=b]` and `&mut v[..]`
+  on arrays, slices and `&str`. The range is bounds-checked once, when the
+  slice is formed.
+* Untyped literals default to `i32` and `f64`, unless context or a later use
+  gives them a type: in `let mut total = 0` followed by `total += x` with
+  `x: u64`, `total` is a `u64`.
+
+### Operators on your own types
+
+Operators on structs, enums, tuples and arrays call prelude traits, and are
+statically dispatched:
+
+| Operators | Trait | Method(s) | Operands |
+|---|---|---|---|
+| `==` `!=` | `Eq` | `eq` (`ne` is provided) | borrowed |
+| `<` `<=` `>` `>=` | `Ord` (extends `Eq`) | `cmp` returns `Ordering.Less/Equal/Greater` (`lt`, `le`, `gt`, `ge` are provided) | borrowed |
+| `+` `-` `*` `/` `%` | `Add` `Sub` `Mul` `Div` `Rem` | `add` `sub` `mul` `div` `rem` | moved |
+| unary `-` | `Neg` | `neg` | moved |
+
+```xero
+impl Add for Vec2 {
+    fn add(self, o: Vec2) -> Vec2 { Vec2 { x: self.x + o.x, y: self.y + o.y } }
+}
+impl Ord for Version {
+    fn cmp(&self, o: &Version) -> Ordering { compare(self.major, o.major) }
+}
+```
+
+Built-in numbers, `bool` and `str` implement these traits too, so bounds like
+`T: Ord` and `T: Add` accept them. `compare(a, b)` returns the `Ordering` of any
+two values that support `<` and `>`. `a += b` on a copyable user type means
+`a = a + b`.
 
 ### Patterns
 
@@ -339,9 +432,9 @@ pointers and `usize`. Pointer arithmetic: `p + n` and `p - n` advance by whole e
 
 | Module | Contents |
 |---|---|
-| prelude | `Option`, `Result`, `Print` trait, `print`/`println`/`eprint`/`eprintln`, `panic`, `assert`, `str` methods (`as_bytes`, `is_empty`, `byte_at`) |
+| prelude | `Option`, `Result`, `Print`, `print`/`println`/`eprint`/`eprintln`, `panic`, `assert`, operator traits (`Eq`, `Ord`, `Add`, `Sub`, `Mul`, `Div`, `Rem`, `Neg`), `Ordering`, `compare`, `str` methods (`as_bytes`, `is_empty`, `byte_at`) |
 | `std.mem` | `Box<T>`, `alloc`, `realloc_array`, `dealloc`, `swap`, `replace`, `copy_values` |
-| `std.vec` | `Vec<T>`: `push pop get get_mut at at_mut set swap insert remove clear reserve as_slice as_mut_slice` |
+| `std.vec` | `Vec<T>`: `push pop get get_mut at at_mut set swap insert remove clear reserve as_slice as_mut_slice`, and with closures `map filter for_each any all count position sort_by sort` |
 | `std.string` | `String`: `from new push_str push_byte push_int as_str len equals clear` |
 | `std.math` | `min max clamp abs isqrt sqrt pow_int gcd PI E` |
 | `std.io` | `read_into write_all exit_process STDIN STDOUT STDERR` |

@@ -126,6 +126,10 @@ pub enum Place {
     Index(Box<Place>, Box<Expr>),
     /// Dereference of a reference or raw pointer value.
     Deref(Box<Expr>),
+    /// `base[lo..hi]`: an unsized sub-range of an array, slice or `str`
+    /// (bounds-checked once, when it is formed). Missing bounds mean the
+    /// start / the end. Only ever borrowed or indexed.
+    Slice(Box<Place>, Option<Box<Expr>>, Option<Box<Expr>>),
 }
 
 #[derive(Clone, Debug)]
@@ -186,6 +190,10 @@ pub enum ExprKind {
     /// `&[T; N]` -> `&[T]`
     ArrayToSlice(Box<Expr>),
     Call(String, Vec<Expr>),
+    /// Call through a function pointer value.
+    CallPtr(Box<Expr>, Vec<Expr>),
+    /// The address of a function, as a `fn(...)` value.
+    FnRef(String),
     Intrinsic(Intrinsic, Vec<Expr>),
     Struct(Vec<Expr>),
     Tuple(Vec<Expr>),

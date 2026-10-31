@@ -681,6 +681,18 @@ impl Parser {
                 self.bump();
                 TypeKind::SelfType
             }
+            Tok::Kw(Kw::Fn) => {
+                self.bump();
+                let (params, ret) = self.fn_type_sig()?;
+                TypeKind::FnPtr(params, ret)
+            }
+            Tok::Ident(name)
+                if (name == "Fn" || name == "FnMut") && matches!(self.peek_at(1), Tok::LParen) =>
+            {
+                self.bump();
+                let (params, ret) = self.fn_type_sig()?;
+                TypeKind::FnTrait(name == "FnMut", params, ret)
+            }
             Tok::Ident(_) => {
                 let mut path = vec![self.ident()?];
                 while self.at(&Tok::Dot) && matches!(self.peek_at(1), Tok::Ident(_)) {
@@ -707,6 +719,88 @@ impl Parser {
         Ok(TypeExpr {
             kind,
             span: start.to(self.prev_span()),
+        })
+    }
+
+    /// `(A, B) -> R` after `fn` / `Fn` / `FnMut`.
+    fn fn_type_sig(&mut self) -> Result<(Vec<TypeExpr>, Option<Box<TypeExpr>>)> {
+        self.expect(&Tok::LParen)?;
+        let params = self.with_nl(false, |p| {
+            let mut params = Vec::new();
+            while !p.at(&Tok::RParen) {
+                params.push(p.ty()?);
+                if !p.eat(&Tok::Comma) {
+                    break;
+                }
+            }
+            p.expect(&Tok::RParen)?;
+            Ok(params)
+        })?;
+        let ret = if self.eat(&Tok::Arrow) {
+            Some(Box::new(self.ty()?))
+        } else {
+            None
+        };
+        Ok((params, ret))
+    }
+
+    /// `|a, mut b, c: T| body` / `|x| -> T { ... }` (after an optional `move`).
+    fn closure(&mut self, is_move: bool) -> Result<Expr> {
+        let start = self.span();
+        let mut params = Vec::new();
+        if !self.eat(&Tok::OrOr) {
+            self.expect(&Tok::Pipe)?;
+            self.with_nl(false, |p| {
+                while !p.at(&Tok::Pipe) {
+                    let mutable = p.eat_kw(Kw::Mut);
+                    let name = match p.peek().clone() {
+                        Tok::Underscore => {
+                            let span = p.bump().span;
+                            Ident {
+                                name: "_".into(),
+                                span,
+                            }
+                        }
+                        _ => p.ident()?,
+                    };
+                    let ty = if p.eat(&Tok::Colon) {
+                        Some(p.ty()?)
+                    } else {
+                        None
+                    };
+                    params.push(ClosureParam { name, mutable, ty });
+                    if !p.eat(&Tok::Comma) {
+                        break;
+                    }
+                }
+                p.expect(&Tok::Pipe).map(|_| ())
+            })?;
+        }
+        let ret = if self.eat(&Tok::Arrow) {
+            Some(self.ty()?)
+        } else {
+            None
+        };
+        let body = if ret.is_some() {
+            let b = self.block()?;
+            let span = b.span;
+            Expr {
+                kind: ExprKind::Block(b),
+                span,
+            }
+        } else {
+            // `|| count += 1` is allowed: the body may be an assignment
+            self.expr_stmt()?
+        };
+        let span = start.to(body.span);
+        Ok(Expr {
+            kind: ExprKind::Closure(Box::new(ClosureExpr {
+                params,
+                ret,
+                body,
+                is_move,
+            })),
+            span,
         })
     }
 
@@ -1006,6 +1100,11 @@ impl Parser {
                 let e = self.unary()?;
                 Ok(mk(self, ExprKind::Ref(m, Box::new(e))))
             }
+            Tok::Kw(Kw::Move) if matches!(self.peek_at(1), Tok::Pipe | Tok::OrOr) => {
+                self.bump();
+                self.closure(true)
+            }
+            Tok::Pipe | Tok::OrOr => self.closure(false),
             Tok::Kw(Kw::Move) => {
                 self.bump();
                 let e = self.unary()?;

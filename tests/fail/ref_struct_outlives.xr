@@ -1,0 +1,11 @@
+struct View { s: &str }
+
+fn main() {
+    let mut v = View { s: "static" }
+    {
+        let local = String.from("short-lived")
+        v = View { s: local.as_str() }
+    }
+    println(v.s)
+}
+// error: `local` does not live long enough

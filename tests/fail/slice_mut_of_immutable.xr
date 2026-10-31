@@ -1,0 +1,7 @@
+fn zero(xs: &mut [i32]) {}
+
+fn main() {
+    let a = [1, 2, 3]
+    zero(&mut a[0..2])
+}
+// error: cannot mutate immutable variable `a`

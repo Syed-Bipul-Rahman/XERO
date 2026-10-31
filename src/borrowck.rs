@@ -236,7 +236,7 @@ impl<'a> Ck<'a> {
                 path.push(Proj::Field(*i));
                 Some((r, path))
             }
-            Place::Index(b, _) => {
+            Place::Index(b, _) | Place::Slice(b, ..) => {
                 let (r, mut path) = Self::place_path(b)?;
                 path.push(Proj::Index);
                 Some((r, path))
@@ -278,6 +278,15 @@ impl<'a> Ck<'a> {
                 l
             }
             Place::Deref(e) => self.expr(e),
+            Place::Slice(b, lo, hi) => {
+                let l = self.place_exprs(b);
+                self.in_flight.push(l.clone());
+                for e in [lo, hi].into_iter().flatten() {
+                    self.expr(e);
+                }
+                self.in_flight.pop();
+                l
+            }
         }
     }
 
@@ -304,7 +313,7 @@ impl<'a> Ck<'a> {
                     ))
                 }
             }
-            Place::Field(b, _) | Place::Index(b, _) => self.is_mutable(b),
+            Place::Field(b, _) | Place::Index(b, _) | Place::Slice(b, ..) => self.is_mutable(b),
             Place::Deref(e) => match &e.ty {
                 Ty::Ref(_, true) | Ty::Ptr(_) => Ok(()),
                 Ty::Ref(_, false) => {
@@ -461,7 +470,7 @@ impl<'a> Ck<'a> {
                     }
                     cur = b;
                 }
-                Place::Index(..) => {
+                Place::Index(..) | Place::Slice(..) => {
                     self.error(span, format!("cannot move a `{}` out of an array or slice element; borrow it with `&` instead", self.ck.ty_str(ty)));
                     return;
                 }
@@ -481,13 +490,18 @@ impl<'a> Ck<'a> {
         match p {
             Place::Local(l) => Some(self.f.locals[*l as usize].ty.clone()),
             Place::Static(..) => None,
-            Place::Field(b, i) => match self.place_ty(b)? {
-                Ty::Adt(id, args) => self.ck.struct_fields(id, &args).get(*i as usize).cloned(),
-                Ty::Tuple(ts) => ts.get(*i as usize).cloned(),
-                _ => None,
-            },
+            Place::Field(b, i) => self
+                .ck
+                .fields_of(&self.place_ty(b)?)?
+                .get(*i as usize)
+                .cloned(),
             Place::Index(b, _) => match self.place_ty(b)? {
                 Ty::Array(e, _) | Ty::Slice(e) => Some(*e),
+                _ => None,
+            },
+            Place::Slice(b, ..) => match self.place_ty(b)? {
+                Ty::Array(e, _) | Ty::Slice(e) => Some(Ty::Slice(e)),
+                Ty::Str => Some(Ty::Str),
                 _ => None,
             },
             Place::Deref(e) => match &e.ty {
@@ -500,6 +514,12 @@ impl<'a> Ck<'a> {
     // ------------------------------------------------------------ expressions
 
     fn exprs_in_flight(&mut self, xs: &[Expr]) -> Loans {
+        self.exprs_in_flight_each(xs).0
+    }
+
+    /// Evaluate call arguments; returns all loans and each argument's loans.
+    fn exprs_in_flight_each(&mut self, xs: &[Expr]) -> (Loans, Vec<Loans>) {
+        let mut per: Vec<Loans> = Vec::new();
         let mut all = Loans::new();
         let base = self.in_flight.len();
         let mut reserved: Vec<(usize, Span, Place)> = Vec::new();
@@ -509,17 +529,21 @@ impl<'a> Ck<'a> {
                 self.tick();
                 let pl = self.place_exprs(p);
                 self.access(p, Access::Shared, e.span);
+                let mut mine = Loans::new();
                 if let Some(id) = self.new_loan(p, true, e.span) {
                     reserved.push((id, e.span, p.clone()));
-                    all.insert(id);
+                    mine.insert(id);
                 } else {
                     self.access(p, Access::Mutable, e.span);
                 }
-                all.extend(pl.iter().copied().filter(|_| matches!(p, Place::Deref(_))));
+                mine.extend(pl.iter().copied().filter(|_| matches!(p, Place::Deref(_))));
+                all.extend(mine.iter().copied());
+                per.push(mine);
                 continue;
             }
             let l = self.expr(e);
             all.extend(l.iter().copied());
+            per.push(l.clone());
             self.in_flight.push(l);
         }
         // activate reserved mutable loans
@@ -550,7 +574,7 @@ impl<'a> Ck<'a> {
             }
         }
         self.in_flight.truncate(base);
-        all
+        (all, per)
     }
 
     fn expr(&mut self, e: &Expr) -> Loans {
@@ -569,7 +593,7 @@ impl<'a> Ck<'a> {
                         self.mark_moved(p, e.span);
                     }
                 }
-                if crate::check::contains_ref(&e.ty) {
+                if self.ck.has_refs(&e.ty) {
                     loans
                 } else {
                     Loans::new()
@@ -594,7 +618,7 @@ impl<'a> Ck<'a> {
             }
             K::Cast(a, _) => {
                 let l = self.expr(a);
-                if crate::check::contains_ref(&e.ty) {
+                if self.ck.has_refs(&e.ty) {
                     l
                 } else {
                     Loans::new()
@@ -608,9 +632,50 @@ impl<'a> Ck<'a> {
                 self.in_flight.pop();
                 Loans::new()
             }
-            K::Call(_, args) | K::Intrinsic(_, args) => {
+            K::FnRef(_) => Loans::new(),
+            K::CallPtr(f, args) => {
+                let lf = self.expr(f);
+                self.in_flight.push(lf);
                 let l = self.exprs_in_flight(args);
-                if crate::check::contains_ref(&e.ty) {
+                self.in_flight.pop();
+                if self.ck.has_refs(&e.ty) {
+                    l
+                } else {
+                    Loans::new()
+                }
+            }
+            K::Call(name, args) => {
+                let (_, per) = self.exprs_in_flight_each(args);
+                self.flow_into_mut_args(args, &per, e.span);
+                if !self.ck.has_refs(&e.ty) {
+                    return Loans::new();
+                }
+                // the result keeps alive what it can point into (see `summaries`)
+                let mut out = Loans::new();
+                match self.ck.summaries.get(name) {
+                    Some(sum) => {
+                        for &(i, inner) in sum {
+                            let Some(direct) = per.get(i) else { continue };
+                            let deep = self.inner_loans(direct);
+                            if !inner {
+                                out.extend(direct.iter().copied());
+                            }
+                            out.extend(deep);
+                        }
+                    }
+                    None => {
+                        for direct in &per {
+                            let deep = self.inner_loans(direct);
+                            out.extend(direct.iter().copied());
+                            out.extend(deep);
+                        }
+                    }
+                }
+                out
+            }
+            K::Intrinsic(_, args) => {
+                let l = self.exprs_in_flight(args);
+                if self.ck.has_refs(&e.ty) {
                     l
                 } else {
                     Loans::new()
@@ -633,10 +698,11 @@ impl<'a> Ck<'a> {
                         self.st.holders.insert(*l, lv);
                     }
                     _ => {
-                        if let Some(l) = Self::root_local(p) {
-                            if !place_has_deref(p) {
-                                self.st.holders.entry(l).or_default().extend(lv);
-                            }
+                        if place_has_deref(p) {
+                            // memory behind a reference may outlive this function's locals
+                            self.check_store_behind_ref(&lv, e.span);
+                        } else if let Some(l) = Self::root_local(p) {
+                            self.st.holders.entry(l).or_default().extend(lv);
                         }
                     }
                 }
@@ -774,6 +840,91 @@ impl<'a> Ck<'a> {
         }
     }
 
+    /// Loans held by what `loans` point to, transitively (references stored
+    /// inside borrowed values).
+    fn inner_loans(&self, loans: &Loans) -> Loans {
+        let mut out = Loans::new();
+        let mut work: Vec<usize> = loans.iter().copied().collect();
+        let mut seen: HashSet<LocalId> = HashSet::new();
+        while let Some(id) = work.pop() {
+            let Root::Local(root) = self.loans[id].root.clone();
+            if !seen.insert(root) {
+                continue;
+            }
+            if let Some(h) = self.st.holders.get(&root) {
+                for &x in h {
+                    if out.insert(x) {
+                        work.push(x);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// A call `f(&mut x, &y)` where `x` can hold references may store `&y`
+    /// inside `x`: from then on `x` holds `y`'s loans. If the `&mut` points
+    /// outside this function (a parameter), no local may be stored.
+    fn flow_into_mut_args(&mut self, args: &[Expr], per: &[Loans], span: Span) {
+        for (i, a) in args.iter().enumerate() {
+            let Ty::Ref(inner, true) = &a.ty else {
+                continue;
+            };
+            if !self.ck.has_refs(inner) {
+                continue;
+            }
+            let mut others: Loans = per
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != i)
+                .flat_map(|(_, l)| l.iter().copied())
+                .collect();
+            let deep = self.inner_loans(&others);
+            others.extend(deep);
+            if others.is_empty() {
+                continue;
+            }
+            let targets: Vec<usize> = per[i]
+                .iter()
+                .copied()
+                .filter(|id| self.loans[*id].mutable)
+                .collect();
+            let mut outside = targets.is_empty();
+            for t in targets {
+                let loan = self.loans[t].clone();
+                if loan.via_deref() {
+                    outside = true;
+                    continue;
+                }
+                let Root::Local(root) = loan.root.clone();
+                let add: Vec<usize> = others
+                    .iter()
+                    .copied()
+                    .filter(|o| self.loans[*o].root != loan.root)
+                    .collect();
+                self.st.holders.entry(root).or_default().extend(add);
+            }
+            if outside {
+                self.check_store_behind_ref(&others, span);
+            }
+        }
+    }
+
+    /// Storing references to locals into memory reached through a reference.
+    fn check_store_behind_ref(&mut self, loans: &Loans, span: Span) {
+        if self.mode != Mode::Check {
+            return;
+        }
+        for id in loans {
+            let loan = self.loans[*id].clone();
+            if !loan.via_deref() {
+                let Root::Local(l) = loan.root.clone();
+                let msg = format!("{} does not live long enough: a reference to it would be stored in memory that outlives this function", self.name(l));
+                self.error_note(span, msg, loan.span, "borrowed here");
+            }
+        }
+    }
+
     fn pat_moves(&self, p: &Pat) -> bool {
         match p {
             Pat::Bind(id, BindMode::Value) => !self.ck.is_copy(&self.f.locals[*id as usize].ty),
@@ -800,7 +951,7 @@ impl<'a> Ck<'a> {
                     if place_has_deref(sp) {
                         held.extend(scrut_loans.iter().copied());
                     }
-                } else if crate::check::contains_ref(&self.f.locals[*id as usize].ty) {
+                } else if self.ck.has_refs(&self.f.locals[*id as usize].ty) {
                     held.extend(scrut_loans.iter().copied());
                 }
                 self.st.holders.insert(*id, held);
@@ -973,7 +1124,410 @@ impl<'a> Ck<'a> {
 fn place_has_deref(p: &Place) -> bool {
     match p {
         Place::Deref(_) => true,
-        Place::Field(b, _) | Place::Index(b, _) => place_has_deref(b),
+        Place::Field(b, _) | Place::Index(b, _) | Place::Slice(b, ..) => place_has_deref(b),
+        _ => false,
+    }
+}
+
+// ------------------------------------------------------------------------
+// Result summaries: what a function's returned references point into.
+//
+// A location is described relative to a parameter's value: level 1 is the
+// memory the argument value refers to directly (`&self.field`), level 2+
+// is memory reached through references stored inside it (`&self.input[..]`
+// where `input: &str`). At a call site, a level-1 result keeps the
+// argument's own loans alive; a level-2+ result only the loans the
+// argument's referent holds, so `p.word()` borrows the text, not `p`.
+
+/// (parameter index, `true` for level 2+ only).
+pub type Summary = BTreeSet<(usize, bool)>;
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+enum Mem {
+    /// Memory at `level` relative to parameter `i` (0 = the parameter variable).
+    Param(usize, u32),
+    /// A local of the function being summarized.
+    Frame(LocalId),
+}
+
+type Origins = BTreeSet<(usize, u32)>;
+
+struct OriginCx<'a> {
+    ck: &'a Checker,
+    f: &'a Func,
+    sums: &'a HashMap<String, Summary>,
+    locals: HashMap<LocalId, Origins>,
+    result: Origins,
+    breaks: Vec<Origins>,
+}
+
+pub fn summaries(ck: &Checker, funcs: &[Func]) -> HashMap<String, Summary> {
+    let mut sums: HashMap<String, Summary> = funcs
+        .iter()
+        .map(|f| (f.name.clone(), Summary::new()))
+        .collect();
+    for _ in 0..16 {
+        let mut changed = false;
+        for f in funcs {
+            if !ck.has_refs(&f.ret) && !contains_ptr(&f.ret) {
+                continue;
+            }
+            let mut cx = OriginCx {
+                ck,
+                f,
+                sums: &sums,
+                locals: HashMap::new(),
+                result: Origins::new(),
+                breaks: Vec::new(),
+            };
+            // locals are flow-insensitive: iterate until their origins settle
+            for _ in 0..4 {
+                let tail = cx.expr(&f.body);
+                cx.result.extend(tail);
+            }
+            let new: Summary = cx.result.iter().map(|&(i, lvl)| (i, lvl >= 2)).collect();
+            if sums.get(&f.name) != Some(&new) {
+                let mut merged = sums.get(&f.name).cloned().unwrap_or_default();
+                merged.extend(new);
+                sums.insert(f.name.clone(), merged);
+                changed = true;
+            }
+        }
+        if !changed {
+            return sums;
+        }
+    }
+    // did not settle (deep recursion): assume results point into every argument
+    for f in funcs {
+        if ck.has_refs(&f.ret) {
+            sums.insert(
+                f.name.clone(),
+                (0..f.params.len()).map(|i| (i, false)).collect(),
+            );
+        }
+    }
+    sums
+}
+
+impl OriginCx<'_> {
+    fn param_index(&self, l: LocalId) -> Option<usize> {
+        self.f.params.iter().position(|p| *p == l)
+    }
+
+    /// References stored in `mem` point to these locations.
+    fn targets(&self, mem: &[Mem]) -> Origins {
+        let mut out = Origins::new();
+        for m in mem {
+            match *m {
+                Mem::Param(i, k) => {
+                    out.insert((i, k + 1));
+                }
+                Mem::Frame(l) => out.extend(self.locals.get(&l).cloned().unwrap_or_default()),
+            }
+        }
+        out
+    }
+
+    /// Raw pointers to owned memory (a `Vec`'s buffer, a `Box`'s contents)
+    /// point into memory that belongs to their owner: same level.
+    fn same_level(&self, mem: &[Mem]) -> Origins {
+        let mut out = Origins::new();
+        for m in mem {
+            match *m {
+                Mem::Param(i, k) => {
+                    out.insert((i, k.max(1)));
+                }
+                Mem::Frame(l) => out.extend(self.locals.get(&l).cloned().unwrap_or_default()),
+            }
+        }
+        out
+    }
+
+    /// Where a value of type `ty` read from `mem` can point.
+    fn value_origins(&self, mem: &[Mem], ty: &Ty) -> Origins {
+        let mut o = Origins::new();
+        if self.ck.has_refs(ty) {
+            o.extend(self.targets(mem));
+        }
+        if contains_ptr(ty) {
+            o.extend(self.same_level(mem));
+        }
+        o
+    }
+
+    fn place_mem(&mut self, p: &Place) -> Vec<Mem> {
+        match p {
+            Place::Local(l) => match self.param_index(*l) {
+                Some(i) => vec![Mem::Param(i, 0)],
+                None => vec![Mem::Frame(*l)],
+            },
+            Place::Static(..) => Vec::new(),
+            Place::Field(b, _) => self.place_mem(b),
+            Place::Index(b, i) => {
+                self.expr(i);
+                self.place_mem(b)
+            }
+            Place::Slice(b, lo, hi) => {
+                for e in [lo, hi].into_iter().flatten() {
+                    self.expr(e);
+                }
+                self.place_mem(b)
+            }
+            Place::Deref(e) => match &e.kind {
+                K::Use(inner, _) => {
+                    let m = self.place_mem(inner);
+                    let o = if matches!(e.ty, Ty::Ptr(_)) {
+                        self.same_level(&m)
+                    } else {
+                        self.targets(&m)
+                    };
+                    o.into_iter().map(|(i, k)| Mem::Param(i, k)).collect()
+                }
+                _ => self
+                    .expr(e)
+                    .into_iter()
+                    .map(|(i, k)| Mem::Param(i, k))
+                    .collect(),
+            },
+        }
+    }
+
+    fn bind_pat(&mut self, pat: &Pat, mem: &[Mem]) {
+        match pat {
+            Pat::Bind(l, BindMode::Value) => {
+                let t = self.targets(mem);
+                self.locals.entry(*l).or_default().extend(t);
+            }
+            Pat::Bind(l, BindMode::Ref(_)) => {
+                let v: Origins = mem
+                    .iter()
+                    .filter_map(|m| match *m {
+                        Mem::Param(i, k) if k >= 1 => Some((i, k)),
+                        _ => None,
+                    })
+                    .collect();
+                self.locals.entry(*l).or_default().extend(v);
+            }
+            Pat::Tuple(ps) | Pat::Variant(_, ps) | Pat::Or(ps) => {
+                for q in ps {
+                    self.bind_pat(q, mem);
+                }
+            }
+            Pat::Deref(inner) => {
+                let deeper: Vec<Mem> = self
+                    .targets(mem)
+                    .into_iter()
+                    .map(|(i, k)| Mem::Param(i, k))
+                    .collect();
+                self.bind_pat(inner, &deeper);
+            }
+            _ => {}
+        }
+    }
+
+    fn expr(&mut self, e: &Expr) -> Origins {
+        // raw pointers carry where they point too, so `&*(self.ptr + i)` is traced
+        let refs = self.ck.has_refs(&e.ty) || contains_ptr(&e.ty);
+        match &e.kind {
+            K::Use(p, _) => {
+                let m = self.place_mem(p);
+                self.value_origins(&m, &e.ty)
+            }
+            K::Borrow(p, _) => self
+                .place_mem(p)
+                .into_iter()
+                .filter_map(|m| match m {
+                    Mem::Param(i, k) if k >= 1 => Some((i, k)),
+                    _ => None,
+                })
+                .collect(),
+            K::Call(name, args) => {
+                let os: Vec<Origins> = args.iter().map(|a| self.expr(a)).collect();
+                if !refs {
+                    return Origins::new();
+                }
+                match self.sums.get(name) {
+                    Some(sum) => {
+                        let mut out = Origins::new();
+                        for &(i, inner) in sum {
+                            if let Some(o) = os.get(i) {
+                                // level-2+ results point one level deeper than the argument
+                                out.extend(
+                                    o.iter()
+                                        .map(|&(p, k)| if inner { (p, k + 1) } else { (p, k) }),
+                                );
+                            }
+                        }
+                        out
+                    }
+                    None => os.into_iter().flatten().collect(),
+                }
+            }
+            K::CallPtr(f, args) => {
+                self.expr(f);
+                let os: Origins = args.iter().flat_map(|a| self.expr(a)).collect();
+                if refs {
+                    os
+                } else {
+                    Origins::new()
+                }
+            }
+            K::Intrinsic(i, args) => {
+                let os: Vec<Origins> = args.iter().map(|a| self.expr(a)).collect();
+                match i {
+                    // a slice/str built from a pointer points where the pointer does
+                    xir::Intrinsic::MakeFat | xir::Intrinsic::DataPtr => {
+                        os.into_iter().next().unwrap_or_default()
+                    }
+                    // a value read through a pointer: what that memory holds
+                    xir::Intrinsic::PtrRead | xir::Intrinsic::VolatileLoad => {
+                        let mem: Vec<Mem> = os
+                            .into_iter()
+                            .next()
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|(i, k)| Mem::Param(i, k))
+                            .collect();
+                        self.value_origins(&mem, &e.ty)
+                    }
+                    _ => Origins::new(),
+                }
+            }
+            K::ArrayToSlice(a) | K::ArrayRepeat(a, _) => self.expr(a),
+            K::Cast(a, _) => {
+                let o = self.expr(a);
+                if refs {
+                    o
+                } else {
+                    Origins::new()
+                }
+            }
+            K::Struct(xs) | K::Tuple(xs) | K::Array(xs) | K::Variant(_, xs) => {
+                xs.iter().flat_map(|x| self.expr(x)).collect()
+            }
+            K::Unary(_, a) => {
+                self.expr(a);
+                Origins::new()
+            }
+            K::Binary(_, a, b) => {
+                let o = self.expr(a);
+                self.expr(b);
+                // pointer arithmetic keeps the pointer's origin
+                if matches!(e.ty, Ty::Ptr(_)) {
+                    o
+                } else {
+                    Origins::new()
+                }
+            }
+            K::Assign(p, v) => {
+                let o = self.expr(v);
+                let mut cur = p;
+                loop {
+                    match cur {
+                        Place::Local(l) => {
+                            self.locals.entry(*l).or_default().extend(o);
+                            break;
+                        }
+                        Place::Field(b, _) => cur = b,
+                        _ => {
+                            self.place_mem(cur);
+                            break;
+                        }
+                    }
+                }
+                Origins::new()
+            }
+            K::CompoundAssign(_, p, v) => {
+                self.expr(v);
+                self.place_mem(p);
+                Origins::new()
+            }
+            K::Block(b) => {
+                for s in &b.stmts {
+                    match s {
+                        Stmt::Let(l, v) => {
+                            let o = self.expr(v);
+                            self.locals.entry(*l).or_default().extend(o);
+                        }
+                        Stmt::LetPat(pat, v) => {
+                            let o = self.expr(v);
+                            let mem: Vec<Mem> = o
+                                .iter()
+                                .map(|&(i, k)| Mem::Param(i, k.saturating_sub(1)))
+                                .collect();
+                            self.bind_pat(pat, &mem);
+                        }
+                        Stmt::Expr(x) => {
+                            self.expr(x);
+                        }
+                    }
+                }
+                match &b.tail {
+                    Some(t) => self.expr(t),
+                    None => Origins::new(),
+                }
+            }
+            K::If(c, t, els) => {
+                self.expr(c);
+                let mut o = self.expr(t);
+                if let Some(x) = els {
+                    o.extend(self.expr(x));
+                }
+                o
+            }
+            K::Loop(b, _) => {
+                self.breaks.push(Origins::new());
+                self.expr(b);
+                self.breaks.pop().unwrap_or_default()
+            }
+            K::Break(_, v) => {
+                if let Some(v) = v {
+                    let o = self.expr(v);
+                    if let Some(top) = self.breaks.last_mut() {
+                        top.extend(o);
+                    }
+                }
+                Origins::new()
+            }
+            K::Return(v) => {
+                if let Some(v) = v {
+                    let o = self.expr(v);
+                    self.result.extend(o);
+                }
+                Origins::new()
+            }
+            K::Match(p, arms) => {
+                let mem = self.place_mem(p);
+                let mut out = Origins::new();
+                for a in arms {
+                    self.bind_pat(&a.pat, &mem);
+                    if let Some(g) = &a.guard {
+                        self.expr(g);
+                    }
+                    out.extend(self.expr(&a.body));
+                }
+                out
+            }
+            K::Is(p, _) | K::Drop(p) => {
+                self.place_mem(p);
+                Origins::new()
+            }
+            K::Int(_)
+            | K::Float(_)
+            | K::Bool(_)
+            | K::Str(_)
+            | K::Unit
+            | K::Continue(_)
+            | K::FnRef(_) => Origins::new(),
+        }
+    }
+}
+
+fn contains_ptr(t: &Ty) -> bool {
+    match t {
+        Ty::Ptr(_) => true,
+        Ty::Array(e, _) | Ty::Slice(e) | Ty::Ref(e, _) => contains_ptr(e),
+        Ty::Tuple(ts) => ts.iter().any(contains_ptr),
         _ => false,
     }
 }

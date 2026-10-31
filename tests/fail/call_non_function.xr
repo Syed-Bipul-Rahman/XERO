@@ -1,0 +1,5 @@
+fn main() {
+    let x = 5
+    x(1)
+}
+// error: `i32` is not a function or closure
