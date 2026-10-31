@@ -5,6 +5,8 @@
 
 module std.prelude
 
+import std.sys
+
 // ------------------------------------------------------------ Option
 
 pub copy enum Option<T> {
@@ -583,9 +585,6 @@ impl Eq for str {
 
 // ------------------------------------------------------------ output
 
-unsafe fn write(fd: i32, buf: *u8, count: usize) -> isize
-unsafe fn abort() -> !
-
 /// Types that can be printed with `print`/`println`.
 pub trait Print {
     fn write_to(&self, fd: i32)
@@ -615,7 +614,7 @@ pub fn panic(message: &str) -> ! {
     write_str(2, "panic: ")
     write_str(2, message)
     write_str(2, "\n")
-    unsafe { abort() }
+    sys.abort_process()
 }
 
 pub fn assert(condition: bool, message: &str) {
@@ -628,7 +627,7 @@ pub fn write_str(fd: i32, s: &str) {
     let mut ptr = s as *u8
     let mut left = s.len()
     while left > 0 {
-        let n = unsafe { write(fd, ptr, left) }
+        let n = unsafe { sys.fd_write(fd, ptr, left) }
         if n <= 0 {
             return
         }

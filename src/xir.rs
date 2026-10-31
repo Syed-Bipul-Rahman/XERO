@@ -180,6 +180,11 @@ pub enum Intrinsic {
     /// Compare-and-swap `(p, expected, new)` returning the old value.
     AtomicCas,
     Fence,
+    /// Raw system call: `(number, args...)` -> `isize`, all passed as `usize`.
+    Syscall,
+    /// The program's `argc` (as `usize`) and `argv` (as `**u8`).
+    OsArgc,
+    OsArgv,
 }
 
 #[derive(Clone, Debug)]

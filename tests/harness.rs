@@ -46,6 +46,16 @@ fn expected_output(src: &str) -> (String, i32) {
     (out, code)
 }
 
+/// Extra `xeroc build` flags from `XERO_TEST_FLAGS` (e.g. `--libc`, or
+/// `--target aarch64-linux` together with `XERO_TEST_RUNNER=qemu-aarch64`).
+fn extra_flags() -> Vec<String> {
+    std::env::var("XERO_TEST_FLAGS")
+        .unwrap_or_default()
+        .split_whitespace()
+        .map(String::from)
+        .collect()
+}
+
 #[test]
 fn run_programs() {
     let tmp = std::env::temp_dir().join(format!("xero-tests-{}", std::process::id()));
@@ -54,11 +64,16 @@ fn run_programs() {
     for f in files("tests/run") {
         let src = std::fs::read_to_string(&f).unwrap();
         let (want, want_code) = expected_output(&src);
+        // programs that call C functions need the target's C library to link
+        if src.contains("// test: native-only") && extra_flags().iter().any(|f| f == "--target") {
+            continue;
+        }
         let exe = tmp
             .join(f.file_stem().unwrap())
             .with_extension(std::env::consts::EXE_EXTENSION);
         let build = Command::new(xeroc())
             .arg("build")
+            .args(extra_flags())
             .arg(&f)
             .arg("-o")
             .arg(&exe)
@@ -72,7 +87,10 @@ fn run_programs() {
             ));
             continue;
         }
-        let run = Command::new(&exe).output().unwrap();
+        let run = match std::env::var("XERO_TEST_RUNNER") {
+            Ok(r) if !r.is_empty() => Command::new(r).arg(&exe).output().unwrap(),
+            _ => Command::new(&exe).output().unwrap(),
+        };
         // the Windows C runtime writes text-mode stdout with CRLF line endings
         let got = String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n");
         let code = run.status.code().unwrap_or(-1);

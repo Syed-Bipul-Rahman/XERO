@@ -1,9 +1,22 @@
-// OS layer for Unix-like systems (Linux, macOS): POSIX threads.
-// The compiler picks this file as `std.sys` for Linux and macOS targets.
+// OS layer for Unix-like systems that use the C library: macOS always, and
+// Linux when a program links libc (`--libc`, or C functions it declares).
+// The compiler picks this file as `std.sys` for those targets.
 
 module std.sys
 
 import std.mem
+import std.sys.target
+
+unsafe fn write(fd: i32, buf: *u8, count: usize) -> isize
+unsafe fn read(fd: i32, buf: *u8, count: usize) -> isize
+unsafe fn open(path: *u8, flags: i32, ...) -> i32
+unsafe fn close(fd: i32) -> i32
+unsafe fn exit(code: i32) -> !
+unsafe fn abort() -> !
+unsafe fn malloc(size: usize) -> *u8
+unsafe fn realloc(ptr: *u8, size: usize) -> *u8
+unsafe fn free(ptr: *u8)
+unsafe fn memmove(dst: *u8, src: *u8, count: usize) -> *u8
 
 unsafe fn pthread_create(thread: *usize, attr: *u8, start: fn(*u8) -> *u8, arg: *u8) -> i32
 unsafe fn pthread_join(thread: usize, result: *u8) -> i32
@@ -92,4 +105,61 @@ pub fn yield_now() {
     unsafe {
         sched_yield()
     }
+}
+
+// ------------------------------------------------- processes, files, memory
+// File functions return a negative error code (`-errno`) on failure.
+
+pub unsafe fn fd_write(fd: i32, buf: *u8, count: usize) -> isize {
+    let n = write(fd, buf, count)
+    if n < 0 { 0 - target.errno() as isize } else { n }
+}
+
+pub unsafe fn fd_read(fd: i32, buf: *u8, count: usize) -> isize {
+    let n = read(fd, buf, count)
+    if n < 0 { 0 - target.errno() as isize } else { n }
+}
+
+/// Open the NUL-terminated `path`: mode 0 reads, 1 writes (creating or
+/// truncating the file) and 2 appends (creating it if needed).
+pub unsafe fn fd_open(path: *u8, mode: i32) -> i32 {
+    let flags = if mode == 0 {
+        target.O_RDONLY
+    } else if mode == 1 {
+        target.O_WRONLY | target.O_CREAT | target.O_TRUNC
+    } else {
+        target.O_WRONLY | target.O_CREAT | target.O_APPEND
+    }
+    let fd = open(path, flags | target.O_CLOEXEC, 420)
+    if fd < 0 { 0 - target.errno() } else { fd }
+}
+
+pub unsafe fn fd_close(fd: i32) {
+    close(fd)
+}
+
+pub fn exit_process(code: i32) -> ! {
+    unsafe { exit(code) }
+}
+
+pub fn abort_process() -> ! {
+    unsafe { abort() }
+}
+
+/// Returns null when out of memory.
+pub unsafe fn heap_alloc(size: usize) -> *u8 {
+    malloc(size)
+}
+
+pub unsafe fn heap_realloc(ptr: *u8, size: usize) -> *u8 {
+    realloc(ptr, size)
+}
+
+pub unsafe fn heap_free(ptr: *u8) {
+    free(ptr)
+}
+
+/// Copy `count` bytes; the regions may overlap.
+pub unsafe fn mem_move(dst: *u8, src: *u8, count: usize) {
+    memmove(dst, src, count)
 }

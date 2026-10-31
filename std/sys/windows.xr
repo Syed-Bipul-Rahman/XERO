@@ -4,6 +4,19 @@
 module std.sys
 
 import std.mem
+import std.sys.target
+
+// the C runtime (UCRT): low-level I/O and the heap
+unsafe fn _write(fd: i32, buf: *u8, count: u32) -> i32
+unsafe fn _read(fd: i32, buf: *u8, count: u32) -> i32
+unsafe fn _open(path: *u8, flags: i32, ...) -> i32
+unsafe fn _close(fd: i32) -> i32
+unsafe fn exit(code: i32) -> !
+unsafe fn abort() -> !
+unsafe fn malloc(size: usize) -> *u8
+unsafe fn realloc(ptr: *u8, size: usize) -> *u8
+unsafe fn free(ptr: *u8)
+unsafe fn memmove(dst: *u8, src: *u8, count: usize) -> *u8
 
 unsafe fn CreateThread(attrs: *u8, stack: usize, start: fn(*u8) -> *u8, param: *u8, flags: u32, id: *u32) -> usize
 unsafe fn WaitForSingleObject(handle: usize, ms: u32) -> u32
@@ -86,4 +99,61 @@ pub fn yield_now() {
     unsafe {
         SwitchToThread()
     }
+}
+
+// ------------------------------------------------- processes, files, memory
+// File functions return a negative error code (`-errno`) on failure.
+
+pub unsafe fn fd_write(fd: i32, buf: *u8, count: usize) -> isize {
+    let n = _write(fd, buf, (if count > 0x40000000 { 0x40000000 } else { count }) as u32) as isize
+    if n < 0 { 0 - target.errno() as isize } else { n }
+}
+
+pub unsafe fn fd_read(fd: i32, buf: *u8, count: usize) -> isize {
+    let n = _read(fd, buf, (if count > 0x40000000 { 0x40000000 } else { count }) as u32) as isize
+    if n < 0 { 0 - target.errno() as isize } else { n }
+}
+
+/// Open the NUL-terminated `path`: mode 0 reads, 1 writes (creating or
+/// truncating the file) and 2 appends (creating it if needed).
+pub unsafe fn fd_open(path: *u8, mode: i32) -> i32 {
+    let flags = if mode == 0 {
+        target.O_RDONLY
+    } else if mode == 1 {
+        target.O_WRONLY | target.O_CREAT | target.O_TRUNC
+    } else {
+        target.O_WRONLY | target.O_CREAT | target.O_APPEND
+    }
+    let fd = _open(path, flags | target.O_CLOEXEC, 0x180)
+    if fd < 0 { 0 - target.errno() } else { fd }
+}
+
+pub unsafe fn fd_close(fd: i32) {
+    _close(fd)
+}
+
+pub fn exit_process(code: i32) -> ! {
+    unsafe { exit(code) }
+}
+
+pub fn abort_process() -> ! {
+    unsafe { abort() }
+}
+
+/// Returns null when out of memory.
+pub unsafe fn heap_alloc(size: usize) -> *u8 {
+    malloc(size)
+}
+
+pub unsafe fn heap_realloc(ptr: *u8, size: usize) -> *u8 {
+    realloc(ptr, size)
+}
+
+pub unsafe fn heap_free(ptr: *u8) {
+    free(ptr)
+}
+
+/// Copy `count` bytes; the regions may overlap.
+pub unsafe fn mem_move(dst: *u8, src: *u8, count: usize) {
+    memmove(dst, src, count)
 }

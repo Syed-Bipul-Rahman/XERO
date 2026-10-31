@@ -4,6 +4,53 @@
 
 module std.sys
 
+// Without an OS, the program (or its startup code) provides these.
+unsafe fn write(fd: i32, buf: *u8, count: usize) -> isize
+unsafe fn abort() -> !
+unsafe fn exit(code: i32) -> !
+unsafe fn malloc(size: usize) -> *u8
+unsafe fn realloc(ptr: *u8, size: usize) -> *u8
+unsafe fn free(ptr: *u8)
+unsafe fn memmove(dst: *u8, src: *u8, count: usize) -> *u8
+
+pub unsafe fn fd_write(fd: i32, buf: *u8, count: usize) -> isize {
+    write(fd, buf, count)
+}
+
+pub unsafe fn fd_read(fd: i32, buf: *u8, count: usize) -> isize {
+    -38
+}
+
+pub unsafe fn fd_open(path: *u8, mode: i32) -> i32 {
+    -38
+}
+
+pub unsafe fn fd_close(fd: i32) {}
+
+pub fn exit_process(code: i32) -> ! {
+    unsafe { exit(code) }
+}
+
+pub fn abort_process() -> ! {
+    unsafe { abort() }
+}
+
+pub unsafe fn heap_alloc(size: usize) -> *u8 {
+    malloc(size)
+}
+
+pub unsafe fn heap_realloc(ptr: *u8, size: usize) -> *u8 {
+    realloc(ptr, size)
+}
+
+pub unsafe fn heap_free(ptr: *u8) {
+    free(ptr)
+}
+
+pub unsafe fn mem_move(dst: *u8, src: *u8, count: usize) {
+    memmove(dst, src, count)
+}
+
 pub const THREADS: bool = false
 
 pub unsafe fn thread_start(entry: fn(*u8) -> *u8, arg: *u8) -> usize {
