@@ -126,6 +126,10 @@ pub enum Place {
     Index(Box<Place>, Box<Expr>),
     /// Dereference of a reference or raw pointer value.
     Deref(Box<Expr>),
+    /// `base[lo..hi]`: an unsized sub-range of an array, slice or `str`
+    /// (bounds-checked once, when it is formed). Missing bounds mean the
+    /// start / the end. Only ever borrowed or indexed.
+    Slice(Box<Place>, Option<Box<Expr>>, Option<Box<Expr>>),
 }
 
 #[derive(Clone, Debug)]

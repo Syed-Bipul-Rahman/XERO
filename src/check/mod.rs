@@ -1673,6 +1673,15 @@ pub fn xir_children(e: &xir::Expr, f: &mut dyn FnMut(&xir::Expr)) {
                 f(i);
             }
             xir::Place::Deref(e) => f(e),
+            xir::Place::Slice(b, lo, hi) => {
+                place(b, f);
+                if let Some(lo) = lo {
+                    f(lo);
+                }
+                if let Some(hi) = hi {
+                    f(hi);
+                }
+            }
             _ => {}
         }
     }

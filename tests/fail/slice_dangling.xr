@@ -1,0 +1,7 @@
+fn first_two() -> &[i32] {
+    let a = [1, 2, 3]
+    &a[0..2]
+}
+
+fn main() {}
+// error: `a` does not live long enough

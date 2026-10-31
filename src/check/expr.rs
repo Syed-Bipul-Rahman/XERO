@@ -959,8 +959,41 @@ impl<'a> FnCx<'a> {
                 }
             }
             E::Index(base, idx) => {
-                if matches!(idx.kind, E::Range(..)) {
-                    return self.err(idx.span, "range indexing (slicing) is not supported yet; use `slice_from_raw` in unsafe code or the std helpers");
+                if let E::Range(lo, hi, inclusive) = &idx.kind {
+                    let (bp, bty) = self.base_place(base, span)?;
+                    let sliced = match &bty {
+                        Ty::Array(t, _) | Ty::Slice(t) => Ty::Slice(t.clone()),
+                        Ty::Str => Ty::Str,
+                        _ => {
+                            return self.err(
+                                span,
+                                format!("type `{}` cannot be sliced", self.ts(&bty)),
+                            )
+                        }
+                    };
+                    let usize_t = Ty::Int(IntTy::Usize);
+                    let lo = match lo {
+                        Some(e) => Some(Box::new(self.expr_as(e, &usize_t)?)),
+                        None => None,
+                    };
+                    let hi = match hi {
+                        Some(e) => {
+                            let h = self.expr_as(e, &usize_t)?;
+                            if *inclusive {
+                                // `a..=b` is `a..b + 1`
+                                let hs = h.span;
+                                let one = x(K::Int(1), usize_t.clone(), hs);
+                                Some(Box::new(x(K::Binary(BinOp::Add, Box::new(h), Box::new(one)), usize_t, hs)))
+                            } else {
+                                Some(Box::new(h))
+                            }
+                        }
+                        None if *inclusive => {
+                            return self.err(idx.span, "an inclusive range `..=` needs an end")
+                        }
+                        None => None,
+                    };
+                    return Ok(Some((Place::Slice(Box::new(bp), lo, hi), sliced)));
                 }
                 let (bp, bty) = self.base_place(base, span)?;
                 let elem = match &bty {

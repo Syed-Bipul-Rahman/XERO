@@ -236,7 +236,7 @@ impl<'a> Ck<'a> {
                 path.push(Proj::Field(*i));
                 Some((r, path))
             }
-            Place::Index(b, _) => {
+            Place::Index(b, _) | Place::Slice(b, ..) => {
                 let (r, mut path) = Self::place_path(b)?;
                 path.push(Proj::Index);
                 Some((r, path))
@@ -278,6 +278,15 @@ impl<'a> Ck<'a> {
                 l
             }
             Place::Deref(e) => self.expr(e),
+            Place::Slice(b, lo, hi) => {
+                let l = self.place_exprs(b);
+                self.in_flight.push(l.clone());
+                for e in [lo, hi].into_iter().flatten() {
+                    self.expr(e);
+                }
+                self.in_flight.pop();
+                l
+            }
         }
     }
 
@@ -304,7 +313,7 @@ impl<'a> Ck<'a> {
                     ))
                 }
             }
-            Place::Field(b, _) | Place::Index(b, _) => self.is_mutable(b),
+            Place::Field(b, _) | Place::Index(b, _) | Place::Slice(b, ..) => self.is_mutable(b),
             Place::Deref(e) => match &e.ty {
                 Ty::Ref(_, true) | Ty::Ptr(_) => Ok(()),
                 Ty::Ref(_, false) => {
@@ -461,7 +470,7 @@ impl<'a> Ck<'a> {
                     }
                     cur = b;
                 }
-                Place::Index(..) => {
+                Place::Index(..) | Place::Slice(..) => {
                     self.error(span, format!("cannot move a `{}` out of an array or slice element; borrow it with `&` instead", self.ck.ty_str(ty)));
                     return;
                 }
@@ -488,6 +497,11 @@ impl<'a> Ck<'a> {
             },
             Place::Index(b, _) => match self.place_ty(b)? {
                 Ty::Array(e, _) | Ty::Slice(e) => Some(*e),
+                _ => None,
+            },
+            Place::Slice(b, ..) => match self.place_ty(b)? {
+                Ty::Array(e, _) | Ty::Slice(e) => Some(Ty::Slice(e)),
+                Ty::Str => Some(Ty::Str),
                 _ => None,
             },
             Place::Deref(e) => match &e.ty {
@@ -973,7 +987,7 @@ impl<'a> Ck<'a> {
 fn place_has_deref(p: &Place) -> bool {
     match p {
         Place::Deref(_) => true,
-        Place::Field(b, _) | Place::Index(b, _) => place_has_deref(b),
+        Place::Field(b, _) | Place::Index(b, _) | Place::Slice(b, ..) => place_has_deref(b),
         _ => false,
     }
 }

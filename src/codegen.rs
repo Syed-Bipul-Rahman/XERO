@@ -697,6 +697,11 @@ impl<'a> Codegen<'a> {
                 Ty::Array(e, _) | Ty::Slice(e) => *e,
                 _ => unreachable!(),
             },
+            Place::Slice(b, ..) => match self.place_ty_ctx(b) {
+                Ty::Array(e, _) | Ty::Slice(e) => Ty::Slice(e),
+                Ty::Str => Ty::Str,
+                _ => unreachable!(),
+            },
             Place::Deref(e) => match &e.ty {
                 Ty::Ref(t, _) | Ty::Ptr(t) => (**t).clone(),
                 _ => unreachable!(),
@@ -781,6 +786,52 @@ impl<'a> Codegen<'a> {
                 } else {
                     PlacePtr::Thin(v)
                 }
+            }
+            Place::Slice(b, lo, hi) => {
+                let bt = self.place_ty_ctx(b);
+                let base = self.place_ptr(b);
+                let us = self.usize_ty();
+                let fty = format!("{{ ptr, {us} }}");
+                let (data, len, elem) = match (&bt, base) {
+                    (Ty::Array(e, n), PlacePtr::Thin(bp)) => (bp, n.to_string(), self.llty(e)),
+                    (Ty::Slice(_) | Ty::Str, PlacePtr::Fat(fv)) => {
+                        let elem = match &bt {
+                            Ty::Slice(e) => self.llty(e),
+                            _ => "i8".to_string(),
+                        };
+                        let data = self.fresh();
+                        self.ins(&format!("{data} = extractvalue {fty} {fv}, 0"));
+                        let len = self.fresh();
+                        self.ins(&format!("{len} = extractvalue {fty} {fv}, 1"));
+                        (data, len, elem)
+                    }
+                    _ => unreachable!("bad slice base"),
+                };
+                let lo = match lo {
+                    Some(e) => self.expr(e),
+                    None => "0".to_string(),
+                };
+                let hi = match hi {
+                    Some(e) => self.expr(e),
+                    None => len.clone(),
+                };
+                // lo <= hi <= len
+                let a = self.fresh();
+                self.ins(&format!("{a} = icmp ule {us} {lo}, {hi}"));
+                let c = self.fresh();
+                self.ins(&format!("{c} = icmp ule {us} {hi}, {len}"));
+                let ok = self.fresh();
+                self.ins(&format!("{ok} = and i1 {a}, {c}"));
+                self.check(&ok);
+                let ptr = self.fresh();
+                self.ins(&format!("{ptr} = getelementptr inbounds {elem}, ptr {data}, {us} {lo}"));
+                let n = self.fresh();
+                self.ins(&format!("{n} = sub {us} {hi}, {lo}"));
+                let r1 = self.fresh();
+                self.ins(&format!("{r1} = insertvalue {fty} poison, ptr {ptr}, 0"));
+                let r2 = self.fresh();
+                self.ins(&format!("{r2} = insertvalue {fty} {r1}, {us} {n}, 1"));
+                PlacePtr::Fat(r2)
             }
         }
     }
