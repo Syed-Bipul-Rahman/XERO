@@ -38,6 +38,14 @@ fn main() {
     f = g
     println(f)
 
+    // array literals in `for`, and literals captured by closures
+    let mut w: Vec<u64> = Vec.new()
+    for x in [7, 8, 9] {
+        w.push(x)
+    }
+    let cap = 8
+    println(w.count(|x| *x >= cap))
+
     // without any typed use, literals stay i32 / f64
     let plain = 7
     println(plain / 2)
@@ -48,4 +56,5 @@ fn main() {
 // 60
 // 205
 // 2.25
+// 2
 // 3

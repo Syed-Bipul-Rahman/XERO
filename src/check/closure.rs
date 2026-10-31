@@ -31,6 +31,8 @@ pub struct Capture {
 pub struct CaptureCx {
     pub env: LocalId,
     pub caps: Vec<Capture>,
+    /// For captures typed by a defaulted literal: that literal's key.
+    pub keys: Vec<Option<Span>>,
 }
 
 /// Return type of a closure whose result type is still being inferred.
@@ -61,6 +63,27 @@ impl FnCx<'_> {
         } else {
             Some((field, ft))
         }
+    }
+
+    /// The defaulted-literal key of a captured variable read through `p`.
+    pub fn capture_key(&self, p: &Place) -> Option<Span> {
+        let cx = self.captures.as_ref()?;
+        let field = match p {
+            Place::Deref(e) => match &e.kind {
+                K::Use(f @ Place::Field(..), _) => f,
+                _ => return None,
+            },
+            f @ Place::Field(..) => f,
+            _ => return None,
+        };
+        let Place::Field(b, i) = field else {
+            return None;
+        };
+        let Place::Deref(e) = &**b else { return None };
+        if !matches!(&e.kind, K::Use(Place::Local(l), _) if *l == cx.env) {
+            return None;
+        }
+        cx.keys.get(*i as usize).copied().flatten()
     }
 
     pub fn is_capture(&self, name: &str) -> bool {
@@ -231,6 +254,7 @@ impl FnCx<'_> {
         let mut names = Vec::new();
         self.free_names(&c.body, &mut bound, &mut names);
         let mut caps: Vec<(String, Place, Ty)> = Vec::new();
+        let mut keys: Vec<Option<Span>> = Vec::new();
         for n in &names {
             let e = if n == "self" {
                 ast::Expr {
@@ -250,6 +274,10 @@ impl FnCx<'_> {
                 }
             };
             if let Some((p, t)) = self.place(&e)? {
+                keys.push(match &p {
+                    Place::Local(l) => self.defaulted.get(l).copied(),
+                    other => self.capture_key(other),
+                });
                 caps.push((n.clone(), p, t));
             }
         }
@@ -309,6 +337,7 @@ impl FnCx<'_> {
                 &ptys,
                 declared_ret.clone(),
                 capture_list,
+                keys.clone(),
                 mutates,
                 span,
             )?;
@@ -361,6 +390,7 @@ impl FnCx<'_> {
         ptys: &[Ty],
         ret: Option<Ty>,
         caps: Vec<Capture>,
+        keys: Vec<Option<Span>>,
         mutates: bool,
         span: Span,
     ) -> Result<(
@@ -381,7 +411,7 @@ impl FnCx<'_> {
             loops: Vec::new(),
             next_loop: 0,
             unsafe_depth: 0,
-            overrides: HashMap::new(),
+            overrides: self.overrides.clone(),
             defaulted: HashMap::new(),
             pending: None,
             fn_name: fn_name.to_string(),
@@ -400,7 +430,7 @@ impl FnCx<'_> {
                 true,
             );
             params.push(env);
-            inner.captures = Some(CaptureCx { env, caps });
+            inner.captures = Some(CaptureCx { env, caps, keys });
         }
         for (p, t) in c.params.iter().zip(ptys) {
             let id = inner.new_local(&p.name.name, t.clone(), p.mutable, p.name.span, false);
@@ -409,18 +439,18 @@ impl FnCx<'_> {
             }
             params.push(id);
         }
-        let body = inner.expr(&c.body, ret.as_ref())?;
-        let body = match &ret {
-            Some(r) => inner.coerce(body, r, c.body.span)?,
-            None => body,
-        };
-        Ok((
-            body,
-            inner.locals,
-            params,
-            inner.mut_captures,
-            inner.pending_funcs,
-        ))
+        let body = inner.expr(&c.body, ret.as_ref());
+        let body = body.and_then(|b| match &ret {
+            Some(r) => inner.coerce(b, r, c.body.span),
+            None => Ok(b),
+        });
+        // a literal of the enclosing function that needs another type
+        let pending = inner.pending.take();
+        let (locals, mut_captures, funcs) = (inner.locals, inner.mut_captures, inner.pending_funcs);
+        if self.pending.is_none() {
+            self.pending = pending;
+        }
+        Ok((body?, locals, params, mut_captures, funcs))
     }
 
     // ------------------------------------------------------- calls

@@ -362,6 +362,7 @@ impl<'a> FnCx<'a> {
     fn defaulted_expr(&self, v: &X) -> Option<Span> {
         match &v.kind {
             K::Use(Place::Local(l), _) => self.defaulted.get(l).copied(),
+            K::Use(p, _) if self.captures.is_some() => self.capture_key(p),
             K::Binary(op, a, b) if !op.is_comparison() && !matches!(op, BinOp::And | BinOp::Or) => {
                 self.defaulted_expr(a).or_else(|| self.defaulted_expr(b))
             }
@@ -3260,8 +3261,21 @@ impl<'a> FnCx<'a> {
                     );
                 }
             } else {
-                // arrays and slices
-                let v = self.expr(iter, None)?;
+                // arrays and slices; `for x in [1, 2, 3]` types its literals by later use
+                let literal_array = matches!(&iter.kind, E::Array(items) if !items.is_empty() && items.iter().all(untyped_literal));
+                let v = match (literal_array, self.overrides.get(&iter.span).cloned()) {
+                    (true, Some(t)) => {
+                        let E::Array(items) = &iter.kind else {
+                            unreachable!()
+                        };
+                        let at = Ty::Array(Box::new(t), items.len() as u64);
+                        self.expr_as(iter, &at)?
+                    }
+                    _ => self.expr(iter, None)?,
+                };
+                if literal_array {
+                    range_key = Some(iter.span);
+                }
                 let (seq, by_ref, mutable, elem_ty) = match v.ty.clone() {
                     Ty::Ref(inner, m) => match *inner {
                         Ty::Array(e, _) => {

@@ -1,0 +1,78 @@
+// What's new in Xero 0.2: closures, operator traits, slicing,
+// references in structs, and smarter literal types.
+
+copy struct Money {
+    cents: i64
+}
+
+impl Add for Money {
+    fn add(self, other: Money) -> Money { Money { cents: self.cents + other.cents } }
+}
+
+impl Eq for Money {
+    fn eq(&self, other: &Money) -> bool { self.cents == other.cents }
+}
+
+impl Ord for Money {
+    fn cmp(&self, other: &Money) -> Ordering { compare(self.cents, other.cents) }
+}
+
+// A struct that borrows its input: no copies, no lifetime annotations.
+struct Words {
+    text: &str
+    pos: usize
+}
+
+impl Words {
+    fn next(&mut self) -> Option<&str> {
+        let b = self.text.as_bytes()
+        while self.pos < b.len() && b[self.pos] == ' ' {
+            self.pos += 1
+        }
+        if self.pos >= b.len() {
+            return None
+        }
+        let start = self.pos
+        while self.pos < b.len() && b[self.pos] != ' ' {
+            self.pos += 1
+        }
+        Some(&self.text[start..self.pos])
+    }
+}
+
+fn main() {
+    // operators on your own types
+    let total = Money { cents: 250 } + Money { cents: 175 }
+    println(total.cents)
+    println(total > Money { cents: 400 })
+
+    // closures with Vec helpers (inlined, no allocation for the closures)
+    let mut prices: Vec<i64> = Vec.new()
+    for p in [499, 1250, 99, 3000] {
+        prices.push(p)
+    }
+    let limit = 1000
+    let cheap = prices.filter(|p| *p < limit)
+    println(cheap.len())
+    prices.sort()
+    println(*prices.at(0))
+    let with_tax = prices.map(|p| *p * 108 / 100)
+    println(*with_tax.at(3))
+
+    // slicing
+    let arr = [1, 2, 3, 4, 5]
+    let middle = &arr[1..4]
+    println(middle.len())
+
+    // a borrowing iterator over words
+    let sentence = String.from("pay only for what you use")
+    let mut words = Words { text: sentence.as_str(), pos: 0 }
+    let mut count = 0
+    while words.next() is Some(w) {
+        if w.len() > 3 {
+            println(w)
+        }
+        count += 1
+    }
+    println(count)
+}

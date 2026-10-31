@@ -183,13 +183,25 @@ on `static mut`, non-exhaustive matches and more.
 
 ## Status
 
-Xero 0.1 is a working bootstrap compiler. It already supports structs, enums
-with payloads, traits with default methods and supertraits, generics with
-bounds, `impl` blocks on any type, pattern matching with exhaustiveness
-checking, modules, `Box`/`Vec`/`String`, RAII, a borrow checker, errors as
-values, unsafe code, raw pointers, C FFI, inline assembly and cross-compilation.
+Xero 0.2 is a working compiler. Language features:
+
+* **Types:** structs and enums (which can hold references), enums with data,
+  closures, and function pointers.
+* **Traits and generics:** traits with default methods and supertraits,
+  operator traits, and generics with bounds.
+* **Control flow:** pattern matching with exhaustiveness checking, slicing,
+  and errors as values.
+
+Compiler and runtime support:
+
+* **Safety:** RAII and a borrow checker that needs no lifetime annotations.
+* **Standard library:** modules, `Box`, `Vec`, `String`.
+* **Low level:** unsafe code, raw pointers, C FFI, inline assembly, and
+  cross-compilation.
+
 The concurrency keywords (`spawn`, `async`, `await`) are reserved and are the
-next major milestone; see the [roadmap](docs/ROADMAP.md).
+next major milestone; see the [roadmap](docs/ROADMAP.md) and the
+[changelog](CHANGELOG.md).
 
 ```console
 $ cargo test       # builds and runs every test program
