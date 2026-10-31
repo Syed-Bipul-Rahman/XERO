@@ -171,8 +171,9 @@ pub enum TypeKind {
     Infer,
     /// `fn(i32, i32) -> i32`: a plain function pointer.
     FnPtr(Vec<TypeExpr>, Option<Box<TypeExpr>>),
-    /// `Fn(i32) -> i32` / `FnMut(i32)`: a closure bound (only in generic bounds).
-    FnTrait(bool, Vec<TypeExpr>, Option<Box<TypeExpr>>),
+    /// `Fn(i32) -> i32` / `FnMut(i32)` / `FnOnce()`: a closure bound (only in
+    /// generic bounds). The kind is 0 = Fn, 1 = FnMut, 2 = FnOnce.
+    FnTrait(u8, Vec<TypeExpr>, Option<Box<TypeExpr>>),
 }
 
 #[derive(Clone, Debug)]

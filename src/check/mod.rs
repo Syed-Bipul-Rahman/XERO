@@ -267,8 +267,10 @@ pub struct ClosureDef {
     pub ret: Ty,
     /// Symbol of the generated function `(env, params...) -> ret`.
     pub fn_name: String,
-    /// It mutates its environment, so calling it needs `&mut` (FnMut).
-    pub mutates: bool,
+    /// How calls reach the environment: `Fn` (0, `&env`), `FnMut` (1, `&mut env`:
+    /// it mutates its captures) or `FnOnce` (2, by value: it moves a capture
+    /// out, so it can be called only once).
+    pub kind: u8,
 }
 
 /// Input to the checker: parsed modules, by module path.
@@ -1360,13 +1362,13 @@ impl Checker {
     }
 
     /// Parameter types, return type and FnMut-ness of a callable type.
-    pub fn callable_sig(&self, t: &Ty) -> Option<(Vec<Ty>, Ty, bool)> {
+    pub fn callable_sig(&self, t: &Ty) -> Option<(Vec<Ty>, Ty, u8)> {
         match t {
             Ty::Closure(id) => {
                 let c = &self.closures[*id as usize];
-                Some((c.params.clone(), c.ret.clone(), c.mutates))
+                Some((c.params.clone(), c.ret.clone(), c.kind))
             }
-            Ty::FnPtr(ps, r) => Some((ps.clone(), (**r).clone(), false)),
+            Ty::FnPtr(ps, r) => Some((ps.clone(), (**r).clone(), 0)),
             _ => None,
         }
     }
@@ -1539,13 +1541,13 @@ impl Checker {
         env.names.extend(generic_env(generics, args).names);
         for (g, a) in generics.iter().zip(args) {
             for b in &g.bounds {
-                if let TypeKind::FnTrait(mutable, ..) = &b.kind {
+                if let TypeKind::FnTrait(bound_kind, ..) = &b.kind {
                     if !self.bound_holds(b, module, &env, a)? {
                         let want = self.fn_bound_str(b, module, &env)?;
                         let have = match self.callable_sig(a) {
                             Some((ps, r, m)) => format!(
                                 "{}({}) -> {}",
-                                if m { "FnMut" } else { "Fn" },
+                                kind_name(m),
                                 ps.iter()
                                     .map(|t| self.ty_str(t))
                                     .collect::<Vec<_>>()
@@ -1554,7 +1556,10 @@ impl Checker {
                             ),
                             None => format!("`{}`, which is not callable", self.ty_str(a)),
                         };
-                        let hint = if !mutable && self.callable_sig(a).is_some_and(|s| s.2) {
+                        let have_kind = self.callable_sig(a).map(|s| s.2).unwrap_or(0);
+                        let hint = if have_kind > *bound_kind && have_kind == 2 {
+                            "; the closure moves a captured value out, so it can only be called once and the bound must be `FnOnce`"
+                        } else if have_kind > *bound_kind {
                             "; the closure mutates captured state, so the bound must be `FnMut`"
                         } else {
                             ""
@@ -1588,8 +1593,8 @@ impl Checker {
         env: &Env,
         arg: &Ty,
     ) -> Result<bool> {
-        if let TypeKind::FnTrait(mutable, ps, r) = &b.kind {
-            let Some((aps, ar, amut)) = self.callable_sig(arg) else {
+        if let TypeKind::FnTrait(bound_kind, ps, r) = &b.kind {
+            let Some((aps, ar, akind)) = self.callable_sig(arg) else {
                 return Ok(false);
             };
             let ps: Vec<Ty> = ps
@@ -1600,14 +1605,14 @@ impl Checker {
                 Some(r) => self.resolve_type(r, module, env)?,
                 None => Ty::unit(),
             };
-            return Ok(ps == aps && r == ar && (*mutable || !amut));
+            return Ok(ps == aps && r == ar && akind <= *bound_kind);
         }
         let tid = self.resolve_trait_ref(b, module)?;
         Ok(self.implements(arg, tid))
     }
 
     fn fn_bound_str(&mut self, b: &TypeExpr, module: ModId, env: &Env) -> Result<String> {
-        let TypeKind::FnTrait(mutable, ps, r) = &b.kind else {
+        let TypeKind::FnTrait(bound_kind, ps, r) = &b.kind else {
             return Ok(String::new());
         };
         let ps: Vec<String> = ps
@@ -1623,7 +1628,7 @@ impl Checker {
         };
         Ok(format!(
             "{}({}) -> {r}",
-            if *mutable { "FnMut" } else { "Fn" },
+            kind_name(*bound_kind),
             ps.join(", ")
         ))
     }
@@ -1808,6 +1813,14 @@ impl Checker {
 
 fn fid_is_main(f: &FnDef) -> bool {
     f.decl.name.name == "main" && f.owner == FnOwner::Free
+}
+
+fn kind_name(k: u8) -> &'static str {
+    match k {
+        0 => "Fn",
+        1 => "FnMut",
+        _ => "FnOnce",
+    }
 }
 
 /// Map generic parameter names to concrete arguments.

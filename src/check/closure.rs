@@ -46,15 +46,24 @@ impl FnCx<'_> {
         let cx = self.captures.as_ref()?;
         let i = cx.caps.iter().position(|c| c.name == name)?;
         let env_ty = self.locals[cx.env as usize].ty.clone();
-        let Ty::Ref(cl, _) = &env_ty else { return None };
-        let fields = self.ck.fields_of(cl)?;
-        let ft = fields[i].clone();
-        let env = x(
-            K::Use(Place::Local(cx.env), UseKind::Copy),
-            env_ty.clone(),
-            span,
-        );
-        let field = Place::Field(Box::new(Place::Deref(Box::new(env))), i as u32);
+        let field = match &env_ty {
+            // Fn / FnMut: the environment is behind `&env` / `&mut env`
+            Ty::Ref(..) => {
+                let env = x(
+                    K::Use(Place::Local(cx.env), UseKind::Copy),
+                    env_ty.clone(),
+                    span,
+                );
+                Place::Field(Box::new(Place::Deref(Box::new(env))), i as u32)
+            }
+            // FnOnce: the closure owns its environment
+            _ => Place::Field(Box::new(Place::Local(cx.env)), i as u32),
+        };
+        let cl = match &env_ty {
+            Ty::Ref(cl, _) => (**cl).clone(),
+            t => t.clone(),
+        };
+        let ft = self.ck.fields_of(&cl)?[i].clone();
         if cx.caps[i].by_ref {
             let Ty::Ref(inner, _) = &ft else { return None };
             let inner = (**inner).clone();
@@ -79,8 +88,9 @@ impl FnCx<'_> {
         let Place::Field(b, i) = field else {
             return None;
         };
-        let Place::Deref(e) = &**b else { return None };
-        if !matches!(&e.kind, K::Use(Place::Local(l), _) if *l == cx.env) {
+        let direct = matches!(&**b, Place::Local(l) if *l == cx.env);
+        let through_ref = matches!(&**b, Place::Deref(e) if matches!(&e.kind, K::Use(Place::Local(l), _) if *l == cx.env));
+        if !direct && !through_ref {
             return None;
         }
         cx.keys.get(*i as usize).copied().flatten()
@@ -97,25 +107,7 @@ impl FnCx<'_> {
     pub fn note_mut(&mut self, p: &Place) {
         let Some(cx) = &self.captures else { return };
         let env = cx.env;
-        fn field_of(p: &Place, env: LocalId) -> Option<u32> {
-            match p {
-                Place::Field(b, i) => {
-                    if let Place::Deref(e) = &**b {
-                        if matches!(&e.kind, K::Use(Place::Local(l), _) if *l == env) {
-                            return Some(*i);
-                        }
-                    }
-                    field_of(b, env)
-                }
-                Place::Index(b, _) | Place::Slice(b, ..) => field_of(b, env),
-                Place::Deref(e) => match &e.kind {
-                    K::Use(inner, _) => field_of(inner, env),
-                    _ => None,
-                },
-                _ => None,
-            }
-        }
-        if let Some(i) = field_of(p, env) {
+        if let Some(i) = capture_field_of(p, env) {
             self.mut_captures.insert(i);
         }
     }
@@ -293,7 +285,7 @@ impl FnCx<'_> {
                     params: Vec::new(),
                     ret: Ty::unit(),
                     fn_name: String::new(),
-                    mutates: false,
+                    kind: 0,
                 });
                 self.ck.closure_ids.insert(key, id);
                 id
@@ -303,6 +295,7 @@ impl FnCx<'_> {
 
         // check the body, upgrading captures to `&mut` where it mutates them
         let mut mut_set: BTreeSet<u32> = BTreeSet::new();
+        let mut once = false;
         let (body, locals, params, pending) = loop {
             let fields: Vec<Ty> = caps
                 .iter()
@@ -315,13 +308,19 @@ impl FnCx<'_> {
                     }
                 })
                 .collect();
-            let mutates = !mut_set.is_empty();
+            let kind = if once {
+                2
+            } else if mut_set.is_empty() {
+                0
+            } else {
+                1
+            };
             self.ck.closures[cid as usize] = ClosureDef {
                 fields: fields.clone(),
                 params: ptys.clone(),
                 ret: declared_ret.clone().unwrap_or(Ty::unit()),
                 fn_name: fn_name.clone(),
-                mutates,
+                kind,
             };
             let capture_list: Vec<Capture> = caps
                 .iter()
@@ -338,13 +337,20 @@ impl FnCx<'_> {
                 declared_ret.clone(),
                 capture_list,
                 keys.clone(),
-                mutates,
+                kind,
                 span,
             )?;
-            if used_mut.is_subset(&mut_set) {
+            // a `move` closure that moves a capture out owns its environment
+            let mut moved = BTreeSet::new();
+            if let Some(&env) = params.first().filter(|_| !caps.is_empty()) {
+                moved_captures(&body, env, self.ck, &mut moved);
+            }
+            let now_once = c.is_move && !moved.is_empty();
+            if used_mut.is_subset(&mut_set) && now_once == once {
                 break (body, locals, params, pending);
             }
             mut_set.extend(used_mut);
+            once = now_once || once;
         };
         let ret = declared_ret.unwrap_or_else(|| {
             if body.ty.is_never() {
@@ -391,7 +397,7 @@ impl FnCx<'_> {
         ret: Option<Ty>,
         caps: Vec<Capture>,
         keys: Vec<Option<Span>>,
-        mutates: bool,
+        kind: u8,
         span: Span,
     ) -> Result<(
         X,
@@ -422,13 +428,12 @@ impl FnCx<'_> {
         };
         let mut params = Vec::new();
         if has_env {
-            let env = inner.new_local(
-                "env",
-                Ty::reference(Ty::Closure(cid), mutates),
-                false,
-                span,
-                true,
-            );
+            let env_ty = match kind {
+                0 => Ty::reference(Ty::Closure(cid), false),
+                1 => Ty::reference(Ty::Closure(cid), true),
+                _ => Ty::Closure(cid),
+            };
+            let env = inner.new_local("env", env_ty, kind == 2, span, true);
             params.push(env);
             inner.captures = Some(CaptureCx { env, caps, keys });
         }
@@ -473,14 +478,17 @@ impl FnCx<'_> {
                 }
                 let mut xs = Vec::new();
                 if !def.fields.is_empty() {
-                    if def.mutates {
-                        self.note_mut(&p);
+                    match def.kind {
+                        // FnOnce: the call consumes the closure
+                        2 => xs.push(self.use_place(p, t, span)),
+                        k => {
+                            let m = k == 1;
+                            if m {
+                                self.note_mut(&p);
+                            }
+                            xs.push(x(K::Borrow(p, m), Ty::reference(t, m), span));
+                        }
                     }
-                    xs.push(x(
-                        K::Borrow(p, def.mutates),
-                        Ty::reference(t, def.mutates),
-                        span,
-                    ));
                 }
                 for (a, pt) in args.iter().zip(&def.params) {
                     xs.push(self.expr_as(a, pt)?);
@@ -626,6 +634,58 @@ impl FnCx<'_> {
             return Ok(None);
         }
         self.call_place(p, t, args, span).map(Some)
+    }
+}
+
+/// The capture (environment field) a place inside a closure body belongs to.
+fn capture_field_of(p: &Place, env: LocalId) -> Option<u32> {
+    match p {
+        Place::Field(b, i) => {
+            if matches!(&**b, Place::Local(l) if *l == env) {
+                return Some(*i);
+            }
+            if let Place::Deref(e) = &**b {
+                if matches!(&e.kind, K::Use(Place::Local(l), _) if *l == env) {
+                    return Some(*i);
+                }
+            }
+            capture_field_of(b, env)
+        }
+        Place::Index(b, _) | Place::Slice(b, ..) => capture_field_of(b, env),
+        Place::Deref(e) => match &e.kind {
+            K::Use(inner, _) => capture_field_of(inner, env),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Captures a closure body moves out of (making the closure `FnOnce`).
+fn moved_captures(e: &X, env: LocalId, ck: &super::Checker, out: &mut BTreeSet<u32>) {
+    let moving_pat = |p: &xir::Pat| pat_moves(p, ck);
+    match &e.kind {
+        K::Use(p, UseKind::Move) | K::Drop(p) => {
+            if let Some(i) = capture_field_of(p, env) {
+                out.insert(i);
+            }
+        }
+        K::Match(p, arms) if arms.iter().any(|a| moving_pat(&a.pat)) => {
+            if let Some(i) = capture_field_of(p, env) {
+                out.insert(i);
+            }
+        }
+        _ => {}
+    }
+    super::xir_children(e, &mut |c| moved_captures(c, env, ck, out));
+}
+
+fn pat_moves(p: &xir::Pat, ck: &super::Checker) -> bool {
+    match p {
+        xir::Pat::Bind(_, xir::BindMode::Value) => true,
+        xir::Pat::Tuple(ps) | xir::Pat::Variant(_, ps) | xir::Pat::Or(ps) => {
+            ps.iter().any(|q| pat_moves(q, ck))
+        }
+        _ => false,
     }
 }
 

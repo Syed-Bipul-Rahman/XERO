@@ -687,11 +687,17 @@ impl Parser {
                 TypeKind::FnPtr(params, ret)
             }
             Tok::Ident(name)
-                if (name == "Fn" || name == "FnMut") && matches!(self.peek_at(1), Tok::LParen) =>
+                if (name == "Fn" || name == "FnMut" || name == "FnOnce")
+                    && matches!(self.peek_at(1), Tok::LParen) =>
             {
                 self.bump();
                 let (params, ret) = self.fn_type_sig()?;
-                TypeKind::FnTrait(name == "FnMut", params, ret)
+                let kind = match name.as_str() {
+                    "Fn" => 0,
+                    "FnMut" => 1,
+                    _ => 2,
+                };
+                TypeKind::FnTrait(kind, params, ret)
             }
             Tok::Ident(_) => {
                 let mut path = vec![self.ident()?];
