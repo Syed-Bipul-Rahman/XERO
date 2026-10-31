@@ -27,6 +27,10 @@ pub unsafe fn fd_open(path: *u8, mode: i32) -> i32 {
 
 pub unsafe fn fd_close(fd: i32) {}
 
+pub unsafe fn file_remove(path: *u8) -> i32 {
+    -38
+}
+
 pub fn exit_process(code: i32) -> ! {
     unsafe { exit(code) }
 }

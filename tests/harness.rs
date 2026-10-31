@@ -198,3 +198,40 @@ fn add_is_zero_cost() {
     );
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+/// On Linux, programs that declare no C functions run on Xero's own runtime:
+/// a small static executable with no dynamic loader and no libc.
+#[test]
+#[cfg(target_os = "linux")]
+fn linux_programs_need_no_libc() {
+    let tmp = std::env::temp_dir().join(format!("xero-static-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let exe = tmp.join("hello");
+    let hello = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/hello.xr");
+    let out = Command::new(xeroc())
+        .arg("build")
+        .arg(&hello)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let bytes = std::fs::read(&exe).unwrap();
+    // ELF program headers: no PT_INTERP (3) and no PT_DYNAMIC (2)
+    let phoff = u64::from_le_bytes(bytes[32..40].try_into().unwrap()) as usize;
+    let phentsize = u16::from_le_bytes(bytes[54..56].try_into().unwrap()) as usize;
+    let phnum = u16::from_le_bytes(bytes[56..58].try_into().unwrap()) as usize;
+    for i in 0..phnum {
+        let at = phoff + i * phentsize;
+        let kind = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+        assert!(kind != 2 && kind != 3, "hello is dynamically linked");
+    }
+    assert!(bytes.len() < 32 * 1024, "hello is {} bytes", bytes.len());
+    let run = Command::new(&exe).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "Hello, Xero!\n");
+    let _ = std::fs::remove_dir_all(&tmp);
+}

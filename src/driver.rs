@@ -59,6 +59,8 @@ pub const STD_MODULES: &[(&str, &str)] = &[
     ("std.math", include_str!("../std/math.xr")),
     ("std.thread", include_str!("../std/thread.xr")),
     ("std.sync", include_str!("../std/sync.xr")),
+    ("std.env", include_str!("../std/env.xr")),
+    ("std.fs", include_str!("../std/fs.xr")),
 ];
 
 /// The OS layer `std.sys`, chosen per target.
@@ -165,6 +167,7 @@ fn sys_target_module(target: &TargetInfo) -> String {
             ("WRITE", 1, 64),
             ("OPENAT", 257, 56),
             ("CLOSE", 3, 57),
+            ("UNLINKAT", 263, 35),
             ("MMAP", 9, 222),
             ("MUNMAP", 11, 215),
             ("MREMAP", 25, 216),

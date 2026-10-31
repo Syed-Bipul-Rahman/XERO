@@ -1,0 +1,5 @@
+fn main() {
+    let msg = "hi\n"
+    syscall(1, 1, msg as *u8, msg.len())
+}
+// error: a system call

@@ -11,6 +11,7 @@ unsafe fn write(fd: i32, buf: *u8, count: usize) -> isize
 unsafe fn read(fd: i32, buf: *u8, count: usize) -> isize
 unsafe fn open(path: *u8, flags: i32, ...) -> i32
 unsafe fn close(fd: i32) -> i32
+unsafe fn unlink(path: *u8) -> i32
 unsafe fn exit(code: i32) -> !
 unsafe fn abort() -> !
 unsafe fn malloc(size: usize) -> *u8
@@ -136,6 +137,11 @@ pub unsafe fn fd_open(path: *u8, mode: i32) -> i32 {
 
 pub unsafe fn fd_close(fd: i32) {
     close(fd)
+}
+
+/// Delete the file at the NUL-terminated `path`; returns `-errno` on failure.
+pub unsafe fn file_remove(path: *u8) -> i32 {
+    if unlink(path) < 0 { 0 - target.errno() } else { 0 }
 }
 
 pub fn exit_process(code: i32) -> ! {

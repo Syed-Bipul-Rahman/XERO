@@ -1,0 +1,107 @@
+// The heap: many sizes, reuse after free, growth by realloc, large blocks,
+// and allocation from several threads at once.
+
+struct Node {
+    value: u64
+    next: Option<Box<Node>>
+}
+
+fn list(n: u64) -> u64 {
+    let mut head: Option<Box<Node>> = None
+    let mut i: u64 = 0
+    while i < n {
+        head = Some(Box.new(Node { value: i, next: head }))
+        i += 1
+    }
+    let mut sum: u64 = 0
+    let mut cur = &head
+    while cur is Some(node) {
+        sum += node.get().value
+        cur = &node.get().next
+    }
+    sum
+}
+
+fn strings(rounds: u64) -> u64 {
+    let mut total: u64 = 0
+    let mut r: u64 = 0
+    while r < rounds {
+        let mut v: Vec<String> = Vec.new()
+        let mut i: u64 = 0
+        while i < 64 {
+            let mut s = String.new()
+            let mut j: u64 = 0
+            while j < (i * 7 + r) % 300 {
+                s.push_byte('a' + (j % 26) as u8)
+                j += 1
+            }
+            v.push(s)
+            i += 1
+        }
+        // check contents survived the neighbours' growth
+        let mut i: usize = 0
+        while i < v.len() {
+            let s = v.at(i)
+            let bytes = s.as_bytes()
+            let mut j: usize = 0
+            while j < bytes.len() {
+                if bytes[j] != 'a' + (j % 26) as u8 {
+                    panic("heap corruption")
+                }
+                j += 1
+            }
+            total += bytes.len() as u64
+            i += 1
+        }
+        r += 1
+    }
+    total
+}
+
+fn big(n: u64) -> u64 {
+    // grows through every size class into large blocks
+    let mut v: Vec<u64> = Vec.new()
+    let mut i: u64 = 0
+    while i < n {
+        v.push(i * 3)
+        i += 1
+    }
+    let mut sum: u64 = 0
+    for x in v.as_slice() {
+        sum += *x
+    }
+    while v.len() > 10 {
+        v.pop()
+    }
+    sum + v.len() as u64
+}
+
+fn main() {
+    println(list(10000))
+    println(strings(20))
+    println(big(1000000))
+    let a = spawn { strings(30) }
+    let b = spawn { strings(30) }
+    let c = spawn { big(200000) }
+    let d = spawn { list(20000) }
+    println(a.join() == b.join())
+    println(c.join())
+    println(d.join())
+    // zero-sized and tiny allocations
+    let mut units: Vec<()> = Vec.new()
+    units.push(())
+    units.push(())
+    println(units.len())
+    let boxed = Box.new(7u8)
+    println(*boxed.get())
+}
+
+// output:
+// 49995000
+// 162100
+// 1499998500010
+// true
+// 59999700010
+// 199990000
+// 2
+// 7

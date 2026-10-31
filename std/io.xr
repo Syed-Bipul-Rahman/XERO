@@ -8,22 +8,23 @@ pub const STDIN: i32 = 0
 pub const STDOUT: i32 = 1
 pub const STDERR: i32 = 2
 
-/// Read up to `buf.len()` bytes; returns the count, or `Err(())` on failure.
+/// Read up to `buf.len()` bytes; returns the count, or `Err(errno)` on failure.
 pub fn read_into(fd: i32, buf: &mut [u8]) -> Result<usize, i32> {
-    let n = unsafe { sys.fd_read(fd, buf as *u8, buf.len()) }
+    let len = buf.len()
+    let n = unsafe { sys.fd_read(fd, buf as *u8, len) }
     if n < 0 {
-        return Err(n as i32)
+        return Err((0 - n) as i32)
     }
     Ok(n as usize)
 }
 
-/// Write all bytes; returns the number of bytes written.
+/// Write all bytes; returns the number written, or `Err(errno)` on failure.
 pub fn write_all(fd: i32, bytes: &[u8]) -> Result<usize, i32> {
     let mut done: usize = 0
     while done < bytes.len() {
         let n = unsafe { sys.fd_write(fd, (bytes as *u8) + done, bytes.len() - done) }
         if n < 0 {
-            return Err(n as i32)
+            return Err((0 - n) as i32)
         }
         done += n as usize
     }

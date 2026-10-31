@@ -1,0 +1,192 @@
+// Files. A `File` is closed when it is destroyed.
+
+module std.fs
+
+import std.sys
+
+/// An error from the operating system, such as a missing file.
+pub copy struct Error {
+    code: i32
+}
+
+const NOT_UTF8: i32 = -1
+const PATH_TOO_LONG: i32 = -2
+
+impl Error {
+    /// The OS error number (`errno`), or a negative value for errors
+    /// detected by Xero itself.
+    pub fn code(&self) -> i32 {
+        self.code
+    }
+
+    /// A short description of the error.
+    pub fn message(&self) -> &str {
+        let c = self.code
+        if c == NOT_UTF8 {
+            "file is not valid UTF-8"
+        } else if c == PATH_TOO_LONG {
+            "path is too long or contains a NUL byte"
+        } else if c == 2 {
+            "no such file or directory"
+        } else if c == 13 {
+            "permission denied"
+        } else if c == 17 {
+            "file exists"
+        } else if c == 20 {
+            "not a directory"
+        } else if c == 21 {
+            "is a directory"
+        } else if c == 24 {
+            "too many open files"
+        } else if c == 28 {
+            "no space left on device"
+        } else {
+            "I/O error"
+        }
+    }
+}
+
+impl Print for Error {
+    fn write_to(&self, fd: i32) {
+        write_str(fd, self.message())
+    }
+}
+
+/// Copy `path` into `buf` with a terminating NUL, as the OS wants it.
+fn c_path(path: &str, buf: &mut [u8; 4096]) -> Result<(), Error> {
+    let bytes = path.as_bytes()
+    if bytes.len() >= 4096 {
+        throw Error { code: PATH_TOO_LONG }
+    }
+    let mut i: usize = 0
+    while i < bytes.len() {
+        if bytes[i] == 0 {
+            throw Error { code: PATH_TOO_LONG }
+        }
+        buf[i] = bytes[i]
+        i += 1
+    }
+    buf[i] = 0
+    Ok(())
+}
+
+/// Open `path` with mode 0 (read), 1 (write) or 2 (append).
+fn open_mode(path: &str, mode: i32) -> Result<File, Error> {
+    let mut buf = [0u8; 4096]
+    try c_path(path, &mut buf)
+    let fd = unsafe { sys.fd_open(&buf as *u8, mode) }
+    if fd < 0 {
+        throw Error { code: 0 - fd }
+    }
+    Ok(File { fd: fd })
+}
+
+/// An open file.
+pub struct File {
+    fd: i32
+}
+
+impl File {
+    /// Open an existing file for reading.
+    pub fn open(path: &str) -> Result<File, Error> {
+        open_mode(path, 0)
+    }
+
+    /// Open a file for writing, creating it or emptying it first.
+    pub fn create(path: &str) -> Result<File, Error> {
+        open_mode(path, 1)
+    }
+
+    /// Open a file for writing at its end, creating it if needed.
+    pub fn append(path: &str) -> Result<File, Error> {
+        open_mode(path, 2)
+    }
+
+    /// Read up to `buf.len()` bytes; returns how many were read (0 at the end).
+    pub fn read(&mut self, buf: &mut [u8]) -> Result<usize, Error> {
+        let len = buf.len()
+        let n = unsafe { sys.fd_read(self.fd, buf as *u8, len) }
+        if n < 0 {
+            throw Error { code: (0 - n) as i32 }
+        }
+        Ok(n as usize)
+    }
+
+    /// Read everything from the current position to the end.
+    pub fn read_all(&mut self) -> Result<Vec<u8>, Error> {
+        let mut out: Vec<u8> = Vec.new()
+        let mut buf = [0u8; 8192]
+        loop {
+            let n = try self.read(&mut buf)
+            if n == 0 {
+                break
+            }
+            let mut i: usize = 0
+            while i < n {
+                out.push(buf[i])
+                i += 1
+            }
+        }
+        Ok(out)
+    }
+
+    /// Read the rest of the file as UTF-8 text.
+    pub fn read_to_string(&mut self) -> Result<String, Error> {
+        let bytes = try self.read_all()
+        match String.from_utf8(bytes) {
+            Some(s) => Ok(s)
+            None => Err(Error { code: NOT_UTF8 })
+        }
+    }
+
+    /// Write all of `bytes`.
+    pub fn write(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        let mut done: usize = 0
+        while done < bytes.len() {
+            let n = unsafe { sys.fd_write(self.fd, (bytes as *u8) + done, bytes.len() - done) }
+            if n < 0 {
+                throw Error { code: (0 - n) as i32 }
+            }
+            done += n as usize
+        }
+        Ok(())
+    }
+
+    /// Write all of `text`.
+    pub fn write_str(&mut self, text: &str) -> Result<(), Error> {
+        self.write(text.as_bytes())
+    }
+
+    drop {
+        unsafe { sys.fd_close(self.fd) }
+    }
+}
+
+/// Read a whole file as UTF-8 text.
+pub fn read_to_string(path: &str) -> Result<String, Error> {
+    let mut f = try File.open(path)
+    f.read_to_string()
+}
+
+/// Read a whole file as bytes.
+pub fn read(path: &str) -> Result<Vec<u8>, Error> {
+    let mut f = try File.open(path)
+    f.read_all()
+}
+
+/// Create (or replace) the file at `path` with `bytes` as its contents.
+pub fn write(path: &str, bytes: &[u8]) -> Result<(), Error> {
+    let mut f = try File.create(path)
+    f.write(bytes)
+}
+
+/// Delete the file at `path`.
+pub fn remove(path: &str) -> Result<(), Error> {
+    let mut buf = [0u8; 4096]
+    try c_path(path, &mut buf)
+    let r = unsafe { sys.file_remove(&buf as *u8) }
+    if r < 0 {
+        throw Error { code: 0 - r }
+    }
+    Ok(())
+}

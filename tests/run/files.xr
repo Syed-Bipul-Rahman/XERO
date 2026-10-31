@@ -1,0 +1,118 @@
+// Files and command-line arguments: std.fs and std.env.
+
+import std.env
+import std.fs
+import std.fs.{File}
+import std.os
+
+fn count_lines(text: &str) -> usize {
+    let mut n: usize = 0
+    for b in text.as_bytes() {
+        if *b == '\n' {
+            n += 1
+        }
+    }
+    n
+}
+
+fn main() {
+    // argument 0 is the program itself
+    println(env.arg_count())
+    println(env.arg(0).is_some())
+    println(env.arg(1).is_none())
+    println(env.args().len())
+
+    let path = "xero-files-test.tmp"
+    {
+        let mut f = File.create(path) catch e {
+            println(e)
+            return
+        }
+        f.write_str("first line\n") catch e { println(e) }
+        f.write(&['s', 'e', 'c', 'o', 'n', 'd', '\n']) catch e { println(e) }
+    }   // closed here
+    {
+        let mut f = File.append(path) catch e {
+            println(e)
+            return
+        }
+        f.write_str("third line\n") catch e { println(e) }
+    }
+    let text = fs.read_to_string(path) catch e {
+        println(e)
+        return
+    }
+    print(&text)
+    println(count_lines(text.as_str()))
+    println(text.len())
+
+    // reading in chunks
+    let mut f = File.open(path) catch e {
+        println(e)
+        return
+    }
+    let mut buf = [0u8; 5]
+    let mut chunks = 0
+    let mut total: usize = 0
+    loop {
+        let n = f.read(&mut buf) catch e {
+            println(e)
+            break
+        }
+        if n == 0 {
+            break
+        }
+        chunks += 1
+        total += n
+    }
+    println(chunks)
+    println(total)
+
+    // bytes that are not UTF-8 are rejected as text but readable as bytes
+    fs.write(path, &[0xFFu8, 0xFE, 'a']) catch e { println(e) }
+    match fs.read_to_string(path) {
+        Ok(_) => println("unexpected text")
+        Err(e) => println(e)
+    }
+    let bytes = fs.read(path) catch e {
+        println(e)
+        return
+    }
+    println(bytes.len())
+
+    fs.remove(path) catch e { println(e) }
+    match File.open(path) {
+        Ok(_) => println("still there")
+        Err(e) => {
+            println(e)
+            println(e.code())
+        }
+    }
+    match fs.remove("") {
+        Ok(_) => println("removed nothing?")
+        Err(e) => println(e.code() > 0)
+    }
+
+    println(os.NAME == "linux" || os.NAME == "macos" || os.NAME == "windows")
+    println(os.POINTER_BITS)
+}
+
+// output:
+// 1
+// true
+// true
+// 1
+// first line
+// second
+// third line
+// 3
+// 29
+// 6
+// 29
+// file is not valid UTF-8
+// 3
+// no such file or directory
+// 2
+// true
+// true
+// 64

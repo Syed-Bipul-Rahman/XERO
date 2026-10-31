@@ -1,0 +1,7 @@
+import std.fs
+
+fn main() {
+    let text: String = fs.read_to_string("notes.txt")
+    println(&text)
+}
+// error: mismatched types

@@ -13,12 +13,12 @@ jobs:
       fail-fast: false
       matrix:
         # ubuntu-22.04 ships clang 14 as `clang`: xeroc must pick a newer versioned one
-        os: [ubuntu-24.04, ubuntu-22.04, macos-14, windows-2022]
+        os: [ubuntu-24.04, ubuntu-22.04, ubuntu-24.04-arm, macos-14, windows-2022]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - name: Install LLVM (Linux)
-        if: matrix.os == 'ubuntu-24.04'
+        if: matrix.os == 'ubuntu-24.04' || matrix.os == 'ubuntu-24.04-arm'
         run: |
           sudo apt-get update
           sudo apt-get install -y clang-18 lld-18
@@ -31,11 +31,38 @@ jobs:
         run: cargo build --release
       - name: Test
         run: cargo test --release
+      - name: Test with the C library (Linux)
+        if: runner.os == 'Linux'
+        run: XERO_TEST_FLAGS=--libc cargo test --release --test harness
       - name: Smoke test
         shell: bash
         run: |
           ./target/release/xeroc run examples/hello.xr
           ./target/release/xeroc run examples/tour.xr
+
+  cross:
+    # Linux programs need no C library, so they cross-compile with lld alone;
+    # run every test program for each target under qemu.
+    name: cross (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [aarch64, riscv64]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install LLVM and qemu
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 lld-18 qemu-user
+          echo "XERO_CLANG=clang-18" >> "$GITHUB_ENV"
+      - name: Build
+        run: cargo build --release
+      - name: Test under qemu
+        run: |
+          XERO_TEST_FLAGS="--target ${{ matrix.target }}-linux" \
+          XERO_TEST_RUNNER="qemu-${{ matrix.target }}" \
+          cargo test --release --test harness run_programs
 
   installers:
     # Builds a release-style archive and installs it with the real install scripts.
@@ -95,12 +122,12 @@ jobs:
     # `main` must pass the tests on all platforms and the installer checks.
     name: CI passed
     if: always()
-    needs: [test, installers]
+    needs: [test, cross, installers]
     runs-on: ubuntu-latest
     steps:
       - name: All jobs succeeded
         run: |
-          if [ "${{ needs.test.result }}" != "success" ] || [ "${{ needs.installers.result }}" != "success" ]; then
-            echo "test: ${{ needs.test.result }}, installers: ${{ needs.installers.result }}"
+          if [ "${{ needs.test.result }}" != "success" ] || [ "${{ needs.cross.result }}" != "success" ] || [ "${{ needs.installers.result }}" != "success" ]; then
+            echo "test: ${{ needs.test.result }}, cross: ${{ needs.cross.result }}, installers: ${{ needs.installers.result }}"
             exit 1
           fi

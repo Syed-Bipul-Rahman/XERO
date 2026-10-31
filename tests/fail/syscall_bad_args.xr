@@ -1,0 +1,6 @@
+fn main() {
+    unsafe {
+        syscall(1, 1.5)
+    }
+}
+// error: system call arguments must be integers or raw pointers
