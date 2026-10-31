@@ -1,3 +1,19 @@
+## 0.3.0
+
+* Adds threads: `spawn { ... }` runs a block on a new OS thread and returns a handle whose `join()` gives the block's value.
+* Adds scoped threads: a thread is joined when its handle is destroyed, so it can borrow local variables, and data races are compile errors.
+* Adds `spawn move { ... }`, which moves the values a thread uses into it.
+* Adds `std.sync`: `Mutex<T>` (with `lock()` guards and `with`), `Channel<T>` (`send`, `recv`, `try_recv`, `close`), `Atomic<T>` and `AtomicBool`.
+* Adds `std.thread` with `start`, `sleep_ms` and `yield_now`; threads use POSIX threads on Linux and macOS and `kernel32` on Windows.
+* Adds `FnOnce` closures: a `move` closure that moves a captured value out can be called once, and `FnOnce(A) -> R` bounds accept any closure.
+* Adds atomic intrinsics `atomic_load`, `atomic_store`, `atomic_swap`, `atomic_add`, `atomic_sub`, `atomic_cas` and `fence`.
+* Infers the element type of literal arrays (`[0; 4]`) from later use.
+* Allows patterns to move out of temporaries: `while ch.recv() is Some(job)`.
+* Changes `forget` to require `unsafe`.
+* Fixes `Box.new(&local)` and values sent into a channel not keeping their data borrowed.
+* Fixes values with a `drop` block being destroyed after data they borrow.
+* Fixes enums whose only fields are zero-sized, such as `Option<()>`, failing to compile.
+
 ## 0.2.0
 
 * Adds closures: `|a, b| a + b`, `|x: i32| -> i32 { ... }` and `move |x| ...`, captured by reference (`&mut` when mutated) or by value.

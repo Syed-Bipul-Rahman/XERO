@@ -26,15 +26,25 @@
 - [x] References inside structs and enums, without lifetime annotations
 - [x] `Vec` helpers taking closures: `map`, `filter`, `for_each`, `any`, `all`, `count`, `position`, `sort_by`, `sort`
 
+## Done in v0.3
+
+- [x] `spawn { ... }` and `spawn move { ... }`: scoped OS threads joined when their handle is destroyed
+- [x] Data races are compile errors (the borrow checker applies across threads)
+- [x] `std.sync`: `Mutex<T>`, `Channel<T>`, `Atomic<T>`, `AtomicBool`
+- [x] `FnOnce` closures and atomic intrinsics
+
 ## Next
 
-### Concurrency without data races (`spawn`, `async`, `await`)
-- `spawn { ... }` starts a scoped thread. Captured values are moved in, or
-  borrowed when they outlive the scope.
-- Thread-safety marker traits checked at compile time, playing the role of
-  Rust's `Send` and `Sync`.
-- `Channel<T>`, `Mutex<T>` and `Atomic*` as library types.
+### Concurrency
 - `async fn` and `await` compiled to state machines, with no mandatory runtime.
+- Thread-safety marker traits (the role of Rust's `Send` and `Sync`) for
+  user types with interior mutability built on `unsafe`.
+- Thread pools and parallel iterators in the standard library.
+
+### Self-contained programs
+- No libc on Linux: direct system calls, an `mmap`-based allocator and our
+  own program entry point, so programs are small static binaries.
+- No C runtime on Windows: call `kernel32` directly.
 
 ### Type system
 - Trait objects (`dyn Trait`) as an opt-in for dynamic dispatch.
