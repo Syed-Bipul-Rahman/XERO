@@ -1,0 +1,11 @@
+import std.sync
+
+fn main() {
+    let ch: sync.Channel<&str> = sync.Channel.new()
+    {
+        let s = String.from("short-lived")
+        ch.send(s.as_str())
+    }
+    println(ch.recv().unwrap())
+}
+// error: `s` does not live long enough: it is still borrowed by `ch`

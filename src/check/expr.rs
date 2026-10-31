@@ -1288,6 +1288,36 @@ impl<'a> FnCx<'a> {
         Ok((Place::Static(sym, mutable), ty))
     }
 
+    /// The value being matched: a place, or a temporary held in a hidden
+    /// local (so patterns may move out of it: `while ch.recv() is Some(v)`).
+    fn scrutinee(&mut self, e: &ast::Expr) -> Result<(Option<xir::Stmt>, Place, Ty)> {
+        if let Some((p, t)) = self.place(e)? {
+            return Ok((None, p, t));
+        }
+        let v = self.expr(e, None)?;
+        let t = v.ty.clone();
+        let tmp = self.synthetic("scrutinee", t.clone(), e.span);
+        Ok((Some(xir::Stmt::Let(tmp, v)), Place::Local(tmp), t))
+    }
+
+    fn with_pre(&self, pre: Option<xir::Stmt>, m: X) -> X {
+        match pre {
+            None => m,
+            Some(s) => {
+                let (ty, span) = (m.ty.clone(), m.span);
+                x(
+                    K::Block(xir::Block {
+                        stmts: vec![s],
+                        tail: Some(Box::new(m)),
+                        scope: Vec::new(),
+                    }),
+                    ty,
+                    span,
+                )
+            }
+        }
+    }
+
     pub fn place_or_temp(&mut self, e: &ast::Expr) -> Result<(Place, Ty)> {
         if let Some(p) = self.place(e)? {
             return Ok(p);
@@ -3085,7 +3115,7 @@ impl<'a> FnCx<'a> {
         expected: Option<&Ty>,
         span: Span,
     ) -> Result<X> {
-        let (p, sty) = self.place_or_temp(scrut)?;
+        let (pre, p, sty) = self.scrutinee(scrut)?;
         let ty_target = if els.is_none() {
             Some(Ty::unit())
         } else {
@@ -3151,7 +3181,7 @@ impl<'a> FnCx<'a> {
             },
         ];
         self.check_match_moves(&p, &arms, span)?;
-        Ok(x(K::Match(p, arms), ty, span))
+        Ok(self.with_pre(pre, x(K::Match(p, arms), ty, span)))
     }
 
     fn while_loop(&mut self, cond: &ast::Expr, body: &ast::Block, span: Span) -> Result<X> {
@@ -3167,7 +3197,7 @@ impl<'a> FnCx<'a> {
             if let E::Is(scrut, pat) = &cond.kind {
                 if pattern_binds(pat) {
                     // loop { match scrut { pat => body, _ => break } }
-                    let (p, sty) = self.place_or_temp(scrut)?;
+                    let (pre, p, sty) = self.scrutinee(scrut)?;
                     self.push_scope();
                     let mut binds = Vec::new();
                     let xp = self.pattern(pat, &sty, BindMode::Value, &mut binds);
@@ -3209,7 +3239,7 @@ impl<'a> FnCx<'a> {
                         },
                     ];
                     self.check_match_moves(&p, &arms, span)?;
-                    return Ok(x(K::Match(p, arms), Ty::unit(), span));
+                    return Ok(self.with_pre(pre, x(K::Match(p, arms), Ty::unit(), span)));
                 }
             }
             let c = self.expr_as(cond, &Ty::Bool)?;
@@ -3600,7 +3630,7 @@ impl<'a> FnCx<'a> {
         expected: Option<&Ty>,
         span: Span,
     ) -> Result<X> {
-        let (p, sty) = self.place_or_temp(scrut)?;
+        let (pre, p, sty) = self.scrutinee(scrut)?;
         if arms.is_empty() && !matches!(&sty, Ty::Never) {
             return self.err(span, "`match` needs at least one arm");
         }
@@ -3671,7 +3701,7 @@ impl<'a> FnCx<'a> {
         }
         super::exhaust::check(self.ck, &sty, &out, span)?;
         self.check_match_moves(&p, &out, span)?;
-        Ok(x(K::Match(p, out), ty, span))
+        Ok(self.with_pre(pre, x(K::Match(p, out), ty, span)))
     }
 
     /// Moving bindings require the scrutinee to be an owned local.

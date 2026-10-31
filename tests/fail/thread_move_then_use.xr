@@ -1,0 +1,6 @@
+fn main() {
+    let v = String.from("mine")
+    let t = spawn move { println(&v) }
+    println(&v)
+}
+// error: use of moved value `v`

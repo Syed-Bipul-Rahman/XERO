@@ -270,6 +270,8 @@ pub struct Checker {
     /// What each function's result borrows from: (parameter index,
     /// `true` if only data the parameter refers to, not the parameter's own memory).
     pub summaries: HashMap<String, BTreeSet<(usize, bool)>>,
+    /// Functions that write through raw pointers (see `borrowck::storing_fns`).
+    pub storing: HashSet<String>,
 }
 
 /// One closure expression, after checking.
@@ -318,6 +320,7 @@ impl Checker {
             closures: Vec::new(),
             closure_ids: HashMap::new(),
             summaries: HashMap::new(),
+            storing: HashSet::new(),
         }
     }
 
@@ -1394,24 +1397,37 @@ impl Checker {
     }
 
     fn has_refs_depth(&self, t: &Ty, depth: u32) -> bool {
-        if depth > 64 {
+        self.has_refs_in(t, depth, &mut Vec::new())
+    }
+
+    /// `seen` holds the struct/enum instances being examined: a recursive
+    /// type (`Node { next: Option<Box<Node>> }`) adds nothing new on a cycle.
+    fn has_refs_in(&self, t: &Ty, depth: u32, seen: &mut Vec<Ty>) -> bool {
+        if depth > 256 {
             return true;
         }
         match t {
             Ty::Ref(..) => true,
             // memory owned through a raw pointer (a Vec's buffer) counts too
-            Ty::Array(e, _) | Ty::Slice(e) | Ty::Ptr(e) => self.has_refs_depth(e, depth + 1),
-            Ty::Tuple(ts) => ts.iter().any(|t| self.has_refs_depth(t, depth + 1)),
+            Ty::Array(e, _) | Ty::Slice(e) | Ty::Ptr(e) => self.has_refs_in(e, depth + 1, seen),
+            Ty::Tuple(ts) => ts.iter().any(|t| self.has_refs_in(t, depth + 1, seen)),
             Ty::Closure(id) => self.closures[*id as usize]
                 .fields
                 .iter()
-                .any(|t| self.has_refs_depth(t, depth + 1)),
+                .any(|t| self.has_refs_in(t, depth + 1, seen)),
             Ty::Adt(id, args) => {
+                if seen.contains(t) {
+                    return false;
+                }
+                seen.push(t.clone());
                 let a = &self.adts[*id as usize];
-                a.fields
+                let r = a
+                    .fields
                     .iter()
                     .chain(a.variants.iter().flatten())
-                    .any(|f| self.has_refs_depth(&f.subst(args), depth + 1))
+                    .any(|f| self.has_refs_in(&f.subst(args), depth + 1, seen));
+                seen.pop();
+                r
             }
             _ => false,
         }
@@ -1425,29 +1441,38 @@ impl Checker {
     }
 
     fn drop_uses_borrows_depth(&self, t: &Ty, depth: u32) -> bool {
-        if depth > 64 {
+        self.drop_uses_in(t, depth, &mut Vec::new())
+    }
+
+    fn drop_uses_in(&self, t: &Ty, depth: u32, seen: &mut Vec<Ty>) -> bool {
+        if depth > 256 {
             return true;
         }
         match t {
-            Ty::Array(e, _) | Ty::Ptr(e) => self.drop_uses_borrows_depth(e, depth + 1),
-            Ty::Tuple(ts) => ts
-                .iter()
-                .any(|t| self.drop_uses_borrows_depth(t, depth + 1)),
+            Ty::Array(e, _) | Ty::Ptr(e) => self.drop_uses_in(e, depth + 1, seen),
+            Ty::Tuple(ts) => ts.iter().any(|t| self.drop_uses_in(t, depth + 1, seen)),
             Ty::Closure(id) => self.closures[*id as usize]
                 .fields
                 .iter()
-                .any(|t| self.drop_uses_borrows_depth(t, depth + 1)),
+                .any(|t| self.drop_uses_in(t, depth + 1, seen)),
             Ty::Adt(id, args) => {
+                if seen.contains(t) {
+                    return false;
+                }
                 let a = &self.adts[*id as usize];
                 let trusted = self.modules[a.module as usize].is_std
                     && matches!(a.name.as_str(), "Vec" | "Box" | "String");
                 if a.drop_impl.is_some() && !trusted && self.has_refs(t) {
                     return true;
                 }
-                a.fields
+                seen.push(t.clone());
+                let r = a
+                    .fields
                     .iter()
                     .chain(a.variants.iter().flatten())
-                    .any(|f| self.drop_uses_borrows_depth(&f.subst(args), depth + 1))
+                    .any(|f| self.drop_uses_in(&f.subst(args), depth + 1, seen));
+                seen.pop();
+                r
             }
             _ => false,
         }
@@ -1779,6 +1804,7 @@ impl Checker {
         // Borrow checking runs once every function is known, so calls can use
         // what each callee's result borrows from.
         self.summaries = crate::borrowck::summaries(self, &self.out_funcs);
+        self.storing = crate::borrowck::storing_fns(&self.out_funcs);
         for i in 0..self.out_funcs.len() {
             if let Err(ds) = crate::borrowck::check(self, &self.out_funcs[i]) {
                 self.diags.extend(ds);

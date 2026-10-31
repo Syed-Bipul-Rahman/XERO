@@ -1,0 +1,11 @@
+import std.sync
+
+fn main() {
+    let m = sync.Mutex.new(5)
+    let r = {
+        let mut g = m.lock()
+        g.get_mut()
+    }
+    *r += 1
+}
+// error: `g` does not live long enough

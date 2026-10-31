@@ -1,0 +1,112 @@
+// Threads, scoped borrows, Mutex, Channel and atomics.
+
+import std.sync
+import std.thread
+
+fn fib(n: u64) -> u64 {
+    if n < 2 { n } else { fib(n - 1) + fib(n - 2) }
+}
+
+struct Job {
+    id: i64
+    cost: i64
+}
+
+fn main() {
+    // threads return values through join()
+    let a = spawn { fib(25) }
+    let b = spawn { fib(26) }
+    println(a.join() + b.join())
+
+    // threads can borrow locals; each gets a disjoint part
+    let mut evens: Vec<i64> = Vec.new()
+    let mut odds: Vec<i64> = Vec.new()
+    {
+        let t1 = spawn {
+            for i in 0..10 {
+                if i % 2 == 0 { evens.push(i) }
+            }
+        }
+        let t2 = spawn {
+            for i in 0..10 {
+                if i % 2 == 1 { odds.push(i) }
+            }
+        }
+    }   // joined here, so evens and odds are usable again
+    println(evens.len() + odds.len())
+
+    // shared read-only data needs no locking
+    let table = [3, 1, 4, 1, 5, 9, 2, 6]
+    let left = spawn { table[0] + table[1] + table[2] + table[3] }
+    let right = spawn { table[4] + table[5] + table[6] + table[7] }
+    println(left.join() + right.join())
+
+    // move: the thread owns its data
+    let greeting = String.from("hello")
+    let t = spawn move {
+        let mut s = greeting
+        s.push_str(" from a thread")
+        s
+    }
+    println(&t.join())
+
+    // a mutex-protected counter shared by four threads
+    let counter = sync.Mutex.new(0)
+    {
+        let w1 = spawn { for _ in 0..1000 { counter.with(|c| *c += 1) } }
+        let w2 = spawn { for _ in 0..1000 { counter.with(|c| *c += 1) } }
+        let w3 = spawn {
+            for _ in 0..1000 {
+                let mut g = counter.lock()
+                *g.get_mut() += 1
+            }
+        }
+        let w4 = spawn { for _ in 0..1000 { counter.with(|c| *c += 1) } }
+    }
+    println(*counter.lock().get())
+
+    // atomics
+    let hits = sync.Atomic.new(0u64)
+    let done = sync.AtomicBool.new(false)
+    {
+        let t1 = spawn { for _ in 0..5000 { hits.fetch_add(1) } }
+        let t2 = spawn { for _ in 0..5000 { hits.fetch_add(1) } }
+    }
+    done.store(true)
+    println(hits.load())
+    println(done.load())
+    println(hits.compare_exchange(10000, 1))
+    println(hits.load())
+
+    // a work queue: producers send jobs, a consumer sums their cost
+    let jobs: sync.Channel<Job> = sync.Channel.new()
+    let results: sync.Channel<i64> = sync.Channel.new()
+    {
+        let consumer = spawn {
+            let mut total: i64 = 0
+            while jobs.recv() is Some(job) {
+                total += job.cost * job.id
+            }
+            results.send(total)
+        }
+        let p1 = spawn { for i in 1..=50 { jobs.send(Job { id: i, cost: 2 }) } }
+        let p2 = spawn { for i in 51..=100 { jobs.send(Job { id: i, cost: 2 }) } }
+        p1.join()
+        p2.join()
+        jobs.close()
+    }
+    println(results.recv())
+    println(results.try_recv())
+}
+// output:
+// 196418
+// 10
+// 31
+// hello from a thread
+// 4000
+// 10000
+// true
+// true
+// 1
+// Some(10100)
+// None

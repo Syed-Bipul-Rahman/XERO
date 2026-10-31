@@ -657,7 +657,8 @@ impl<'a> Ck<'a> {
             }
             K::Call(name, args) => {
                 let (_, per) = self.exprs_in_flight_each(args);
-                self.flow_into_mut_args(args, &per, e.span);
+                let storing = self.ck.storing.contains(name);
+                self.flow_into_mut_args(args, &per, e.span, storing);
                 if !self.ck.has_refs(&e.ty) {
                     return Loans::new();
                 }
@@ -876,11 +877,16 @@ impl<'a> Ck<'a> {
     /// A call `f(&mut x, &y)` where `x` can hold references may store `&y`
     /// inside `x`: from then on `x` holds `y`'s loans. If the `&mut` points
     /// outside this function (a parameter), no local may be stored.
-    fn flow_into_mut_args(&mut self, args: &[Expr], per: &[Loans], span: Span) {
+    /// `storing`: the callee writes through raw pointers, so it can also
+    /// store into values reached by shared references (`ch.send(&x)`).
+    fn flow_into_mut_args(&mut self, args: &[Expr], per: &[Loans], span: Span, storing: bool) {
         for (i, a) in args.iter().enumerate() {
-            let Ty::Ref(inner, true) = &a.ty else {
+            let Ty::Ref(inner, m) = &a.ty else {
                 continue;
             };
+            if !*m && !storing {
+                continue;
+            }
             if !self.ck.has_refs(inner) {
                 continue;
             }
@@ -898,7 +904,7 @@ impl<'a> Ck<'a> {
             let targets: Vec<usize> = per[i]
                 .iter()
                 .copied()
-                .filter(|id| self.loans[*id].mutable)
+                .filter(|id| self.loans[*id].mutable || storing)
                 .collect();
             let mut outside = targets.is_empty();
             for t in targets {
@@ -1612,5 +1618,45 @@ fn place_through_raw(p: &Place) -> bool {
         }
         Place::Field(b, _) | Place::Index(b, _) | Place::Slice(b, ..) => place_through_raw(b),
         _ => false,
+    }
+}
+
+/// Functions that write through raw pointers, directly or through a call:
+/// they can store an argument somewhere reachable from another argument
+/// even through a shared reference (interior mutability: `Channel.send`).
+pub fn storing_fns(funcs: &[Func]) -> HashSet<String> {
+    fn scan(e: &Expr, direct: &mut bool, calls: &mut Vec<String>) {
+        match &e.kind {
+            K::Intrinsic(
+                xir::Intrinsic::PtrWrite
+                | xir::Intrinsic::VolatileStore
+                | xir::Intrinsic::AtomicStore,
+                _,
+            ) => *direct = true,
+            K::Assign(p, _) if place_through_raw(p) => *direct = true,
+            K::Call(name, _) => calls.push(name.clone()),
+            _ => {}
+        }
+        crate::check::xir_children(e, &mut |c| scan(c, direct, calls));
+    }
+    let info: Vec<(String, bool, Vec<String>)> = funcs
+        .iter()
+        .map(|f| {
+            let (mut direct, mut calls) = (false, Vec::new());
+            scan(&f.body, &mut direct, &mut calls);
+            (f.name.clone(), direct, calls)
+        })
+        .collect();
+    let mut storing: HashSet<String> = info.iter().filter(|i| i.1).map(|i| i.0.clone()).collect();
+    loop {
+        let before = storing.len();
+        for (name, _, calls) in &info {
+            if !storing.contains(name) && calls.iter().any(|c| storing.contains(c)) {
+                storing.insert(name.clone());
+            }
+        }
+        if storing.len() == before {
+            return storing;
+        }
     }
 }
