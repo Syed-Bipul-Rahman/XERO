@@ -1,5 +1,7 @@
 //! Type checking and lowering of function bodies.
 
+use std::collections::HashMap;
+
 use super::{Checker, Def, Env, FnId, FnKey, FnOwner, ImplId, IntrinsicFn, ModId};
 use crate::ast::{self, BinOp, ExprKind as E, Ident, SelfKind, UnOp, Vis};
 use crate::diag::{Diagnostic, Result, Span};
@@ -30,6 +32,13 @@ pub struct FnCx<'a> {
     pub loops: Vec<LoopCx>,
     pub next_loop: u32,
     pub unsafe_depth: u32,
+    /// Literal-typing retries: types chosen for literals that defaulted to
+    /// `i32`/`f64` in an earlier attempt, keyed by the literal's span.
+    pub overrides: HashMap<Span, Ty>,
+    /// Locals whose type came from a defaulted literal, with that literal's key.
+    pub defaulted: HashMap<LocalId, Span>,
+    /// First defaulted literal found to need a different type.
+    pub pending: Option<(Span, Ty)>,
 }
 
 /// What a path-like expression (`a`, `a.b`, `Type.member`) refers to.
@@ -53,7 +62,42 @@ pub fn x(kind: K, ty: Ty, span: Span) -> X {
     X { kind, ty, span }
 }
 
+/// Check a function. Untyped literals default to `i32`/`f64`; when such a
+/// literal's variable later meets a different numeric type, the function is
+/// re-checked with that type for the literal (bounded number of attempts).
 pub fn check_fn(ck: &mut Checker, key: &FnKey, name: String) -> Result<xir::Func> {
+    let mut overrides = HashMap::new();
+    for _ in 0..32 {
+        match check_fn_once(ck, key, name.clone(), &overrides) {
+            (Ok(f), _) => return Ok(f),
+            (Err(d), Some((k, t))) if !overrides.contains_key(&k) => {
+                let _ = d;
+                overrides.insert(k, t);
+            }
+            (Err(d), _) => return Err(d),
+        }
+    }
+    check_fn_once(ck, key, name, &overrides).0
+}
+
+fn check_fn_once(
+    ck: &mut Checker,
+    key: &FnKey,
+    name: String,
+    overrides: &HashMap<Span, Ty>,
+) -> (Result<xir::Func>, Option<(Span, Ty)>) {
+    let mut pending = None;
+    let r = check_fn_inner(ck, key, name, overrides, &mut pending);
+    (r, pending)
+}
+
+fn check_fn_inner(
+    ck: &mut Checker,
+    key: &FnKey,
+    name: String,
+    overrides: &HashMap<Span, Ty>,
+    pending_out: &mut Option<(Span, Ty)>,
+) -> Result<xir::Func> {
     let fdef = &ck.fns[key.fid as usize];
     let decl = fdef.decl.clone();
     let module = fdef.module;
@@ -90,6 +134,9 @@ pub fn check_fn(ck: &mut Checker, key: &FnKey, name: String) -> Result<xir::Func
         loops: Vec::new(),
         next_loop: 0,
         unsafe_depth: 0,
+        overrides: overrides.clone(),
+        defaulted: HashMap::new(),
+        pending: None,
     };
     if decl.is_unsafe {
         cx.unsafe_depth = 1;
@@ -129,8 +176,10 @@ pub fn check_fn(ck: &mut Checker, key: &FnKey, name: String) -> Result<xir::Func
         }
     }
     let body_ast = decl.body.as_ref().unwrap();
-    let body = cx.block(body_ast, Some(&ret_ty))?;
-    let body = cx.coerce(body, &ret_ty, body_ast.span)?;
+    let body = cx.block(body_ast, Some(&ret_ty));
+    let body = body.and_then(|b| cx.coerce(b, &ret_ty, body_ast.span));
+    *pending_out = cx.pending.take();
+    let body = body?;
     Ok(xir::Func {
         name,
         params,
@@ -284,9 +333,37 @@ impl<'a> FnCx<'a> {
         (p, ty)
     }
 
+    // ------------------------------------------------- literal type inference
+
+    /// If `v`'s type comes from a defaulted literal, that literal's key.
+    fn defaulted_expr(&self, v: &X) -> Option<Span> {
+        match &v.kind {
+            K::Use(Place::Local(l), _) => self.defaulted.get(l).copied(),
+            K::Binary(op, a, b) if !op.is_comparison() && !matches!(op, BinOp::And | BinOp::Or) => {
+                self.defaulted_expr(a).or_else(|| self.defaulted_expr(b))
+            }
+            K::Unary(UnOp::Neg, a) => self.defaulted_expr(a),
+            _ => None,
+        }
+    }
+
+    /// Remember that the literal `key` should have had type `want`.
+    fn want_literal_type(&mut self, key: Span, have: &Ty, want: &Ty) {
+        let numeric = |t: &Ty| t.is_int() || t.is_float();
+        if self.pending.is_none() && numeric(have) && numeric(want) && have != want && !self.overrides.contains_key(&key) {
+            self.pending = Some((key, want.clone()));
+        }
+    }
+
     // ------------------------------------------------------------ coercion
 
     pub fn coerce(&mut self, v: X, expected: &Ty, span: Span) -> Result<X> {
+        if v.ty != *expected {
+            if let Some(k) = self.defaulted_expr(&v) {
+                let have = v.ty.clone();
+                self.want_literal_type(k, &have, expected);
+            }
+        }
         if v.ty == *expected || v.ty.is_never() {
             if v.ty.is_never() && !expected.is_never() {
                 let mut v = v;
@@ -341,6 +418,22 @@ impl<'a> FnCx<'a> {
         };
         let p = Place::Deref(Box::new(v));
         x(K::Borrow(p, false), Ty::Ref(inner, false), span)
+    }
+
+    /// `expr_as` for a value stored into `place`: if the place is a variable
+    /// typed by a defaulted literal, a differently typed value retypes it.
+    fn expr_as_into(&mut self, place: &Place, e: &ast::Expr, expected: &Ty) -> Result<X> {
+        if let Place::Local(l) = place {
+            if let Some(k) = self.defaulted.get(l).copied() {
+                let v = self.expr(e, Some(expected))?;
+                if v.ty != *expected && !v.ty.is_never() {
+                    let found = v.ty.clone();
+                    self.want_literal_type(k, expected, &found);
+                }
+                return self.coerce(v, expected, e.span);
+            }
+        }
+        self.expr_as(e, expected)
     }
 
     pub fn expr_as(&mut self, e: &ast::Expr, expected: &Ty) -> Result<X> {
@@ -410,10 +503,21 @@ impl<'a> FnCx<'a> {
                         }
                         None => None,
                     };
-                    let v = self.expr(init, declared.as_ref())?;
-                    let v = match &declared {
-                        Some(t) => self.coerce(v, t, init.span)?,
-                        None => v,
+                    // an un-annotated literal may get its type from a later use
+                    let literal_key = if declared.is_none() && untyped_literal(init) { Some(init.span) } else { None };
+                    let hinted = literal_key.and_then(|k| self.overrides.get(&k).cloned());
+                    let v = match (&declared, &hinted) {
+                        (Some(t), _) | (None, Some(t)) => {
+                            let t = t.clone();
+                            let v = self.expr(init, Some(&t))?;
+                            self.coerce(v, &t, init.span)?
+                        }
+                        (None, None) => self.expr(init, None)?,
+                    };
+                    let default_key = match literal_key {
+                        Some(k) => Some(k),
+                        None if declared.is_none() => self.defaulted_expr(&v),
+                        None => None,
                     };
                     let vty = v.ty.clone();
                     if vty.is_never() {
@@ -426,6 +530,9 @@ impl<'a> FnCx<'a> {
                             let lid = self.new_local(&id.name, vty, *mutable, id.span, false);
                             stmts.push(xir::Stmt::Let(lid, v));
                             self.declare(&id.name, lid);
+                            if let Some(k) = default_key {
+                                self.defaulted.insert(lid, k);
+                            }
                         }
                         ast::PatKind::Wild => {
                             let lid = self.synthetic("_", vty, pat.span);
@@ -528,7 +635,7 @@ impl<'a> FnCx<'a> {
             E::Binary(op, a, b) => self.binary(*op, a, b, expected, span),
             E::Assign(lhs, rhs) => {
                 let (p, ty) = self.place_required(lhs, "assign to")?;
-                let v = self.expr_as(rhs, &ty)?;
+                let v = self.expr_as_into(&p, rhs, &ty)?;
                 Ok(x(K::Assign(p, Box::new(v)), Ty::unit(), span))
             }
             E::CompoundAssign(op, lhs, rhs) => {
@@ -571,7 +678,7 @@ impl<'a> FnCx<'a> {
                     }
                     v
                 } else {
-                    self.expr_as(rhs, &rty)?
+                    self.expr_as_into(&p, rhs, &rty)?
                 };
                 Ok(x(K::CompoundAssign(*op, p, Box::new(v)), Ty::unit(), span))
             }
@@ -2356,7 +2463,18 @@ impl<'a> FnCx<'a> {
                 Ty::Ptr(_) if matches!(op, BinOp::Add | BinOp::Sub) => {
                     self.expr(b, Some(&Ty::Int(IntTy::Usize)))?
                 }
-                _ => self.expr_as(b, &lt)?,
+                _ => match self.defaulted_expr(&l) {
+                    // `i < v.len()` with `i` from a literal: `i` becomes `usize`
+                    Some(k) => {
+                        let r = self.expr(b, Some(&lt))?;
+                        if r.ty != lt && !r.ty.is_never() {
+                            let found = r.ty.clone();
+                            self.want_literal_type(k, &lt, &found);
+                        }
+                        self.coerce(r, &lt, b.span)?
+                    }
+                    None => self.expr_as(b, &lt)?,
+                },
             };
             (l, r)
         };
@@ -2769,6 +2887,8 @@ impl<'a> FnCx<'a> {
             let mut pre = Vec::new();
             // Produces (condition, element value, increment) over local state.
             let (cond, elem, step): (X, X, X);
+            // the loop variable of `for i in 0..10` is typed by its literals
+            let mut range_key: Option<Span> = None;
             if let E::Range(lo, hi, inclusive) = &iter.kind {
                 let (Some(lo), Some(hi)) = (lo, hi) else {
                     return self.err(
@@ -2776,7 +2896,11 @@ impl<'a> FnCx<'a> {
                         "`for` loops need a bounded range `a..b` or `a..=b`",
                     );
                 };
-                let (l, h) = if untyped_literal(lo) && !untyped_literal(hi) {
+                let both_literals = untyped_literal(lo) && untyped_literal(hi);
+                let hinted = if both_literals { self.overrides.get(&iter.span).cloned() } else { None };
+                let (l, h) = if let Some(t) = hinted {
+                    (self.expr_as(lo, &t)?, self.expr_as(hi, &t)?)
+                } else if untyped_literal(lo) && !untyped_literal(hi) {
                     let h = self.expr(hi, None)?;
                     let ht = h.ty.clone();
                     (self.expr_as(lo, &ht)?, h)
@@ -2784,6 +2908,11 @@ impl<'a> FnCx<'a> {
                     let l = self.expr(lo, None)?;
                     let lt = l.ty.clone();
                     (l, self.expr_as(hi, &lt)?)
+                };
+                range_key = if both_literals {
+                    Some(iter.span)
+                } else {
+                    self.defaulted_expr(&l).or_else(|| self.defaulted_expr(&h))
                 };
                 let ity = l.ty.clone();
                 if !ity.is_int() {
@@ -3017,6 +3146,9 @@ impl<'a> FnCx<'a> {
                         stmts.push(xir::Stmt::Let(lid, elem));
                         stmts.push(xir::Stmt::Expr(step));
                         self.declare(&name.name, lid);
+                        if let Some(k) = range_key {
+                            self.defaulted.insert(lid, k);
+                        }
                     }
                     ast::PatKind::Wild => {
                         stmts.push(xir::Stmt::Expr(elem));

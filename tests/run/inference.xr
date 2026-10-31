@@ -1,0 +1,51 @@
+// Untyped literals take their type from how the variable is used later.
+
+fn takes_u8(x: u8) -> u8 { x }
+
+fn main() {
+    // the loop variable becomes i64 because of `v: Vec<i64>`
+    let mut v: Vec<i64> = Vec.new()
+    for i in 0..5 {
+        v.push(i * 3)
+    }
+    println(*v.at(4) * 1000000000000)
+
+    // `total` becomes u64 from `+= x`
+    let big: u64 = 10000000000
+    let mut total = 0
+    total += big
+    total += big
+    println(total)
+
+    // `i` becomes usize from comparing with `len()` and indexing
+    let a = [10, 20, 30]
+    let mut i = 0
+    let mut s = 0
+    while i < a.len() {
+        s += a[i]
+        i += 1
+    }
+    println(s)
+
+    // derived variables follow the literal: `n` and `m` become u8
+    let n = 200
+    let m = n + 5
+    println(takes_u8(m))
+
+    // assignment retypes the variable
+    let mut f = 1.5
+    let g: f32 = 2.25
+    f = g
+    println(f)
+
+    // without any typed use, literals stay i32 / f64
+    let plain = 7
+    println(plain / 2)
+}
+// output:
+// 12000000000000
+// 20000000000
+// 60
+// 205
+// 2.25
+// 3

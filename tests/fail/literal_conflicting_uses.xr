@@ -1,0 +1,9 @@
+fn takes_u8(x: u8) {}
+fn takes_i64(x: i64) {}
+
+fn main() {
+    let n = 5
+    takes_u8(n)
+    takes_i64(n)
+}
+// error: mismatched types: expected `i64`, found `u8`
