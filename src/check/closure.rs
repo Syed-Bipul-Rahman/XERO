@@ -123,7 +123,9 @@ impl FnCx<'_> {
         match &e.kind {
             E::Name(id, targs) if targs.is_empty() => add(&id.name, bound, out, self),
             E::SelfValue => add("self", bound, out, self),
-            E::Block(b) | E::Unsafe(b) | E::Loop(b) => self.free_block(b, bound, out),
+            E::Block(b) | E::Unsafe(b) | E::Loop(b) | E::Spawn(_, b) => {
+                self.free_block(b, bound, out)
+            }
             E::Closure(c) => {
                 let n = bound.len();
                 bound.extend(c.params.iter().map(|p| p.name.name.clone()));
@@ -756,7 +758,7 @@ pub fn ast_children(e: &ast::Expr, f: &mut dyn FnMut(&ast::Expr)) {
                 f(hi);
             }
         }
-        E::Block(b) | E::Unsafe(b) | E::Loop(b) => block(b, f),
+        E::Block(b) | E::Unsafe(b) | E::Loop(b) | E::Spawn(_, b) => block(b, f),
         E::If(c, t, e) => {
             f(c);
             block(t, f);

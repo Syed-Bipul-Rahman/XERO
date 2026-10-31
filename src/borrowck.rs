@@ -109,6 +109,9 @@ struct Ck<'a> {
     live_scope: Vec<Vec<LocalId>>,
     errors: Vec<Diagnostic>,
     seen: HashSet<(u32, u32, String)>,
+    /// Locals whose destructor can read what they borrow (a thread handle
+    /// joins its thread there): their loans last until they are destroyed.
+    drop_readers: HashSet<LocalId>,
 }
 
 pub fn check(ck: &Checker, f: &Func) -> Result<(), Vec<Diagnostic>> {
@@ -158,6 +161,13 @@ impl<'a> Ck<'a> {
             live_scope: Vec::new(),
             errors: Vec::new(),
             seen: HashSet::new(),
+            drop_readers: f
+                .locals
+                .iter()
+                .enumerate()
+                .filter(|(_, l)| ck.drop_uses_borrows(&l.ty))
+                .map(|(i, _)| i as LocalId)
+                .collect(),
         }
     }
 
@@ -332,7 +342,8 @@ impl<'a> Ck<'a> {
                 continue;
             }
             let lu = self.last_use.get(h).copied().unwrap_or(0);
-            if lu >= self.pos {
+            let until_drop = self.drop_readers.contains(h) && !self.st.moved.contains_key(h);
+            if lu >= self.pos || until_drop {
                 out.extend(loans.iter().copied());
             }
         }

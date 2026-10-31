@@ -834,9 +834,13 @@ impl Parser {
             Ok(args)
         })();
         match res {
+            // `f<T>(..)`, `Vec<T>.new()`, `Point<T> { .. }`, and generic
+            // functions used as values: `apply(double<i64>, x)`
             Ok(args)
-                if matches!(self.raw(), Tok::LParen | Tok::Dot)
-                    || (*self.raw() == Tok::LBrace && !self.no_struct) =>
+                if matches!(
+                    self.raw(),
+                    Tok::LParen | Tok::Dot | Tok::Comma | Tok::RParen
+                ) || (*self.raw() == Tok::LBrace && !self.no_struct) =>
             {
                 Some(args)
             }
@@ -905,7 +909,6 @@ impl Parser {
         }
         if let Tok::Kw(
             k @ (Kw::Async
-            | Kw::Spawn
             | Kw::Await
             | Kw::Own
             | Kw::Fn
@@ -1440,7 +1443,12 @@ impl Parser {
                 self.bump();
                 ExprKind::Drop(Box::new(self.unary()?))
             }
-            Tok::Kw(k @ (Kw::Async | Kw::Spawn | Kw::Await)) => {
+            Tok::Kw(Kw::Spawn) => {
+                self.bump();
+                let is_move = self.eat_kw(Kw::Move);
+                ExprKind::Spawn(is_move, self.block()?)
+            }
+            Tok::Kw(k @ (Kw::Async | Kw::Await)) => {
                 return self.err(format!(
                     "`{}` is reserved for Xero's concurrency model and not yet implemented in this compiler version",
                     crate::lexer::kw_name(k)

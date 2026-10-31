@@ -1,0 +1,85 @@
+// Threads: `spawn { ... }` starts one, and its handle joins it at the latest
+// when the handle is destroyed. So a thread can borrow local variables:
+// the borrow checker keeps them alive (and exclusive, for `&mut`) until the
+// thread has finished. Data races are compile errors.
+
+module std.thread
+
+import std.mem
+import std.sys
+
+struct Packet<T, F> {
+    f: F
+    out: *Option<T>
+}
+
+/// Runs on the new thread: take the closure out of its packet and run it.
+fn entry<T, F: FnOnce() -> T>(arg: *u8) -> *u8 {
+    unsafe {
+        let p = arg as *Packet<T, F>
+        let packet = ptr_read(p)
+        mem.dealloc(p)
+        let out = packet.out
+        let mut f = packet.f
+        ptr_write(out, Some(f()))
+    }
+    0 as *u8
+}
+
+/// A running thread producing a `T`.
+pub struct Thread<T, F> {
+    handle: usize
+    out: *Option<T>
+    joined: bool
+    // ties the closure's borrows to the handle's lifetime
+    keep: *F
+}
+
+/// Start `f` on a new thread. `spawn { ... }` is shorthand for `thread.start(|| ...)`.
+pub fn start<T, F: FnOnce() -> T>(f: F) -> Thread<T, F> {
+    unsafe {
+        let out = mem.alloc<Option<T>>(1)
+        ptr_write(out, None)
+        let p = mem.alloc<Packet<T, F>>(1)
+        ptr_write(p, Packet { f: f, out: out })
+        let handle = sys.thread_start(entry<T, F>, p as *u8)
+        Thread { handle: handle, out: out, joined: false, keep: 0 as *F }
+    }
+}
+
+impl<T, F> Thread<T, F> {
+    /// Wait for the thread to finish and return its result.
+    pub fn join(mut self) -> T {
+        self.wait()
+        unsafe {
+            let r = ptr_read(self.out)
+            ptr_write(self.out, None)
+            r.expect("thread result already taken")
+        }
+    }
+
+    fn wait(&mut self) {
+        if !self.joined {
+            unsafe { sys.thread_join(self.handle) }
+            self.joined = true
+        }
+    }
+
+    drop {
+        self.wait()
+        unsafe {
+            drop_in_place(self.out)
+            mem.dealloc(self.out)
+        }
+    }
+}
+
+/// Pause the current thread.
+pub fn sleep_ms(ms: u64) {
+    sys.sleep_ms(ms)
+}
+
+/// Let other threads run.
+pub fn yield_now() {
+    sys.yield_now()
+}

@@ -649,7 +649,7 @@ impl Checker {
         }
     }
 
-    fn find_module(&self, path: &str) -> Option<ModId> {
+    pub fn find_module(&self, path: &str) -> Option<ModId> {
         self.modules
             .iter()
             .position(|m| m.path == path)

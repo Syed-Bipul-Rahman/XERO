@@ -362,11 +362,26 @@ impl<'a> FnCx<'a> {
     fn defaulted_expr(&self, v: &X) -> Option<Span> {
         match &v.kind {
             K::Use(Place::Local(l), _) => self.defaulted.get(l).copied(),
+            K::Use(p @ Place::Index(..), _) => self.place_default_key(p),
             K::Use(p, _) if self.captures.is_some() => self.capture_key(p),
             K::Binary(op, a, b) if !op.is_comparison() && !matches!(op, BinOp::And | BinOp::Or) => {
                 self.defaulted_expr(a).or_else(|| self.defaulted_expr(b))
             }
             K::Unary(UnOp::Neg, a) => self.defaulted_expr(a),
+            _ => None,
+        }
+    }
+
+    /// The literal key of a variable (or an element of an array variable,
+    /// or a captured variable) typed by a defaulted literal.
+    fn place_default_key(&self, p: &Place) -> Option<Span> {
+        let root = match p {
+            Place::Index(b, _) => &**b,
+            p => p,
+        };
+        match root {
+            Place::Local(l) => self.defaulted.get(l).copied(),
+            other if self.captures.is_some() => self.capture_key(other),
             _ => None,
         }
     }
@@ -458,8 +473,9 @@ impl<'a> FnCx<'a> {
     /// `expr_as` for a value stored into `place`: if the place is a variable
     /// typed by a defaulted literal, a differently typed value retypes it.
     fn expr_as_into(&mut self, place: &Place, e: &ast::Expr, expected: &Ty) -> Result<X> {
-        if let Place::Local(l) = place {
-            if let Some(k) = self.defaulted.get(l).copied() {
+        // `arr[i] = v` where `arr` came from a literal array: retype its elements
+        {
+            if let Some(k) = self.place_default_key(place) {
                 let v = self.expr(e, Some(expected))?;
                 if v.ty != *expected && !v.ty.is_never() {
                     let found = v.ty.clone();
@@ -544,15 +560,26 @@ impl<'a> FnCx<'a> {
                     } else {
                         None
                     };
+                    // `[0; 4]` / `[1, 2]`: the element literals can be retyped too
+                    let array_key = if declared.is_none() && literal_array(init) {
+                        Some(init.span)
+                    } else {
+                        None
+                    };
                     let hinted = literal_key.and_then(|k| self.overrides.get(&k).cloned());
-                    let v = match (&declared, &hinted) {
-                        (Some(t), _) | (None, Some(t)) => {
+                    let elem_hint = array_key.and_then(|k| self.overrides.get(&k).cloned());
+                    let v = match (&declared, &hinted, &elem_hint) {
+                        (Some(t), _, _) | (None, Some(t), _) => {
                             let t = t.clone();
                             let v = self.expr(init, Some(&t))?;
                             self.coerce(v, &t, init.span)?
                         }
-                        (None, None) => self.expr(init, None)?,
+                        (None, None, Some(e)) => {
+                            self.expr(init, Some(&Ty::Array(Box::new(e.clone()), 0)))?
+                        }
+                        (None, None, None) => self.expr(init, None)?,
                     };
+                    let literal_key = literal_key.or(array_key);
                     let default_key = match literal_key {
                         Some(k) => Some(k),
                         None if declared.is_none() => self.defaulted_expr(&v),
@@ -984,6 +1011,46 @@ impl<'a> FnCx<'a> {
                 Ok(x(K::Return(Some(Box::new(val))), Ty::Never, span))
             }
             E::Closure(c) => self.closure_expr(c, expected, span),
+            E::Spawn(is_move, body) => {
+                // `spawn { body }` is `std.thread.start(|| body)`
+                let fid = self.ck.find_module("std.thread").and_then(|m| {
+                    match self.ck.modules[m as usize]
+                        .scope
+                        .get("start")
+                        .map(|b| b.def)
+                    {
+                        Some(Def::Fn(f)) => Some(f),
+                        _ => None,
+                    }
+                });
+                let Some(fid) = fid else {
+                    return self.err(
+                        span,
+                        "`spawn` needs the standard library module `std.thread`",
+                    );
+                };
+                let closure = ast::Expr {
+                    kind: E::Closure(Box::new(ast::ClosureExpr {
+                        params: Vec::new(),
+                        ret: None,
+                        body: ast::Expr {
+                            kind: E::Block(body.clone()),
+                            span: body.span,
+                        },
+                        is_move: *is_move,
+                    })),
+                    span,
+                };
+                self.fn_call(
+                    fid,
+                    Vec::new(),
+                    None,
+                    std::slice::from_ref(&closure),
+                    expected,
+                    span,
+                    span,
+                )
+            }
             E::Catch(inner, binding, handler) => {
                 self.catch_expr(inner, binding.as_ref(), handler, expected, span)
             }
@@ -3876,6 +3943,15 @@ impl<'a> FnCx<'a> {
             val_ty,
             span,
         ))
+    }
+}
+
+/// An array literal of untyped literals: `[0; 4]`, `[1, 2, 3]`.
+fn literal_array(e: &ast::Expr) -> bool {
+    match &e.kind {
+        E::ArrayRepeat(v, _) => untyped_literal(v),
+        E::Array(items) => !items.is_empty() && items.iter().all(untyped_literal),
+        _ => false,
     }
 }
 

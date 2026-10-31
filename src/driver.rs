@@ -41,7 +41,24 @@ pub const STD_MODULES: &[(&str, &str)] = &[
     ("std.vec", include_str!("../std/vec.xr")),
     ("std.string", include_str!("../std/string.xr")),
     ("std.math", include_str!("../std/math.xr")),
+    ("std.thread", include_str!("../std/thread.xr")),
+    ("std.sync", include_str!("../std/sync.xr")),
 ];
+
+/// The OS layer `std.sys`, chosen per target.
+const SYS_UNIX: &str = include_str!("../std/sys/unix.xr");
+const SYS_WINDOWS: &str = include_str!("../std/sys/windows.xr");
+const SYS_NONE: &str = include_str!("../std/sys/none.xr");
+
+fn sys_source(target: &TargetInfo) -> (&'static str, &'static str) {
+    if target.triple.contains("windows") {
+        ("<std.sys windows>", SYS_WINDOWS)
+    } else if target.hosted {
+        ("<std.sys unix>", SYS_UNIX)
+    } else {
+        ("<std.sys none>", SYS_NONE)
+    }
+}
 
 pub struct Frontend {
     pub sm: SourceMap,
@@ -80,7 +97,11 @@ fn parse_file(
 }
 
 /// Load the root file and everything it (transitively) imports.
-pub fn load(fe: &mut Frontend, root: &Path) -> Result<(Vec<ParsedModule>, usize), FrontendError> {
+pub fn load(
+    fe: &mut Frontend,
+    root: &Path,
+    target: &TargetInfo,
+) -> Result<(Vec<ParsedModule>, usize), FrontendError> {
     let text = std::fs::read_to_string(root)
         .map_err(|e| FrontendError::Io(format!("cannot read `{}`: {e}", root.display())))?;
     let root_dir = root.parent().map(|p| p.to_path_buf()).unwrap_or_default();
@@ -108,28 +129,30 @@ pub fn load(fe: &mut Frontend, root: &Path) -> Result<(Vec<ParsedModule>, usize)
         if !seen.insert(name.to_string()) {
             return Ok(());
         }
-        let (path, text, is_std) =
-            if let Some((_, src)) = STD_MODULES.iter().find(|(n, _)| *n == name) {
-                (format!("<{name}>"), src.to_string(), true)
-            } else if name.starts_with("std.") {
-                return Err(Diagnostic::new(
+        let (path, text, is_std) = if name == "std.sys" {
+            let (path, src) = sys_source(target);
+            (path.to_string(), src.to_string(), true)
+        } else if let Some((_, src)) = STD_MODULES.iter().find(|(n, _)| *n == name) {
+            (format!("<{name}>"), src.to_string(), true)
+        } else if name.starts_with("std.") {
+            return Err(Diagnostic::new(
+                span,
+                format!("unknown standard library module `{name}`"),
+            ));
+        } else {
+            let mut p = root_dir.clone();
+            for seg in name.split('.') {
+                p.push(seg);
+            }
+            p.set_extension("xr");
+            let text = std::fs::read_to_string(&p).map_err(|_| {
+                Diagnostic::new(
                     span,
-                    format!("unknown standard library module `{name}`"),
-                ));
-            } else {
-                let mut p = root_dir.clone();
-                for seg in name.split('.') {
-                    p.push(seg);
-                }
-                p.set_extension("xr");
-                let text = std::fs::read_to_string(&p).map_err(|_| {
-                    Diagnostic::new(
-                        span,
-                        format!("module `{name}` not found (looked for `{}`)", p.display()),
-                    )
-                })?;
-                (p.display().to_string(), text, false)
-            };
+                    format!("module `{name}` not found (looked for `{}`)", p.display()),
+                )
+            })?;
+            (p.display().to_string(), text, false)
+        };
         let ast = parse_file(sm, path, text)?;
         modules.push(ParsedModule {
             path: name.to_string(),
@@ -139,7 +162,13 @@ pub fn load(fe: &mut Frontend, root: &Path) -> Result<(Vec<ParsedModule>, usize)
         queue.push_back(modules.len() - 1);
         Ok(())
     };
-    for m in ["std.prelude", "std.mem", "std.vec", "std.string"] {
+    for m in [
+        "std.prelude",
+        "std.mem",
+        "std.vec",
+        "std.string",
+        "std.thread",
+    ] {
         want(m, Span::default(), &mut modules, &mut queue, &mut fe.sm)
             .map_err(|d| FrontendError::Diags(vec![d]))?;
     }
@@ -173,7 +202,7 @@ pub fn compile_to_llvm(
     fe: &mut Frontend,
     opts: &Options,
 ) -> Result<(String, String), FrontendError> {
-    let (modules, root) = load(fe, &opts.input)?;
+    let (modules, root) = load(fe, &opts.input, &opts.target)?;
     let ck = Checker::new(Target {
         ptr_bits: opts.target.ptr_bits,
     });
@@ -316,6 +345,9 @@ pub fn build(opts: &Options) -> Result<PathBuf, String> {
             }
             if opts.lib && !opts.target.triple.starts_with("wasm") {
                 return Err("error: `--lib` produces an object; use `--emit obj`\n".into());
+            }
+            if opts.target.triple.contains("linux") {
+                cmd.arg("-pthread");
             }
         }
         _ => {}

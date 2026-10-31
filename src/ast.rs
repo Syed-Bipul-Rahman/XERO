@@ -307,6 +307,8 @@ pub enum ExprKind {
     Catch(Box<Expr>, Option<Ident>, Block),
     /// `|a, b: i32| a + b`, `move |x| -> i32 { ... }`
     Closure(Box<ClosureExpr>),
+    /// `spawn { ... }` / `spawn move { ... }`: start a thread.
+    Spawn(bool, Block),
 }
 
 #[derive(Clone, Debug)]

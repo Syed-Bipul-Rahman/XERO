@@ -1,0 +1,89 @@
+// OS layer for Windows: kernel32 threads, SRW locks and condition variables.
+// The compiler picks this file as `std.sys` for Windows targets.
+
+module std.sys
+
+import std.mem
+
+unsafe fn CreateThread(attrs: *u8, stack: usize, start: fn(*u8) -> *u8, param: *u8, flags: u32, id: *u32) -> usize
+unsafe fn WaitForSingleObject(handle: usize, ms: u32) -> u32
+unsafe fn CloseHandle(handle: usize) -> i32
+unsafe fn InitializeSRWLock(lock: *u8)
+unsafe fn AcquireSRWLockExclusive(lock: *u8)
+unsafe fn ReleaseSRWLockExclusive(lock: *u8)
+unsafe fn InitializeConditionVariable(cv: *u8)
+unsafe fn SleepConditionVariableSRW(cv: *u8, lock: *u8, ms: u32, flags: u32) -> i32
+unsafe fn WakeConditionVariable(cv: *u8)
+unsafe fn WakeAllConditionVariable(cv: *u8)
+unsafe fn Sleep(ms: u32)
+unsafe fn SwitchToThread() -> i32
+
+pub const THREADS: bool = true
+
+const INFINITE: u32 = 0xFFFFFFFF
+
+pub unsafe fn thread_start(entry: fn(*u8) -> *u8, arg: *u8) -> usize {
+    // the thread's pointer-sized return value is ignored (Windows uses its low 32 bits)
+    let h = CreateThread(0 as *u8, 0, entry, arg, 0, 0 as *u32)
+    if h == 0 {
+        panic("could not start a thread")
+    }
+    h
+}
+
+pub unsafe fn thread_join(t: usize) {
+    WaitForSingleObject(t, INFINITE)
+    CloseHandle(t)
+}
+
+pub unsafe fn lock_new() -> *u8 {
+    let m = mem.alloc<[u64; 8]>(1) as *u8
+    InitializeSRWLock(m)
+    m
+}
+
+pub unsafe fn lock_acquire(m: *u8) {
+    AcquireSRWLockExclusive(m)
+}
+
+pub unsafe fn lock_release(m: *u8) {
+    ReleaseSRWLockExclusive(m)
+}
+
+pub unsafe fn lock_free(m: *u8) {
+    mem.dealloc(m)
+}
+
+pub unsafe fn cond_new() -> *u8 {
+    let c = mem.alloc<[u64; 8]>(1) as *u8
+    InitializeConditionVariable(c)
+    c
+}
+
+pub unsafe fn cond_wait(c: *u8, m: *u8) {
+    SleepConditionVariableSRW(c, m, INFINITE, 0)
+}
+
+pub unsafe fn cond_notify_one(c: *u8) {
+    WakeConditionVariable(c)
+}
+
+pub unsafe fn cond_notify_all(c: *u8) {
+    WakeAllConditionVariable(c)
+}
+
+pub unsafe fn cond_free(c: *u8) {
+    mem.dealloc(c)
+}
+
+pub fn sleep_ms(ms: u64) {
+    unsafe {
+        Sleep(ms as u32)
+    }
+}
+
+pub fn yield_now() {
+    unsafe {
+        SwitchToThread()
+    }
+}

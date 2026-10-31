@@ -323,13 +323,24 @@ impl<'a> Codegen<'a> {
         };
         let mut size = 0;
         let mut align = 1;
+        let mut any_fields = false;
         for v in self.ck.enum_variants(*id, args) {
+            any_fields |= !v.is_empty();
             let (s, al) = self.struct_layout(&v.iter().map(|t| self.layout(t)).collect::<Vec<_>>());
             size = size.max(s);
             align = align.max(al);
         }
         if size == 0 {
-            return (tag.into(), None);
+            // `Option<()>`: variants with only zero-sized fields still get a
+            // (zero-length) payload slot to address
+            return (
+                tag.into(),
+                if any_fields {
+                    Some((0, "i8".into()))
+                } else {
+                    None
+                },
+            );
         }
         let unit = match align {
             1 => "i8",
