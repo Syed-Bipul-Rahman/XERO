@@ -127,7 +127,7 @@ curl -fsSL https://download.xerolang.org/install.sh | sudo bash
 irm https://download.xerolang.org/install.ps1 | iex
 ```
 
-The installer also sets up `clang` (LLVM 17+), which is Xero's code-generation
+The installer also sets up `clang` (LLVM 15+), which is Xero's code-generation
 back end. See [INSTALL.md](INSTALL.md) for options and manual installation.
 To build from source:
 

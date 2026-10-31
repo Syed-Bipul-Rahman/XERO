@@ -53,7 +53,7 @@ Or build it from source with a Rust toolchain: `cargo build --release`.
 
 ### 2. Install clang (the LLVM back end)
 
-`xeroc` generates LLVM IR and uses `clang` (LLVM 17 or newer) to turn it
+`xeroc` generates LLVM IR and uses `clang` (LLVM 15 or newer) to turn it
 into machine code and link it.
 
 | OS | Command |

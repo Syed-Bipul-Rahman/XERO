@@ -189,16 +189,45 @@ pub fn compile_to_llvm(
     Ok((ll, xir_dump))
 }
 
-pub fn clang() -> String {
+/// Oldest LLVM whose IR syntax (opaque `ptr` types) xeroc's output requires.
+pub const MIN_LLVM: u32 = 15;
+
+/// Major version from `clang --version` output ("... clang version 18.1.3 ...").
+fn clang_major(cmd: &str) -> Option<u32> {
+    let out = Command::new(cmd).arg("--version").output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let rest = &text[text.find("clang version ")? + "clang version ".len()..];
+    rest.split(['.', ' ']).next()?.parse().ok()
+}
+
+/// Find a clang new enough for xeroc. `XERO_CLANG` wins; otherwise prefer
+/// plain `clang`, then versioned binaries (`clang-21` ... `clang-15`).
+pub fn find_clang() -> Result<String, String> {
     if let Ok(c) = std::env::var("XERO_CLANG") {
-        return c;
-    }
-    for c in ["clang", "clang-18", "clang-19", "clang-17"] {
-        if Command::new(c).arg("--version").output().is_ok() {
-            return c.to_string();
+        if !c.is_empty() {
+            return Ok(c);
         }
     }
-    "clang".into()
+    let mut too_old = None;
+    let candidates = std::iter::once("clang".to_string()).chain((MIN_LLVM..=24).rev().map(|v| format!("clang-{v}")));
+    for c in candidates {
+        match clang_major(&c) {
+            Some(v) if v >= MIN_LLVM => return Ok(c),
+            // Apple clang reports its own version scheme; any recent Xcode works
+            Some(v) if cfg!(target_os = "macos") && c == "clang" && v >= 14 => return Ok(c),
+            Some(v) => too_old = too_old.or(Some((c, v))),
+            None => {}
+        }
+    }
+    Err(match too_old {
+        Some((c, v)) => format!(
+            "error: `{c}` is LLVM {v}, but Xero needs LLVM {MIN_LLVM} or newer\n  \
+             install a newer clang (e.g. `sudo apt install clang-18`) or set XERO_CLANG\n"
+        ),
+        None => "error: clang not found; Xero uses clang (LLVM 15+) as its code generator\n  \
+                 see https://github.com/Syed-Bipul-Rahman/XERO/blob/main/INSTALL.md or set XERO_CLANG\n"
+            .to_string(),
+    })
 }
 
 /// Build according to `opts`. Returns the output path.
@@ -253,7 +282,7 @@ pub fn build(opts: &Options) -> Result<PathBuf, String> {
     std::fs::create_dir_all(&tmpdir).map_err(|e| format!("error: {e}\n"))?;
     let ll_path = tmpdir.join(format!("{stem}.ll"));
     std::fs::write(&ll_path, &ll).map_err(|e| format!("error: {e}\n"))?;
-    let mut cmd = Command::new(clang());
+    let mut cmd = Command::new(find_clang()?);
     cmd.arg("-Wno-override-module")
         .arg(format!("--target={}", opts.target.triple))
         .arg(format!("-O{}", opts.opt_level))

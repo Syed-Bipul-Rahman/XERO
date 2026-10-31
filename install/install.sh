@@ -113,10 +113,11 @@ main() {
     say "installed $("$bindir/xeroc" --version) to $bindir/xeroc"
 
     # ---------------------------------------------------------- clang
-    if [ -n "${XERO_CLANG:-}" ] || have clang; then
-        say "found clang: $(clang_version)"
+    local cc
+    if cc="$(find_clang)"; then
+        say "found clang: $(clang_version "$cc")"
     elif [ "$no_deps" = "1" ]; then
-        warn "clang not found; install clang (LLVM 17+) before using xeroc"
+        warn "no clang with LLVM $MIN_LLVM+ found; install one before using xeroc"
     else
         install_clang "$os"
     fi
@@ -166,8 +167,36 @@ verify() {
     say "checksum verified"
 }
 
+# xeroc emits LLVM IR that needs LLVM 15+ (opaque pointers).
+MIN_LLVM=15
+
 clang_version() {
-    "${XERO_CLANG:-clang}" --version 2>/dev/null | head -n 1
+    "$1" --version 2>/dev/null | head -n 1
+}
+
+clang_major() {
+    "$1" --version 2>/dev/null | sed -n 's/.*clang version \([0-9][0-9]*\).*/\1/p' | head -n 1
+}
+
+# Print the first clang that is new enough: $XERO_CLANG, clang, clang-24 ... clang-15.
+# (xeroc searches the same names, so a versioned clang-18 is found without setup.)
+find_clang() {
+    local c v
+    for c in ${XERO_CLANG:-} clang $(seq 24 -1 "$MIN_LLVM" | sed 's/^/clang-/'); do
+        have "$c" || continue
+        v="$(clang_major "$c")"
+        [ -n "$v" ] || continue
+        if [ "$v" -ge "$MIN_LLVM" ]; then
+            echo "$c"
+            return 0
+        fi
+        # Apple clang numbers its releases differently; any current Xcode works
+        if [ "$(uname -s)" = "Darwin" ] && [ "$v" -ge 14 ]; then
+            echo "$c"
+            return 0
+        fi
+    done
+    return 1
 }
 
 as_root() {
@@ -181,14 +210,16 @@ as_root() {
 }
 
 install_clang() {
-    local os="$1"
-    say "clang (the LLVM back end Xero uses for code generation) was not found; installing it"
+    local os="$1" v
+    if have clang; then
+        say "$(clang_version clang) is too old (Xero needs LLVM $MIN_LLVM+); installing a newer clang"
+    else
+        say "clang (the LLVM back end Xero uses for code generation) was not found; installing it"
+    fi
     if [ "$os" = "Darwin" ]; then
         if have brew; then
             brew install llvm && {
-                local p
-                p="$(brew --prefix llvm)/bin/clang"
-                warn "Homebrew's clang is not on PATH by default; add: export XERO_CLANG=\"$p\""
+                warn "Homebrew's clang is not on PATH by default; add: export XERO_CLANG=\"$(brew --prefix llvm)/bin/clang\""
                 return 0
             }
         fi
@@ -197,24 +228,32 @@ install_clang() {
         xcode-select --install 2>/dev/null || true
         return 0
     fi
-    local ok=1
+    # The distribution's default clang first; if that is still too old (for
+    # example clang 14 on Ubuntu 22.04 or Debian 12), the newest versioned package.
     if have apt-get; then
-        as_root apt-get update -qq && as_root apt-get install -y -qq clang lld && ok=0
+        as_root apt-get update -qq || true
+        find_clang >/dev/null || as_root apt-get install -y -qq clang lld >/dev/null 2>&1 || true
+        for v in 20 19 18 17 16 15; do
+            find_clang >/dev/null && break
+            as_root apt-get install -y -qq "clang-$v" "lld-$v" >/dev/null 2>&1 || true
+        done
     elif have dnf; then
-        as_root dnf install -y clang lld && ok=0
+        as_root dnf install -y clang lld || true
     elif have yum; then
-        as_root yum install -y clang && ok=0
+        as_root yum install -y clang || true
     elif have pacman; then
-        as_root pacman -Sy --noconfirm clang lld && ok=0
+        as_root pacman -Sy --noconfirm clang lld || true
     elif have zypper; then
-        as_root zypper --non-interactive install clang lld && ok=0
+        as_root zypper --non-interactive install clang lld || true
     elif have apk; then
-        as_root apk add clang lld musl-dev && ok=0
+        as_root apk add clang lld musl-dev || true
     fi
-    if [ "$ok" = "0" ] && have clang; then
-        say "installed $(clang_version)"
+    local cc
+    if cc="$(find_clang)"; then
+        say "installed $(clang_version "$cc")"
     else
-        warn "could not install clang automatically; install clang (LLVM 17+) with your package manager"
+        warn "could not install clang $MIN_LLVM+ automatically; install it with your package manager"
+        warn "(on older distributions, https://apt.llvm.org provides current versions)"
     fi
 }
 
