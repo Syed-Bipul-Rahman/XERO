@@ -1063,6 +1063,37 @@ impl<'a> Ck<'a> {
                 self.error_note(tail_span, msg, lspan, "borrowed here");
             }
         }
+        // locals are destroyed in reverse order: one declared earlier is destroyed
+        // later, so its destructor must not read a borrow of one declared after it
+        for (i, &h) in dying.iter().enumerate() {
+            if !self.ck.drop_uses_borrows(&self.f.locals[h as usize].ty)
+                || self.st.moved.contains_key(&h)
+            {
+                continue;
+            }
+            let later: HashSet<LocalId> = dying[i + 1..].iter().copied().collect();
+            let Some(ls) = self.st.holders.get(&h).cloned() else {
+                continue;
+            };
+            for id in ls {
+                let loan = self.loans[id].clone();
+                let Root::Local(l) = loan.root.clone();
+                if later.contains(&l) && !loan.via_deref() {
+                    let msg = format!(
+                        "{} does not live long enough: it is destroyed while {} still borrows it, and {}'s destructor runs afterwards",
+                        self.name(l),
+                        self.name(h),
+                        self.name(h)
+                    );
+                    self.error_note(
+                        loan.span,
+                        msg,
+                        self.f.locals[h as usize].span,
+                        "declare this after the value it borrows, or drop it first",
+                    );
+                }
+            }
+        }
         // outer variables still used later must not hold loans on dying locals
         let outer: Vec<LocalId> = self.live_scope[..self.live_scope.len() - 1]
             .iter()
@@ -1074,7 +1105,10 @@ impl<'a> Ck<'a> {
                 continue;
             }
             let lu = self.last_use.get(&h).copied().unwrap_or(0);
-            if lu <= self.pos {
+            // a destructor that can read borrowed data is a use at scope end
+            let drop_reads = self.ck.drop_uses_borrows(&self.f.locals[h as usize].ty)
+                && !self.st.moved.contains_key(&h);
+            if lu <= self.pos && !drop_reads {
                 continue;
             }
             let Some(ls) = self.st.holders.get(&h).cloned() else {
@@ -1159,6 +1193,9 @@ struct OriginCx<'a> {
     locals: HashMap<LocalId, Origins>,
     result: Origins,
     breaks: Vec<Origins>,
+    /// What values written through raw pointers point to (they may be
+    /// reachable from the result, e.g. `Box.new(value)`).
+    stored: Origins,
 }
 
 pub fn summaries(ck: &Checker, funcs: &[Func]) -> HashMap<String, Summary> {
@@ -1179,13 +1216,27 @@ pub fn summaries(ck: &Checker, funcs: &[Func]) -> HashMap<String, Summary> {
                 locals: HashMap::new(),
                 result: Origins::new(),
                 breaks: Vec::new(),
+                stored: Origins::new(),
             };
             // locals are flow-insensitive: iterate until their origins settle
             for _ in 0..4 {
                 let tail = cx.expr(&f.body);
                 cx.result.extend(tail);
             }
-            let new: Summary = cx.result.iter().map(|&(i, lvl)| (i, lvl >= 2)).collect();
+            let mut new: Summary = cx
+                .result
+                .iter()
+                .chain(cx.stored.iter())
+                .map(|&(i, lvl)| (i, lvl >= 2))
+                .collect();
+            // a by-value argument holding borrows may end up inside the result
+            // (stored through a raw pointer, as `Box.new` does)
+            for (i, &p) in f.params.iter().enumerate() {
+                let t = &f.locals[p as usize].ty;
+                if !matches!(t, Ty::Ref(..)) && ck.has_refs(t) {
+                    new.insert((i, false));
+                }
+            }
             if sums.get(&f.name) != Some(&new) {
                 let mut merged = sums.get(&f.name).cloned().unwrap_or_default();
                 merged.extend(new);
@@ -1380,6 +1431,12 @@ impl OriginCx<'_> {
                         os.into_iter().next().unwrap_or_default()
                     }
                     // a value read through a pointer: what that memory holds
+                    xir::Intrinsic::PtrWrite | xir::Intrinsic::VolatileStore => {
+                        if let Some(v) = os.get(1) {
+                            self.stored.extend(v.iter().copied());
+                        }
+                        Origins::new()
+                    }
                     xir::Intrinsic::PtrRead | xir::Intrinsic::VolatileLoad => {
                         let mem: Vec<Mem> = os
                             .into_iter()
@@ -1421,6 +1478,9 @@ impl OriginCx<'_> {
             }
             K::Assign(p, v) => {
                 let o = self.expr(v);
+                if place_through_raw(p) {
+                    self.stored.extend(o.iter().copied());
+                }
                 let mut cur = p;
                 loop {
                     match cur {
@@ -1528,6 +1588,18 @@ fn contains_ptr(t: &Ty) -> bool {
         Ty::Ptr(_) => true,
         Ty::Array(e, _) | Ty::Slice(e) | Ty::Ref(e, _) => contains_ptr(e),
         Ty::Tuple(ts) => ts.iter().any(contains_ptr),
+        _ => false,
+    }
+}
+
+/// Does the place go through a raw pointer dereference?
+fn place_through_raw(p: &Place) -> bool {
+    match p {
+        Place::Deref(e) => {
+            matches!(e.ty, Ty::Ptr(_))
+                || matches!(&e.kind, K::Use(inner, _) if place_through_raw(inner))
+        }
+        Place::Field(b, _) | Place::Index(b, _) | Place::Slice(b, ..) => place_through_raw(b),
         _ => false,
     }
 }

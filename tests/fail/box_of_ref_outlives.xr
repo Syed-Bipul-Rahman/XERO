@@ -1,0 +1,8 @@
+fn main() {
+    let b = {
+        let s = String.from("short-lived")
+        Box.new(s.as_str())
+    }
+    println(*b.get())
+}
+// error: `s` does not live long enough

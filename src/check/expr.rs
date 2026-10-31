@@ -2425,6 +2425,9 @@ impl<'a> FnCx<'a> {
             }
             IntrinsicFn::Forget => {
                 want(self, 1)?;
+                // leaking a value skips its destructor; scoped threads rely on
+                // their handles being joined on drop, so this must be explicit
+                self.require_unsafe(span, "`forget` (skipping a destructor)")?;
                 let v = self.expr(&args[0], targs.first())?;
                 Ok(x(
                     K::Intrinsic(xir::Intrinsic::Forget, vec![v]),

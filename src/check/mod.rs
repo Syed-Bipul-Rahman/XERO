@@ -1403,6 +1403,42 @@ impl Checker {
         }
     }
 
+    /// Can destroying a value of type `t` read data it borrows? True when a
+    /// `drop` block can see the borrows. `Vec`, `Box` and `String` only free
+    /// memory and destroy their elements, so they just pass the question on.
+    pub fn drop_uses_borrows(&self, t: &Ty) -> bool {
+        self.drop_uses_borrows_depth(t, 0)
+    }
+
+    fn drop_uses_borrows_depth(&self, t: &Ty, depth: u32) -> bool {
+        if depth > 64 {
+            return true;
+        }
+        match t {
+            Ty::Array(e, _) | Ty::Ptr(e) => self.drop_uses_borrows_depth(e, depth + 1),
+            Ty::Tuple(ts) => ts
+                .iter()
+                .any(|t| self.drop_uses_borrows_depth(t, depth + 1)),
+            Ty::Closure(id) => self.closures[*id as usize]
+                .fields
+                .iter()
+                .any(|t| self.drop_uses_borrows_depth(t, depth + 1)),
+            Ty::Adt(id, args) => {
+                let a = &self.adts[*id as usize];
+                let trusted = self.modules[a.module as usize].is_std
+                    && matches!(a.name.as_str(), "Vec" | "Box" | "String");
+                if a.drop_impl.is_some() && !trusted && self.has_refs(t) {
+                    return true;
+                }
+                a.fields
+                    .iter()
+                    .chain(a.variants.iter().flatten())
+                    .any(|f| self.drop_uses_borrows_depth(&f.subst(args), depth + 1))
+            }
+            _ => false,
+        }
+    }
+
     pub fn needs_drop(&self, t: &Ty) -> bool {
         self.needs_drop_depth(t, 0)
     }
