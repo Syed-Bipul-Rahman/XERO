@@ -46,27 +46,30 @@ fn main() {
     println(count_lines(text.as_str()))
     println(text.len())
 
-    // reading in chunks
-    let mut f = File.open(path) catch e {
-        println(e)
-        return
-    }
-    let mut buf = [0u8; 5]
-    let mut chunks = 0
-    let mut total: usize = 0
-    loop {
-        let n = f.read(&mut buf) catch e {
+    // reading in chunks (the file is closed at the end of the block, before it is
+    // deleted: Windows cannot delete an open file)
+    {
+        let mut f = File.open(path) catch e {
             println(e)
-            break
+            return
         }
-        if n == 0 {
-            break
+        let mut buf = [0u8; 5]
+        let mut chunks = 0
+        let mut total: usize = 0
+        loop {
+            let n = f.read(&mut buf) catch e {
+                println(e)
+                break
+            }
+            if n == 0 {
+                break
+            }
+            chunks += 1
+            total += n
         }
-        chunks += 1
-        total += n
+        println(chunks)
+        println(total)
     }
-    println(chunks)
-    println(total)
 
     // bytes that are not UTF-8 are rejected as text but readable as bytes
     fs.write(path, &[0xFFu8, 0xFE, 'a']) catch e { println(e) }

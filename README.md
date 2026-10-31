@@ -39,6 +39,17 @@ add:
 It needs no GC, no runtime objects, no vtables, no heap and no metadata. That
 is the code a careful systems programmer would write by hand.
 
+On Linux a whole program needs no C library either: Xero brings its own small
+runtime, and executables are static.
+
+```console
+$ xeroc build examples/hello.xr && ls -l hello
+-rwxr-xr-x 1 you you 9360 hello
+$ file hello
+hello: ELF 64-bit LSB executable, x86-64, version 1 (SYSV), statically linked, ...
+$ xeroc build examples/hello.xr --target aarch64-linux    # no cross toolchain needed
+```
+
 ## A taste
 
 ```xero
@@ -148,13 +159,14 @@ xeroc targets                       list supported targets
   -O0..-O3           optimization level (default -O2)
   --target <name>    cross-compile, e.g. aarch64-linux, riscv64-linux, wasm32, thumbv7em-none
   --lib              no `main` required (library object / wasm module)
+  --libc, --no-libc  link the C library or not (Linux; automatic by default)
 ```
 
 ## Targets
 
 | Target | Kind |
 |---|---|
-| `x86_64-linux`, `aarch64-linux`, `riscv64-linux` | hosted executables |
+| `x86_64-linux`, `aarch64-linux`, `riscv64-linux` | static executables with Xero's own runtime (no libc), from any Linux host |
 | `x86_64-macos`, `aarch64-macos`, `x86_64-windows` | objects (cross-compiled) |
 | `wasm32` | standalone WebAssembly modules (`export fn` becomes a wasm export) |
 | `x86_64-none`, `aarch64-none`, `riscv64-none`, `riscv32-none`, `thumbv7em-none` | bare-metal objects |
@@ -167,6 +179,7 @@ xeroc targets                       list supported targets
 | [`examples/tour.xr`](examples/tour.xr) | a tour of the language |
 | [`examples/ownership.xr`](examples/ownership.xr) | moves, borrows, RAII |
 | [`examples/concurrency.xr`](examples/concurrency.xr) | threads, `Mutex`, `Channel`, no data races |
+| [`examples/wc.xr`](examples/wc.xr) | files and command-line arguments: a small `wc` |
 | [`examples/sieve.xr`](examples/sieve.xr) | CPU-bound code (within about 10% of C at `-O3`) |
 | [`examples/wasm_math.xr`](examples/wasm_math.xr) | a 447-byte WebAssembly module |
 | [`examples/baremetal.xr`](examples/baremetal.xr) | no OS: MMIO with `volatile_load`/`volatile_store`, inline asm |
@@ -184,7 +197,7 @@ on `static mut`, non-exhaustive matches and more.
 
 ## Status
 
-Xero 0.3 is a working compiler. Language features:
+Xero 0.4 is a working compiler. Language features:
 
 * **Types:** structs and enums (which can hold references), enums with data,
   closures (`Fn`, `FnMut`, `FnOnce`), and function pointers.
@@ -198,7 +211,10 @@ Xero 0.3 is a working compiler. Language features:
 Compiler and runtime support:
 
 * **Safety:** RAII and a borrow checker that needs no lifetime annotations.
-* **Standard library:** modules, `Box`, `Vec`, `String`.
+* **Standard library:** modules, `Box`, `Vec`, `String`, files (`std.fs`),
+  command-line arguments (`std.env`).
+* **Runtime:** none on Linux beyond a few KB of Xero code: system calls, an
+  allocator and threads, with no C library.
 * **Low level:** unsafe code, raw pointers, C FFI, inline assembly, and
   cross-compilation.
 
