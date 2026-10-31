@@ -54,7 +54,9 @@ fn run_programs() {
     for f in files("tests/run") {
         let src = std::fs::read_to_string(&f).unwrap();
         let (want, want_code) = expected_output(&src);
-        let exe = tmp.join(f.file_stem().unwrap()).with_extension(std::env::consts::EXE_EXTENSION);
+        let exe = tmp
+            .join(f.file_stem().unwrap())
+            .with_extension(std::env::consts::EXE_EXTENSION);
         let build = Command::new(xeroc())
             .arg("build")
             .arg(&f)

@@ -490,11 +490,11 @@ impl<'a> Ck<'a> {
         match p {
             Place::Local(l) => Some(self.f.locals[*l as usize].ty.clone()),
             Place::Static(..) => None,
-            Place::Field(b, i) => match self.place_ty(b)? {
-                Ty::Adt(id, args) => self.ck.struct_fields(id, &args).get(*i as usize).cloned(),
-                Ty::Tuple(ts) => ts.get(*i as usize).cloned(),
-                _ => None,
-            },
+            Place::Field(b, i) => self
+                .ck
+                .fields_of(&self.place_ty(b)?)?
+                .get(*i as usize)
+                .cloned(),
             Place::Index(b, _) => match self.place_ty(b)? {
                 Ty::Array(e, _) | Ty::Slice(e) => Some(*e),
                 _ => None,
@@ -621,6 +621,18 @@ impl<'a> Ck<'a> {
                 self.expr(b);
                 self.in_flight.pop();
                 Loans::new()
+            }
+            K::FnRef(_) => Loans::new(),
+            K::CallPtr(f, args) => {
+                let lf = self.expr(f);
+                self.in_flight.push(lf);
+                let l = self.exprs_in_flight(args);
+                self.in_flight.pop();
+                if crate::check::contains_ref(&e.ty) {
+                    l
+                } else {
+                    Loans::new()
+                }
             }
             K::Call(_, args) | K::Intrinsic(_, args) => {
                 let l = self.exprs_in_flight(args);

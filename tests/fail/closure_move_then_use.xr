@@ -1,0 +1,7 @@
+fn main() {
+    let s = String.from("hi")
+    let f = move || println(&s)
+    f()
+    println(&s)
+}
+// error: use of moved value `s`

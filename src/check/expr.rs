@@ -39,6 +39,16 @@ pub struct FnCx<'a> {
     pub defaulted: HashMap<LocalId, Span>,
     /// First defaulted literal found to need a different type.
     pub pending: Option<(Span, Ty)>,
+    /// Symbol of the function being checked (names its closures).
+    pub fn_name: String,
+    /// Inside a closure body: how captured variables are reached.
+    pub captures: Option<super::closure::CaptureCx>,
+    /// Captured variables (by field index) the closure body mutates.
+    pub mut_captures: std::collections::BTreeSet<u32>,
+    /// Closure functions created while checking; emitted with this function.
+    pub pending_funcs: Vec<xir::Func>,
+    /// Expected `fn(...)` shapes for arguments bounded by `Fn(...)`.
+    pub arg_hints: Vec<Option<Ty>>,
 }
 
 /// What a path-like expression (`a`, `a.b`, `Type.member`) refers to.
@@ -65,7 +75,11 @@ pub fn x(kind: K, ty: Ty, span: Span) -> X {
 /// Check a function. Untyped literals default to `i32`/`f64`; when such a
 /// literal's variable later meets a different numeric type, the function is
 /// re-checked with that type for the literal (bounded number of attempts).
-pub fn check_fn(ck: &mut Checker, key: &FnKey, name: String) -> Result<xir::Func> {
+pub fn check_fn(
+    ck: &mut Checker,
+    key: &FnKey,
+    name: String,
+) -> Result<(xir::Func, Vec<xir::Func>)> {
     let mut overrides = HashMap::new();
     for _ in 0..32 {
         match check_fn_once(ck, key, name.clone(), &overrides) {
@@ -85,7 +99,7 @@ fn check_fn_once(
     key: &FnKey,
     name: String,
     overrides: &HashMap<Span, Ty>,
-) -> (Result<xir::Func>, Option<(Span, Ty)>) {
+) -> (Result<(xir::Func, Vec<xir::Func>)>, Option<(Span, Ty)>) {
     let mut pending = None;
     let r = check_fn_inner(ck, key, name, overrides, &mut pending);
     (r, pending)
@@ -97,7 +111,7 @@ fn check_fn_inner(
     name: String,
     overrides: &HashMap<Span, Ty>,
     pending_out: &mut Option<(Span, Ty)>,
-) -> Result<xir::Func> {
+) -> Result<(xir::Func, Vec<xir::Func>)> {
     let fdef = &ck.fns[key.fid as usize];
     let decl = fdef.decl.clone();
     let module = fdef.module;
@@ -137,6 +151,11 @@ fn check_fn_inner(
         overrides: overrides.clone(),
         defaulted: HashMap::new(),
         pending: None,
+        fn_name: name.clone(),
+        captures: None,
+        mut_captures: std::collections::BTreeSet::new(),
+        pending_funcs: Vec::new(),
+        arg_hints: Vec::new(),
     };
     if decl.is_unsafe {
         cx.unsafe_depth = 1;
@@ -180,15 +199,19 @@ fn check_fn_inner(
     let body = body.and_then(|b| cx.coerce(b, &ret_ty, body_ast.span));
     *pending_out = cx.pending.take();
     let body = body?;
-    Ok(xir::Func {
-        name,
-        params,
-        ret: ret_ty,
-        locals: cx.locals,
-        body,
-        export: decl.is_export,
-        span: decl.span,
-    })
+    let closures = std::mem::take(&mut cx.pending_funcs);
+    Ok((
+        xir::Func {
+            name,
+            params,
+            ret: ret_ty,
+            locals: cx.locals,
+            body,
+            export: decl.is_export,
+            span: decl.span,
+        },
+        closures,
+    ))
 }
 
 impl<'a> FnCx<'a> {
@@ -233,7 +256,7 @@ impl<'a> FnCx<'a> {
         id
     }
 
-    fn lookup_local(&self, name: &str) -> Option<LocalId> {
+    pub fn lookup_local(&self, name: &str) -> Option<LocalId> {
         for s in self.scopes.iter().rev() {
             if let Some((_, id)) = s.names.iter().rev().find(|(n, _)| n == name) {
                 return Some(*id);
@@ -242,7 +265,7 @@ impl<'a> FnCx<'a> {
         None
     }
 
-    fn check_sized(&self, ty: &Ty, span: Span) -> Result<()> {
+    pub fn check_sized(&self, ty: &Ty, span: Span) -> Result<()> {
         if ty.is_unsized() {
             return self.err(
                 span,
@@ -324,7 +347,7 @@ impl<'a> FnCx<'a> {
     }
 
     /// Follow references until reaching a non-reference type.
-    fn autoderef(&self, mut p: Place, mut ty: Ty, span: Span) -> (Place, Ty) {
+    pub fn autoderef(&self, mut p: Place, mut ty: Ty, span: Span) -> (Place, Ty) {
         while let Ty::Ref(..) = ty {
             let (np, nt) = self.deref_place(p, &ty, span);
             p = np;
@@ -350,7 +373,12 @@ impl<'a> FnCx<'a> {
     /// Remember that the literal `key` should have had type `want`.
     fn want_literal_type(&mut self, key: Span, have: &Ty, want: &Ty) {
         let numeric = |t: &Ty| t.is_int() || t.is_float();
-        if self.pending.is_none() && numeric(have) && numeric(want) && have != want && !self.overrides.contains_key(&key) {
+        if self.pending.is_none()
+            && numeric(have)
+            && numeric(want)
+            && have != want
+            && !self.overrides.contains_key(&key)
+        {
             self.pending = Some((key, want.clone()));
         }
     }
@@ -363,6 +391,9 @@ impl<'a> FnCx<'a> {
                 let have = v.ty.clone();
                 self.want_literal_type(k, &have, expected);
             }
+        }
+        if let Some(fp) = self.closure_to_fn_ptr(&v, expected) {
+            return Ok(fp);
         }
         if v.ty == *expected || v.ty.is_never() {
             if v.ty.is_never() && !expected.is_never() {
@@ -399,6 +430,9 @@ impl<'a> FnCx<'a> {
                 scope: Vec::new(),
             };
             return Ok(x(K::Block(block), Ty::unit(), vs));
+        }
+        if let (Ty::Closure(_), Ty::FnPtr(..)) = (&v.ty, expected) {
+            return self.err(span, format!("this closure captures variables, so it cannot be used as the plain function pointer `{}`; take a generic `F: Fn(...)` instead", self.ts(expected)));
         }
         self.err(
             span,
@@ -504,7 +538,11 @@ impl<'a> FnCx<'a> {
                         None => None,
                     };
                     // an un-annotated literal may get its type from a later use
-                    let literal_key = if declared.is_none() && untyped_literal(init) { Some(init.span) } else { None };
+                    let literal_key = if declared.is_none() && untyped_literal(init) {
+                        Some(init.span)
+                    } else {
+                        None
+                    };
                     let hinted = literal_key.and_then(|k| self.overrides.get(&k).cloned());
                     let v = match (&declared, &hinted) {
                         (Some(t), _) | (None, Some(t)) => {
@@ -635,11 +673,13 @@ impl<'a> FnCx<'a> {
             E::Binary(op, a, b) => self.binary(*op, a, b, expected, span),
             E::Assign(lhs, rhs) => {
                 let (p, ty) = self.place_required(lhs, "assign to")?;
+                self.note_mut(&p);
                 let v = self.expr_as_into(&p, rhs, &ty)?;
                 Ok(x(K::Assign(p, Box::new(v)), Ty::unit(), span))
             }
             E::CompoundAssign(op, lhs, rhs) => {
                 let (p, ty) = self.place_required(lhs, "assign to")?;
+                self.note_mut(&p);
                 let rty = if matches!(op, BinOp::Shl | BinOp::Shr) {
                     let v = self.expr(rhs, None)?;
                     if !v.ty.is_int() || !ty.is_int() {
@@ -697,6 +737,9 @@ impl<'a> FnCx<'a> {
                     _ => None,
                 };
                 if let Some((p, ty)) = self.place(inner)? {
+                    if *m {
+                        self.note_mut(&p);
+                    }
                     return Ok(x(K::Borrow(p, *m), Ty::reference(ty, *m), span));
                 }
                 let mut v = self.expr(inner, exp_inner.as_ref())?;
@@ -906,6 +949,9 @@ impl<'a> FnCx<'a> {
             }
             E::Return(v) => {
                 let rt = self.ret_ty.clone();
+                if rt == super::closure::UNKNOWN_RET {
+                    return self.err(span, "to use `return` in a closure, give it a return type: `|x: i32| -> i32 { ... }`");
+                }
                 let val = match v {
                     Some(v) => Some(Box::new(self.expr_as(v, &rt)?)),
                     None => {
@@ -936,6 +982,7 @@ impl<'a> FnCx<'a> {
                 let val = x(K::Variant(idx, vec![v]), rt, span);
                 Ok(x(K::Return(Some(Box::new(val))), Ty::Never, span))
             }
+            E::Closure(c) => self.closure_expr(c, expected, span),
             E::Catch(inner, binding, handler) => {
                 self.catch_expr(inner, binding.as_ref(), handler, expected, span)
             }
@@ -986,6 +1033,9 @@ impl<'a> FnCx<'a> {
                 if let Some(l) = self.lookup_local(&id.name) {
                     return Ok(Some((Place::Local(l), self.locals[l as usize].ty.clone())));
                 }
+                if let Some(c) = self.capture_place(&id.name, span) {
+                    return Ok(Some(c));
+                }
                 if let Some(Def::Static(sid)) = self.ck.lookup(self.module, &id.name) {
                     return self.static_place(sid, span).map(Some);
                 }
@@ -993,7 +1043,10 @@ impl<'a> FnCx<'a> {
             }
             E::SelfValue => match self.lookup_local("self") {
                 Some(l) => Ok(Some((Place::Local(l), self.locals[l as usize].ty.clone()))),
-                None => self.err(span, "`self` is only available in methods"),
+                None => match self.capture_place("self", span) {
+                    Some(c) => Ok(Some(c)),
+                    None => self.err(span, "`self` is only available in methods"),
+                },
             },
             E::Field(base, name, targs) => {
                 if self.path(base)?.is_some() {
@@ -1081,10 +1134,8 @@ impl<'a> FnCx<'a> {
                         Ty::Array(t, _) | Ty::Slice(t) => Ty::Slice(t.clone()),
                         Ty::Str => Ty::Str,
                         _ => {
-                            return self.err(
-                                span,
-                                format!("type `{}` cannot be sliced", self.ts(&bty)),
-                            )
+                            return self
+                                .err(span, format!("type `{}` cannot be sliced", self.ts(&bty)))
                         }
                     };
                     let usize_t = Ty::Int(IntTy::Usize);
@@ -1099,7 +1150,11 @@ impl<'a> FnCx<'a> {
                                 // `a..=b` is `a..b + 1`
                                 let hs = h.span;
                                 let one = x(K::Int(1), usize_t.clone(), hs);
-                                Some(Box::new(x(K::Binary(BinOp::Add, Box::new(h), Box::new(one)), usize_t, hs)))
+                                Some(Box::new(x(
+                                    K::Binary(BinOp::Add, Box::new(h), Box::new(one)),
+                                    usize_t,
+                                    hs,
+                                )))
                             } else {
                                 Some(Box::new(h))
                             }
@@ -1203,7 +1258,9 @@ impl<'a> FnCx<'a> {
     pub fn path(&mut self, e: &ast::Expr) -> Result<Option<PathRes>> {
         match &e.kind {
             E::Name(id, targs) => {
-                if targs.is_empty() && self.lookup_local(&id.name).is_some() {
+                if targs.is_empty()
+                    && (self.lookup_local(&id.name).is_some() || self.is_capture(&id.name))
+                {
                     return Ok(None);
                 }
                 if let Some(t) = self.env.names.get(&id.name) {
@@ -1338,10 +1395,7 @@ impl<'a> FnCx<'a> {
             {
                 Ok(x(K::Struct(Vec::new()), Ty::Adt(aid, args), span))
             }
-            PathRes::Def(Def::Fn(_), _, _) => self.err(
-                span,
-                "functions are not first-class values yet; call it with `(...)`",
-            ),
+            PathRes::Def(Def::Fn(fid), targs, _) => self.fn_value(fid, targs, span),
             PathRes::Module(_) => self.err(span, "a module is not a value"),
             _ => self.err(span, "expected a value, found a type"),
         }
@@ -1604,10 +1658,40 @@ impl<'a> FnCx<'a> {
             out.push(v);
         }
         let offset = out.len();
+        let hints = std::mem::take(&mut self.arg_hints);
         for (i, a) in args.iter().enumerate() {
             let tpl = &param_tpls[offset + i];
-            let exp = subst_known(&slots, tpl);
+            let mut exp = subst_known(&slots, tpl);
+            if exp.is_none() {
+                // a closure for an `F: Fn(A) -> R` parameter learns `A` from the bound
+                if let Some(Some(h)) = hints.get(offset + i) {
+                    let partial: Vec<Ty> = slots
+                        .iter()
+                        .enumerate()
+                        .map(|(j, s)| s.clone().unwrap_or(Ty::Param(j as u32)))
+                        .collect();
+                    exp = Some(h.subst(&partial));
+                }
+            }
             let v = self.expr(a, exp.as_ref())?;
+            // the closure's actual signature fills in the bound's unknowns
+            // (`U` in `map<U, F: Fn(&T) -> U>`)
+            if let (Some(Some(h)), Some((ps, r, _))) =
+                (hints.get(offset + i), self.ck.callable_sig(&v.ty))
+            {
+                let mut trial = slots.clone();
+                if match_template(h, &Ty::FnPtr(ps, Box::new(r)), &mut trial) {
+                    slots = trial;
+                }
+            }
+            let exp = if matches!(exp, Some(Ty::FnPtr(..)))
+                && !matches!(v.ty, Ty::FnPtr(..))
+                && tpl.has_params()
+            {
+                None
+            } else {
+                exp
+            };
             if exp.is_none() {
                 let mut trial = slots.clone();
                 if match_template(tpl, &v.ty, &mut trial) {
@@ -1657,18 +1741,15 @@ impl<'a> FnCx<'a> {
         }
         let Some(res) = self.path(callee)? else {
             if let E::Name(id, _) = &callee.kind {
-                if self.lookup_local(&id.name).is_some() {
-                    return self.err(
-                        callee.span,
-                        format!("`{}` is a variable, not a function", id.name),
-                    );
+                if self.lookup_local(&id.name).is_some() || self.is_capture(&id.name) {
+                    return self.call_value(callee, args, span);
                 }
                 return self.err(
                     callee.span,
                     format!("cannot find function `{}` in this scope", id.name),
                 );
             }
-            return self.err(callee.span, "this expression is not callable");
+            return self.call_value(callee, args, span);
         };
         match res {
             PathRes::Def(Def::Fn(fid), targs, sp) => {
@@ -1707,7 +1788,11 @@ impl<'a> FnCx<'a> {
 
     /// Signature of a function as templates: impl generics are `Param(0..n_impl)`,
     /// the function's own generics follow. Includes `self` as the first parameter.
-    fn signature(&mut self, fid: FnId, self_ty: Option<Ty>) -> Result<(Vec<Ty>, Ty, usize, usize)> {
+    pub fn signature(
+        &mut self,
+        fid: FnId,
+        self_ty: Option<Ty>,
+    ) -> Result<(Vec<Ty>, Ty, usize, usize)> {
         let f = &self.ck.fns[fid as usize];
         let decl = f.decl.clone();
         let module = f.module;
@@ -1834,6 +1919,7 @@ impl<'a> FnCx<'a> {
         } else {
             (args, &[][..])
         };
+        self.arg_hints = self.fn_bound_hints(fid, &params, n_impl);
         let (mut xs, slots) = self.infer_args(
             n_impl + n_fn,
             slots,
@@ -1883,8 +1969,16 @@ impl<'a> FnCx<'a> {
             return Ok(x(K::Call(sym, xs), ret, span));
         }
         // bounds on the function's own generic parameters
+        let mut base = Env::default();
+        if let FnOwner::Impl(iid) = self.ck.fns[fid as usize].owner {
+            let im = &self.ck.impls[iid as usize];
+            for (g, t) in im.generics.iter().zip(&slots[..n_impl]) {
+                base.names.insert(g.name.name.clone(), t.clone());
+            }
+            base.self_ty = Some(im.self_ty.subst(&slots[..n_impl]));
+        }
         self.ck
-            .check_bounds(&fn_generics, &slots[n_impl..], fmodule, span)?;
+            .check_bounds_in(&fn_generics, &slots[n_impl..], fmodule, span, base)?;
         let self_ty = match self.ck.fns[fid as usize].owner {
             FnOwner::Trait(_) => trait_self,
             _ => None,
@@ -2080,6 +2174,10 @@ impl<'a> FnCx<'a> {
             }
         };
         let Some((fid, impl_args, trait_self)) = found else {
+            // `self.on_click(...)`: a field holding a closure or `fn`
+            if let Some(v) = self.call_field(base, name, args, span)? {
+                return Ok(v);
+            }
             if let Ty::Adt(aid, _) = recv_ty.deref_all() {
                 if self.ck.adts[*aid as usize]
                     .field_index(&name.name)
@@ -2146,6 +2244,9 @@ impl<'a> FnCx<'a> {
                     let (np, nt) = self.deref_place(p, &t, span);
                     p = np;
                     t = nt;
+                }
+                if m {
+                    self.note_mut(&p);
                 }
                 x(K::Borrow(p, m), Ty::reference(t, m), base.span)
             }
@@ -2594,13 +2695,30 @@ impl<'a> FnCx<'a> {
     }
 
     /// Call operator-trait method `method` of prelude trait `trait_name` on `self_ty`.
-    fn call_operator(&mut self, trait_name: &str, method: &str, symbol: &str, self_ty: &Ty, args: Vec<X>, span: Span) -> Result<X> {
-        let tid = self.ck.prelude.and_then(|p| match self.ck.modules[p as usize].scope.get(trait_name).map(|b| b.def) {
-            Some(Def::Trait(t)) => Some(t),
-            _ => None,
+    fn call_operator(
+        &mut self,
+        trait_name: &str,
+        method: &str,
+        symbol: &str,
+        self_ty: &Ty,
+        args: Vec<X>,
+        span: Span,
+    ) -> Result<X> {
+        let tid = self.ck.prelude.and_then(|p| {
+            match self.ck.modules[p as usize]
+                .scope
+                .get(trait_name)
+                .map(|b| b.def)
+            {
+                Some(Def::Trait(t)) => Some(t),
+                _ => None,
+            }
         });
         let Some(tid) = tid else {
-            return self.err(span, format!("operator `{symbol}` needs the prelude trait `{trait_name}`"));
+            return self.err(
+                span,
+                format!("operator `{symbol}` needs the prelude trait `{trait_name}`"),
+            );
         };
         let Some((iid, iargs)) = self.ck.find_trait_impl(self_ty, tid) else {
             let tn = self.ts(self_ty);
@@ -2613,17 +2731,42 @@ impl<'a> FnCx<'a> {
             return self.err(span, format!("operator `{symbol}` is not defined for `{tn}`; implement `{trait_name}` for it:  impl {trait_name} for {tn} {{ {sig} {{ ... }} }}"));
         };
         if let Some(&fid) = self.ck.impls[iid as usize].methods.get(method) {
-            return self.invoke(fid, Vec::new(), Some(iargs), None, args, &[], None, span, span);
+            return self.invoke(
+                fid,
+                Vec::new(),
+                Some(iargs),
+                None,
+                args,
+                &[],
+                None,
+                span,
+                span,
+            );
         }
         match self.ck.traits[tid as usize].defaults.get(method).copied() {
-            Some(fid) => self.invoke(fid, Vec::new(), None, Some(self_ty.clone()), args, &[], None, span, span),
-            None => self.err(span, format!("trait `{trait_name}` has no method `{method}`")),
+            Some(fid) => self.invoke(
+                fid,
+                Vec::new(),
+                None,
+                Some(self_ty.clone()),
+                args,
+                &[],
+                None,
+                span,
+                span,
+            ),
+            None => self.err(
+                span,
+                format!("trait `{trait_name}` has no method `{method}`"),
+            ),
         }
     }
 
     /// `a == b`, `a < b`, ... on user types: `Eq.eq(&a, &b)`, `Ord.lt(&a, &b)`, ...
     fn overloaded_compare(&mut self, op: BinOp, lref: X, b: &ast::Expr, span: Span) -> Result<X> {
-        let Ty::Ref(t, _) = lref.ty.clone() else { unreachable!() };
+        let Ty::Ref(t, _) = lref.ty.clone() else {
+            unreachable!()
+        };
         let t = *t;
         let rref = match self.place(b)? {
             Some((p, rt)) => x(K::Borrow(p, false), Ty::reference(rt, false), b.span),
@@ -2654,7 +2797,12 @@ impl<'a> FnCx<'a> {
             BinOp::Mul => ("Mul", "mul"),
             BinOp::Div => ("Div", "div"),
             BinOp::Rem => ("Rem", "rem"),
-            _ => return self.err(span, format!("operator `{}` cannot be overloaded", op.symbol())),
+            _ => {
+                return self.err(
+                    span,
+                    format!("operator `{}` cannot be overloaded", op.symbol()),
+                )
+            }
         };
         self.call_operator(tr, m, op.symbol(), &t, vec![l, r], span)
     }
@@ -3004,7 +3152,11 @@ impl<'a> FnCx<'a> {
                     );
                 };
                 let both_literals = untyped_literal(lo) && untyped_literal(hi);
-                let hinted = if both_literals { self.overrides.get(&iter.span).cloned() } else { None };
+                let hinted = if both_literals {
+                    self.overrides.get(&iter.span).cloned()
+                } else {
+                    None
+                };
                 let (l, h) = if let Some(t) = hinted {
                     (self.expr_as(lo, &t)?, self.expr_as(hi, &t)?)
                 } else if untyped_literal(lo) && !untyped_literal(hi) {

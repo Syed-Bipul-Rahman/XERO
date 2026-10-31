@@ -1,0 +1,5 @@
+fn main() {
+    let f = |a: i32, b: i32| a + b
+    println(f(1))
+}
+// error: this closure takes 2 argument(s), but 1 were given

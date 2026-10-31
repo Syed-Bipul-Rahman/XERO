@@ -188,6 +188,8 @@ impl<'a> Codegen<'a> {
             }
             Ty::Array(e, n) => format!("[{} x {}]", n, self.llty(e)),
             Ty::Tuple(ts) => self.struct_llty(ts),
+            Ty::Closure(id) => self.struct_llty(&self.ck.closures[*id as usize].fields),
+            Ty::FnPtr(..) => "ptr".into(),
             Ty::Adt(id, args) => {
                 let a = &self.ck.adts[*id as usize];
                 if a.is_enum() {
@@ -254,6 +256,14 @@ impl<'a> Codegen<'a> {
             Ty::Tuple(ts) => {
                 self.struct_layout(&ts.iter().map(|t| self.layout(t)).collect::<Vec<_>>())
             }
+            Ty::Closure(id) => self.struct_layout(
+                &self.ck.closures[*id as usize]
+                    .fields
+                    .iter()
+                    .map(|t| self.layout(t))
+                    .collect::<Vec<_>>(),
+            ),
+            Ty::FnPtr(..) => (p, p),
             Ty::Adt(id, args) => {
                 if self.ck.adts[*id as usize].is_enum() {
                     let (tag, payload) = self.enum_layout(t);
@@ -621,6 +631,10 @@ impl<'a> Codegen<'a> {
                 let ts = ts.clone();
                 self.drop_fields(t, &ts);
             }
+            Ty::Closure(id) => {
+                let fs = self.ck.closures[*id as usize].fields.clone();
+                self.drop_fields(t, &fs);
+            }
             Ty::Array(e, n) => {
                 let aty = self.llty(t);
                 let us = self.usize_ty();
@@ -688,11 +702,11 @@ impl<'a> Codegen<'a> {
         match p {
             Place::Local(l) => self.local_ty(*l),
             Place::Static(..) => unreachable!("static type requested without context"),
-            Place::Field(b, i) => match self.place_ty_ctx(b) {
-                Ty::Adt(id, args) => self.ck.struct_fields(id, &args)[*i as usize].clone(),
-                Ty::Tuple(ts) => ts[*i as usize].clone(),
-                _ => unreachable!(),
-            },
+            Place::Field(b, i) => self
+                .ck
+                .fields_of(&self.place_ty_ctx(b))
+                .expect("field of a non-struct")[*i as usize]
+                .clone(),
             Place::Index(b, _) => match self.place_ty_ctx(b) {
                 Ty::Array(e, _) | Ty::Slice(e) => *e,
                 _ => unreachable!(),
@@ -824,7 +838,9 @@ impl<'a> Codegen<'a> {
                 self.ins(&format!("{ok} = and i1 {a}, {c}"));
                 self.check(&ok);
                 let ptr = self.fresh();
-                self.ins(&format!("{ptr} = getelementptr inbounds {elem}, ptr {data}, {us} {lo}"));
+                self.ins(&format!(
+                    "{ptr} = getelementptr inbounds {elem}, ptr {data}, {us} {lo}"
+                ));
                 let n = self.fresh();
                 self.ins(&format!("{n} = sub {us} {hi}, {lo}"));
                 let r1 = self.fresh();
@@ -850,11 +866,7 @@ impl<'a> Codegen<'a> {
             Place::Local(l) => self.set_flag(*l, false),
             Place::Field(b, i) => {
                 let bt = self.place_ty_ctx(b);
-                let fields = match &bt {
-                    Ty::Adt(id, args) => self.ck.struct_fields(*id, args),
-                    Ty::Tuple(ts) => ts.clone(),
-                    _ => Vec::new(),
-                };
+                let fields = self.ck.fields_of(&bt).unwrap_or_default();
                 if fields
                     .iter()
                     .enumerate()
@@ -950,6 +962,34 @@ impl<'a> Codegen<'a> {
                 let r2 = self.fresh();
                 self.ins(&format!("{r2} = insertvalue {fty} {r1}, {us} {n}, 1"));
                 r2
+            }
+            K::FnRef(name) => {
+                if self.is_extern_name(name) {
+                    format!("@{name}")
+                } else {
+                    quote(name)
+                }
+            }
+            K::CallPtr(f, args) => {
+                let fp = self.expr(f);
+                let mut vals = Vec::new();
+                for a in args {
+                    let v = self.expr(a);
+                    vals.push(format!("{} {}", self.llty(&a.ty), v));
+                }
+                let rt = self.ret_llty(&e.ty);
+                if rt == "void" {
+                    self.ins(&format!("call void {fp}({})", vals.join(", ")));
+                    if e.ty.is_never() {
+                        self.term("unreachable");
+                        return "poison".into();
+                    }
+                    self.unit()
+                } else {
+                    let r = self.fresh();
+                    self.ins(&format!("{r} = call {rt} {fp}({})", vals.join(", ")));
+                    r
+                }
             }
             K::Call(name, args) => {
                 let mut vals = Vec::new();

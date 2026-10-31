@@ -1,0 +1,114 @@
+// Closures, function pointers, Fn/FnMut bounds.
+
+fn apply<F: Fn(i32) -> i32>(f: F, x: i32) -> i32 {
+    f(x)
+}
+
+fn apply_n<F: FnMut()>(mut f: F, n: i32) {
+    for _ in 0..n {
+        f()
+    }
+}
+
+fn compose<A: Fn(i32) -> i32, B: Fn(i32) -> i32>(a: A, b: B, x: i32) -> i32 {
+    b(a(x))
+}
+
+fn twice(f: fn(i32) -> i32, x: i32) -> i32 {
+    f(f(x))
+}
+
+fn double(x: i32) -> i32 { x * 2 }
+
+fn pick(neg: bool) -> fn(i32) -> i32 {
+    if neg { |x| -x } else { double }
+}
+
+struct Button<F> {
+    label: String
+    on_click: F
+}
+
+impl<F: Fn(i32) -> i32> Button<F> {
+    fn click(&self, v: i32) -> i32 {
+        self.on_click(v)
+    }
+}
+
+struct Counter {
+    step: i32
+}
+
+impl Counter {
+    fn run(&self, base: i32) -> i32 {
+        apply(|x| x + self.step, base)
+    }
+}
+
+fn main() {
+    // inference from the bound, and captures by reference
+    let k = 10
+    println(apply(|x| x * k, 4))
+    println(compose(|x| x + 1, |x| x * 100, 2))
+
+    // FnMut: the closure mutates a captured variable
+    let mut total = 0
+    apply_n(|| total += 5, 3)
+    println(total)
+
+    // function pointers: named functions and capture-free closures
+    println(twice(double, 3))
+    println(twice(|x| x + 7, 0))
+    println(pick(true)(9))
+    println(pick(false)(9))
+    let table: [fn(i32) -> i32; 2] = [double, |x| x * x]
+    println(table[1](12))
+
+    // move closures own what they capture
+    let name = String.from("xero")
+    let greet = move |punct: &str| {
+        print(&name)
+        println(punct)
+    }
+    greet("!")
+    greet("?")
+
+    // nested closures
+    let outer = 3
+    let make = |a: i32| {
+        let inner = |b: i32| a * b + outer
+        inner(10)
+    }
+    println(make(2))
+
+    // closures in struct fields, and capturing `self`
+    let offset = 1000
+    let b = Button { label: String.from("ok"), on_click: |v: i32| v + offset }
+    println(b.click(1))
+    println(&b.label)
+    println(Counter { step: 5 }.run(37))
+
+    // a vector of results built with a closure
+    let mut squares: Vec<i32> = Vec.new()
+    let push_sq = |v: &mut Vec<i32>, x: i32| v.push(x * x)
+    for i in 1..5 {
+        push_sq(&mut squares, i)
+    }
+    println(*squares.at(3))
+}
+// output:
+// 40
+// 300
+// 15
+// 12
+// 14
+// -9
+// 18
+// 144
+// xero!
+// xero?
+// 23
+// 1001
+// ok
+// 42
+// 16

@@ -169,6 +169,10 @@ pub enum TypeKind {
     Tuple(Vec<TypeExpr>),
     Never,
     Infer,
+    /// `fn(i32, i32) -> i32`: a plain function pointer.
+    FnPtr(Vec<TypeExpr>, Option<Box<TypeExpr>>),
+    /// `Fn(i32) -> i32` / `FnMut(i32)`: a closure bound (only in generic bounds).
+    FnTrait(bool, Vec<TypeExpr>, Option<Box<TypeExpr>>),
 }
 
 #[derive(Clone, Debug)]
@@ -300,6 +304,23 @@ pub enum ExprKind {
     Try(Box<Expr>),
     Throw(Box<Expr>),
     Catch(Box<Expr>, Option<Ident>, Block),
+    /// `|a, b: i32| a + b`, `move |x| -> i32 { ... }`
+    Closure(Box<ClosureExpr>),
+}
+
+#[derive(Clone, Debug)]
+pub struct ClosureParam {
+    pub name: Ident,
+    pub mutable: bool,
+    pub ty: Option<TypeExpr>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ClosureExpr {
+    pub params: Vec<ClosureParam>,
+    pub ret: Option<TypeExpr>,
+    pub body: Expr,
+    pub is_move: bool,
 }
 
 #[derive(Clone, Debug)]
