@@ -1,0 +1,8 @@
+fn main() {
+    let mut counter = 0
+    let t = spawn {
+        counter += 1
+    }
+    counter += 1
+}
+// error: cannot use `counter` because it is mutably borrowed

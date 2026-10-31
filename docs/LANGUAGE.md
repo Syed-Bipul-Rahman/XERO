@@ -1,6 +1,6 @@
-# The Xero Language Reference (v0.2)
+# The Xero Language Reference (v0.3)
 
-This document describes the language as implemented by `xeroc` 0.2. Features
+This document describes the language as implemented by `xeroc` 0.3. Features
 that are reserved but not implemented yet are marked **(reserved)**.
 
 ## 1. Lexical structure
@@ -29,14 +29,14 @@ that are reserved but not implemented yet are marked **(reserved)**.
 | Control flow | `if` `else` `match` `for` `while` `loop` `break` `continue` |
 | Types | `struct` `enum` `trait` `impl` `type` `where` `extends` |
 | Ownership | `own` (reserved) `borrow` `move` `copy` `drop` `unsafe` |
-| Concurrency | `async` `await` `spawn` (all reserved) |
+| Concurrency | `spawn` · `async` `await` (reserved) |
 | Errors | `try` `catch` `throw` |
 | Literals | `true` `false` |
 | Misc | `as` `in` `is` `self` `Self` |
 
 Xero deliberately has no `class`, `new`, `null`, `extends` for classes,
 `implements`, `go` or `chan`. `struct`, `trait` and `impl` cover composition.
-Concurrency is planned as `spawn { ... }` plus library types such as `Channel<T>`.
+Concurrency is `spawn { ... }` plus library types such as `Channel<T>` and `Mutex<T>` (section 11).
 
 ## 2. Items
 
@@ -218,8 +218,12 @@ The rules in detail:
 ### Data-race freedom
 
 Safe code can't share mutable state: `&mut` is exclusive, and every access to
-a `static mut` requires `unsafe`. When `spawn` arrives, the same rules will
-apply across threads (see the roadmap).
+a `static mut` requires `unsafe`. The same rules apply across threads, so a
+data race is a compile error (section 11).
+
+* A value whose destructor can read what it borrows (a thread handle, a
+  struct with a `drop` block holding references) keeps those borrows until
+  it is destroyed, and must be destroyed before the data it borrows.
 
 ## 5. Functions and methods
 
@@ -407,10 +411,12 @@ control flow.
 * accessing a `static mut`;
 * calling foreign or `unsafe` functions;
 * intrinsics: `ptr_read`, `ptr_write`, `volatile_load`, `volatile_store`,
-  `drop_in_place`, `slice_from_raw`, `slice_from_raw_mut`, `str_from_raw`
-  and `asm("...")`.
+  `drop_in_place`, `slice_from_raw`, `slice_from_raw_mut`, `str_from_raw`,
+  `forget(value)` (skip a destructor), `asm("...")`, and atomics on integers
+  and pointers: `atomic_load`, `atomic_store`, `atomic_swap`, `atomic_add`,
+  `atomic_sub`, `atomic_cas` (all sequentially consistent).
 
-Safe intrinsics: `size_of<T>()`, `align_of<T>()`, `forget(value)`, `trap()`.
+Safe intrinsics: `size_of<T>()`, `align_of<T>()`, `trap()`, `fence()`.
 
 ```xero
 unsafe fn printf(fmt: *u8, ...) -> i32          // C variadic
@@ -438,7 +444,71 @@ pointers and `usize`. Pointer arithmetic: `p + n` and `p - n` advance by whole e
 | `std.string` | `String`: `from new push_str push_byte push_int as_str len equals clear` |
 | `std.math` | `min max clamp abs isqrt sqrt pow_int gcd PI E` |
 | `std.io` | `read_into write_all exit_process STDIN STDOUT STDERR` |
+| `std.thread` | `start` (what `spawn` calls), `Thread<T, F>` with `join`, `sleep_ms`, `yield_now` |
+| `std.sync` | `Mutex<T>` (`lock`, `with`, `into_inner`; guards `get`, `get_mut`, `set`), `Channel<T>` (`send`, `recv`, `try_recv`, `close`, `len`), `Atomic<T>` (`load`, `store`, `swap`, `fetch_add`, `fetch_sub`, `compare_exchange`), `AtomicBool` |
 
 The standard library is written in Xero. Code you don't call is never compiled
 into your program, so a freestanding program doesn't depend on libc unless it
 uses something that needs it (printing or allocation).
+
+## 11. Concurrency
+
+```xero
+import std.sync
+
+fn main() {
+    let data = [1, 2, 3, 4]
+    let mut evens: Vec<i32> = Vec.new()
+
+    let sum = spawn { data[0] + data[1] + data[2] + data[3] }   // borrows `data`
+    let fill = spawn {                                          // borrows `evens` exclusively
+        for x in data {
+            if x % 2 == 0 { evens.push(x) }
+        }
+    }
+    println(sum.join())       // 10
+    fill.join()
+    println(evens.len())      // 2
+
+    let owned = String.from("moved in")
+    let t = spawn move { owned.len() }   // the thread owns `owned`
+    println(t.join())
+
+    let counter = sync.Mutex.new(0)
+    let jobs: sync.Channel<i32> = sync.Channel.new()
+    {
+        let worker = spawn {
+            while jobs.recv() is Some(n) {
+                counter.with(|c| *c += n)
+            }
+        }
+        for n in 1..=10 { jobs.send(n) }
+        jobs.close()
+    }                         // `worker` is joined here
+    println(*counter.lock().get())   // 55
+}
+```
+
+* `spawn { ... }` runs the block on a new OS thread and returns a
+  `Thread<T, F>`, where `T` is the block's value. `join()` waits for it and
+  returns the value. A thread that isn't joined explicitly is joined when its
+  handle is destroyed, at the end of its scope at the latest.
+* Because of that, a thread can borrow local variables, and the borrow checker
+  applies the usual rules for the handle's whole lifetime. Data used through
+  `&` can be shared by any number of threads. Data used through `&mut`
+  belongs to one thread until it is joined. Anything else is a compile error:
+
+  ```xero
+  let mut counter = 0
+  let t = spawn { counter += 1 }
+  counter += 1        // error: cannot use `counter` because it is mutably borrowed
+  ```
+
+* `spawn move { ... }` moves the values the thread uses into it.
+* To share *mutable* state between threads, use `Mutex<T>`, `Channel<T>` or
+  `Atomic<T>` from `std.sync`. They are used through shared references and
+  synchronize internally.
+* There is no unwinding: a panic in any thread ends the whole program.
+* Threads use POSIX threads on Linux and macOS and `kernel32` on Windows. On
+  bare-metal and wasm targets, starting a thread is a runtime error.
+* `async` and `await` are still reserved.

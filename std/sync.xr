@@ -1,0 +1,277 @@
+// Sharing state between threads: Mutex, Channel and atomics.
+//
+// All three are used through shared references (`&Mutex<T>` can be
+// borrowed by many threads at once) and do their own synchronization, so
+// sharing them is safe. Everything else that threads share must be
+// read-only: the borrow checker rejects any other data race.
+
+module std.sync
+
+import std.mem
+import std.sys
+
+// ------------------------------------------------------------------ Mutex
+
+/// A value protected by a lock. `lock()` waits until no other thread holds
+/// it and returns a guard; the lock is released when the guard is destroyed.
+pub struct Mutex<T> {
+    raw: *u8
+    data: T
+}
+
+impl<T> Mutex<T> {
+    pub fn new(value: T) -> Mutex<T> {
+        unsafe { Mutex { raw: sys.lock_new(), data: value } }
+    }
+
+    pub fn lock(&self) -> MutexGuard<T> {
+        unsafe {
+            sys.lock_acquire(self.raw)
+            MutexGuard { data: &self.data as *T, mutex: self }
+        }
+    }
+
+    /// Run `f` with exclusive access to the value.
+    pub fn with<R, F: FnOnce(&mut T) -> R>(&self, f: F) -> R {
+        let mut guard = self.lock()
+        f(guard.get_mut())
+    }
+
+    /// Take the value out (no other thread can hold the lock: we own it).
+    pub fn into_inner(self) -> T {
+        unsafe {
+            let value = ptr_read(&self.data as *T)
+            sys.lock_free(self.raw)
+            forget(self)
+            value
+        }
+    }
+
+    drop {
+        unsafe { sys.lock_free(self.raw) }
+    }
+}
+
+/// Exclusive access to a `Mutex`'s value while it exists.
+pub struct MutexGuard<T> {
+    data: *T
+    mutex: &Mutex<T>
+}
+
+impl<T> MutexGuard<T> {
+    pub fn get(&self) -> &T {
+        unsafe { &*self.data }
+    }
+
+    pub fn get_mut(&mut self) -> &mut T {
+        unsafe { &mut *self.data }
+    }
+
+    pub fn set(&mut self, value: T) {
+        unsafe { *self.data = value }
+    }
+
+    drop {
+        unsafe { sys.lock_release(self.mutex.raw) }
+    }
+}
+
+// ---------------------------------------------------------------- Channel
+
+struct Queue<T> {
+    buf: *T
+    cap: usize
+    head: usize
+    len: usize
+    closed: bool
+}
+
+impl<T> Queue<T> {
+    unsafe fn push(&mut self, value: T) {
+        if self.len == self.cap {
+            let new_cap = if self.cap == 0 { 8 } else { self.cap * 2 }
+            let nb = mem.alloc<T>(new_cap)
+            let mut i: usize = 0
+            while i < self.len {
+                ptr_write(nb + i, ptr_read(self.buf + (self.head + i) % self.cap))
+                i += 1
+            }
+            if self.cap > 0 {
+                mem.dealloc(self.buf)
+            }
+            self.buf = nb
+            self.cap = new_cap
+            self.head = 0
+        }
+        ptr_write(self.buf + (self.head + self.len) % self.cap, value)
+        self.len += 1
+    }
+
+    unsafe fn pop(&mut self) -> Option<T> {
+        if self.len == 0 {
+            return None
+        }
+        let v = ptr_read(self.buf + self.head)
+        self.head = (self.head + 1) % self.cap
+        self.len -= 1
+        Some(v)
+    }
+}
+
+/// A multi-producer, multi-consumer queue for sending values between threads.
+/// Share it by reference: `spawn { ch.send(1) }`.
+pub struct Channel<T> {
+    lock: *u8
+    ready: *u8
+    queue: *Queue<T>
+}
+
+impl<T> Channel<T> {
+    pub fn new() -> Channel<T> {
+        unsafe {
+            let q = mem.alloc<Queue<T>>(1)
+            ptr_write(q, Queue { buf: 0 as *T, cap: 0, head: 0, len: 0, closed: false })
+            Channel { lock: sys.lock_new(), ready: sys.cond_new(), queue: q }
+        }
+    }
+
+    /// Queue `value`. Returns false (and drops it) if the channel is closed.
+    pub fn send(&self, value: T) -> bool {
+        unsafe {
+            sys.lock_acquire(self.lock)
+            if (*self.queue).closed {
+                sys.lock_release(self.lock)
+                return false
+            }
+            (*self.queue).push(value)
+            sys.cond_notify_one(self.ready)
+            sys.lock_release(self.lock)
+            true
+        }
+    }
+
+    /// Wait for the next value; `None` once the channel is closed and empty.
+    pub fn recv(&self) -> Option<T> {
+        unsafe {
+            sys.lock_acquire(self.lock)
+            loop {
+                if (*self.queue).len > 0 {
+                    let v = (*self.queue).pop()
+                    sys.lock_release(self.lock)
+                    return v
+                }
+                if (*self.queue).closed {
+                    sys.lock_release(self.lock)
+                    return None
+                }
+                sys.cond_wait(self.ready, self.lock)
+            }
+        }
+    }
+
+    /// The next value if one is waiting, without blocking.
+    pub fn try_recv(&self) -> Option<T> {
+        unsafe {
+            sys.lock_acquire(self.lock)
+            let v = (*self.queue).pop()
+            sys.lock_release(self.lock)
+            v
+        }
+    }
+
+    /// No more values will be sent: receivers get `None` once it is empty.
+    pub fn close(&self) {
+        unsafe {
+            sys.lock_acquire(self.lock)
+            (*self.queue).closed = true
+            sys.cond_notify_all(self.ready)
+            sys.lock_release(self.lock)
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        unsafe {
+            sys.lock_acquire(self.lock)
+            let n = (*self.queue).len
+            sys.lock_release(self.lock)
+            n
+        }
+    }
+
+    drop {
+        unsafe {
+            while (*self.queue).len > 0 {
+                (*self.queue).pop()
+            }
+            if (*self.queue).cap > 0 {
+                mem.dealloc((*self.queue).buf)
+            }
+            mem.dealloc(self.queue)
+            sys.lock_free(self.lock)
+            sys.cond_free(self.ready)
+        }
+    }
+}
+
+// ---------------------------------------------------------------- atomics
+
+/// An integer (or raw pointer) that threads can read and update without a lock.
+pub struct Atomic<T> {
+    value: T
+}
+
+impl<T> Atomic<T> {
+    pub fn new(value: T) -> Atomic<T> {
+        Atomic { value: value }
+    }
+
+    pub fn load(&self) -> T {
+        unsafe { atomic_load(&self.value as *T) }
+    }
+
+    pub fn store(&self, value: T) {
+        unsafe { atomic_store(&self.value as *T, value) }
+    }
+
+    /// Store `value`, returning the previous value.
+    pub fn swap(&self, value: T) -> T {
+        unsafe { atomic_swap(&self.value as *T, value) }
+    }
+
+    /// Add `delta`, returning the previous value.
+    pub fn fetch_add(&self, delta: T) -> T {
+        unsafe { atomic_add(&self.value as *T, delta) }
+    }
+
+    /// Subtract `delta`, returning the previous value.
+    pub fn fetch_sub(&self, delta: T) -> T {
+        unsafe { atomic_sub(&self.value as *T, delta) }
+    }
+
+    /// If the value is `expected`, replace it with `new`. Returns whether it did.
+    pub fn compare_exchange(&self, expected: T, new: T) -> bool {
+        unsafe { atomic_cas(&self.value as *T, expected, new) == expected }
+    }
+}
+
+pub struct AtomicBool {
+    value: u8
+}
+
+impl AtomicBool {
+    pub fn new(value: bool) -> AtomicBool {
+        AtomicBool { value: value as u8 }
+    }
+
+    pub fn load(&self) -> bool {
+        unsafe { atomic_load(&self.value as *u8) != 0 }
+    }
+
+    pub fn store(&self, value: bool) {
+        unsafe { atomic_store(&self.value as *u8, value as u8) }
+    }
+
+    pub fn swap(&self, value: bool) -> bool {
+        unsafe { atomic_swap(&self.value as *u8, value as u8) != 0 }
+    }
+}

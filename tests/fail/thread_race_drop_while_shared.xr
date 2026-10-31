@@ -1,0 +1,6 @@
+fn main() {
+    let data = String.from("shared")
+    let t = spawn { println(&data) }
+    drop data
+}
+// error: cannot move out of `data` because it is borrowed

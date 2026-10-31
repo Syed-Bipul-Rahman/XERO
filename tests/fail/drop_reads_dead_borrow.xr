@@ -1,0 +1,14 @@
+struct Logger { msg: &str }
+
+impl Logger {
+    drop {
+        println(self.msg)
+    }
+}
+
+fn main() {
+    let mut keep: Vec<Logger> = Vec.new()
+    let text = String.from("bye")
+    keep.push(Logger { msg: text.as_str() })
+}
+// error: `text` does not live long enough: it is destroyed while `keep` still borrows it

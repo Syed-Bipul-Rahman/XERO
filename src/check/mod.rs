@@ -40,6 +40,13 @@ pub enum IntrinsicFn {
     Forget,
     VolatileLoad,
     VolatileStore,
+    AtomicLoad,
+    AtomicStore,
+    AtomicSwap,
+    AtomicAdd,
+    AtomicSub,
+    AtomicCas,
+    Fence,
 }
 
 const INTRINSICS: &[(&str, IntrinsicFn)] = &[
@@ -56,6 +63,13 @@ const INTRINSICS: &[(&str, IntrinsicFn)] = &[
     ("forget", IntrinsicFn::Forget),
     ("volatile_load", IntrinsicFn::VolatileLoad),
     ("volatile_store", IntrinsicFn::VolatileStore),
+    ("atomic_load", IntrinsicFn::AtomicLoad),
+    ("atomic_store", IntrinsicFn::AtomicStore),
+    ("atomic_swap", IntrinsicFn::AtomicSwap),
+    ("atomic_add", IntrinsicFn::AtomicAdd),
+    ("atomic_sub", IntrinsicFn::AtomicSub),
+    ("atomic_cas", IntrinsicFn::AtomicCas),
+    ("fence", IntrinsicFn::Fence),
 ];
 
 /// Types from other std modules that are visible everywhere, like the prelude.
@@ -256,6 +270,8 @@ pub struct Checker {
     /// What each function's result borrows from: (parameter index,
     /// `true` if only data the parameter refers to, not the parameter's own memory).
     pub summaries: HashMap<String, BTreeSet<(usize, bool)>>,
+    /// Functions that write through raw pointers (see `borrowck::storing_fns`).
+    pub storing: HashSet<String>,
 }
 
 /// One closure expression, after checking.
@@ -267,8 +283,10 @@ pub struct ClosureDef {
     pub ret: Ty,
     /// Symbol of the generated function `(env, params...) -> ret`.
     pub fn_name: String,
-    /// It mutates its environment, so calling it needs `&mut` (FnMut).
-    pub mutates: bool,
+    /// How calls reach the environment: `Fn` (0, `&env`), `FnMut` (1, `&mut env`:
+    /// it mutates its captures) or `FnOnce` (2, by value: it moves a capture
+    /// out, so it can be called only once).
+    pub kind: u8,
 }
 
 /// Input to the checker: parsed modules, by module path.
@@ -302,6 +320,7 @@ impl Checker {
             closures: Vec::new(),
             closure_ids: HashMap::new(),
             summaries: HashMap::new(),
+            storing: HashSet::new(),
         }
     }
 
@@ -633,7 +652,7 @@ impl Checker {
         }
     }
 
-    fn find_module(&self, path: &str) -> Option<ModId> {
+    pub fn find_module(&self, path: &str) -> Option<ModId> {
         self.modules
             .iter()
             .position(|m| m.path == path)
@@ -1360,13 +1379,13 @@ impl Checker {
     }
 
     /// Parameter types, return type and FnMut-ness of a callable type.
-    pub fn callable_sig(&self, t: &Ty) -> Option<(Vec<Ty>, Ty, bool)> {
+    pub fn callable_sig(&self, t: &Ty) -> Option<(Vec<Ty>, Ty, u8)> {
         match t {
             Ty::Closure(id) => {
                 let c = &self.closures[*id as usize];
-                Some((c.params.clone(), c.ret.clone(), c.mutates))
+                Some((c.params.clone(), c.ret.clone(), c.kind))
             }
-            Ty::FnPtr(ps, r) => Some((ps.clone(), (**r).clone(), false)),
+            Ty::FnPtr(ps, r) => Some((ps.clone(), (**r).clone(), 0)),
             _ => None,
         }
     }
@@ -1378,24 +1397,82 @@ impl Checker {
     }
 
     fn has_refs_depth(&self, t: &Ty, depth: u32) -> bool {
-        if depth > 64 {
+        self.has_refs_in(t, depth, &mut Vec::new())
+    }
+
+    /// `seen` holds the struct/enum instances being examined: a recursive
+    /// type (`Node { next: Option<Box<Node>> }`) adds nothing new on a cycle.
+    fn has_refs_in(&self, t: &Ty, depth: u32, seen: &mut Vec<Ty>) -> bool {
+        if depth > 256 {
             return true;
         }
         match t {
             Ty::Ref(..) => true,
             // memory owned through a raw pointer (a Vec's buffer) counts too
-            Ty::Array(e, _) | Ty::Slice(e) | Ty::Ptr(e) => self.has_refs_depth(e, depth + 1),
-            Ty::Tuple(ts) => ts.iter().any(|t| self.has_refs_depth(t, depth + 1)),
+            Ty::Array(e, _) | Ty::Slice(e) | Ty::Ptr(e) => self.has_refs_in(e, depth + 1, seen),
+            Ty::Tuple(ts) => ts.iter().any(|t| self.has_refs_in(t, depth + 1, seen)),
             Ty::Closure(id) => self.closures[*id as usize]
                 .fields
                 .iter()
-                .any(|t| self.has_refs_depth(t, depth + 1)),
+                .any(|t| self.has_refs_in(t, depth + 1, seen)),
             Ty::Adt(id, args) => {
+                if seen.contains(t) {
+                    return false;
+                }
+                seen.push(t.clone());
                 let a = &self.adts[*id as usize];
-                a.fields
+                let r = a
+                    .fields
                     .iter()
                     .chain(a.variants.iter().flatten())
-                    .any(|f| self.has_refs_depth(&f.subst(args), depth + 1))
+                    .any(|f| self.has_refs_in(&f.subst(args), depth + 1, seen));
+                seen.pop();
+                r
+            }
+            _ => false,
+        }
+    }
+
+    /// Can destroying a value of type `t` read data it borrows? True when a
+    /// `drop` block can see the borrows. `Vec`, `Box` and `String` only free
+    /// memory and destroy their elements, so they just pass the question on.
+    pub fn drop_uses_borrows(&self, t: &Ty) -> bool {
+        self.drop_uses_borrows_depth(t, 0)
+    }
+
+    fn drop_uses_borrows_depth(&self, t: &Ty, depth: u32) -> bool {
+        self.drop_uses_in(t, depth, &mut Vec::new())
+    }
+
+    fn drop_uses_in(&self, t: &Ty, depth: u32, seen: &mut Vec<Ty>) -> bool {
+        if depth > 256 {
+            return true;
+        }
+        match t {
+            Ty::Array(e, _) | Ty::Ptr(e) => self.drop_uses_in(e, depth + 1, seen),
+            Ty::Tuple(ts) => ts.iter().any(|t| self.drop_uses_in(t, depth + 1, seen)),
+            Ty::Closure(id) => self.closures[*id as usize]
+                .fields
+                .iter()
+                .any(|t| self.drop_uses_in(t, depth + 1, seen)),
+            Ty::Adt(id, args) => {
+                if seen.contains(t) {
+                    return false;
+                }
+                let a = &self.adts[*id as usize];
+                let trusted = self.modules[a.module as usize].is_std
+                    && matches!(a.name.as_str(), "Vec" | "Box" | "String");
+                if a.drop_impl.is_some() && !trusted && self.has_refs(t) {
+                    return true;
+                }
+                seen.push(t.clone());
+                let r = a
+                    .fields
+                    .iter()
+                    .chain(a.variants.iter().flatten())
+                    .any(|f| self.drop_uses_in(&f.subst(args), depth + 1, seen));
+                seen.pop();
+                r
             }
             _ => false,
         }
@@ -1539,13 +1616,13 @@ impl Checker {
         env.names.extend(generic_env(generics, args).names);
         for (g, a) in generics.iter().zip(args) {
             for b in &g.bounds {
-                if let TypeKind::FnTrait(mutable, ..) = &b.kind {
+                if let TypeKind::FnTrait(bound_kind, ..) = &b.kind {
                     if !self.bound_holds(b, module, &env, a)? {
                         let want = self.fn_bound_str(b, module, &env)?;
                         let have = match self.callable_sig(a) {
                             Some((ps, r, m)) => format!(
                                 "{}({}) -> {}",
-                                if m { "FnMut" } else { "Fn" },
+                                kind_name(m),
                                 ps.iter()
                                     .map(|t| self.ty_str(t))
                                     .collect::<Vec<_>>()
@@ -1554,7 +1631,10 @@ impl Checker {
                             ),
                             None => format!("`{}`, which is not callable", self.ty_str(a)),
                         };
-                        let hint = if !mutable && self.callable_sig(a).is_some_and(|s| s.2) {
+                        let have_kind = self.callable_sig(a).map(|s| s.2).unwrap_or(0);
+                        let hint = if have_kind > *bound_kind && have_kind == 2 {
+                            "; the closure moves a captured value out, so it can only be called once and the bound must be `FnOnce`"
+                        } else if have_kind > *bound_kind {
                             "; the closure mutates captured state, so the bound must be `FnMut`"
                         } else {
                             ""
@@ -1588,8 +1668,8 @@ impl Checker {
         env: &Env,
         arg: &Ty,
     ) -> Result<bool> {
-        if let TypeKind::FnTrait(mutable, ps, r) = &b.kind {
-            let Some((aps, ar, amut)) = self.callable_sig(arg) else {
+        if let TypeKind::FnTrait(bound_kind, ps, r) = &b.kind {
+            let Some((aps, ar, akind)) = self.callable_sig(arg) else {
                 return Ok(false);
             };
             let ps: Vec<Ty> = ps
@@ -1600,14 +1680,14 @@ impl Checker {
                 Some(r) => self.resolve_type(r, module, env)?,
                 None => Ty::unit(),
             };
-            return Ok(ps == aps && r == ar && (*mutable || !amut));
+            return Ok(ps == aps && r == ar && akind <= *bound_kind);
         }
         let tid = self.resolve_trait_ref(b, module)?;
         Ok(self.implements(arg, tid))
     }
 
     fn fn_bound_str(&mut self, b: &TypeExpr, module: ModId, env: &Env) -> Result<String> {
-        let TypeKind::FnTrait(mutable, ps, r) = &b.kind else {
+        let TypeKind::FnTrait(bound_kind, ps, r) = &b.kind else {
             return Ok(String::new());
         };
         let ps: Vec<String> = ps
@@ -1623,7 +1703,7 @@ impl Checker {
         };
         Ok(format!(
             "{}({}) -> {r}",
-            if *mutable { "FnMut" } else { "Fn" },
+            kind_name(*bound_kind),
             ps.join(", ")
         ))
     }
@@ -1724,6 +1804,7 @@ impl Checker {
         // Borrow checking runs once every function is known, so calls can use
         // what each callee's result borrows from.
         self.summaries = crate::borrowck::summaries(self, &self.out_funcs);
+        self.storing = crate::borrowck::storing_fns(&self.out_funcs);
         for i in 0..self.out_funcs.len() {
             if let Err(ds) = crate::borrowck::check(self, &self.out_funcs[i]) {
                 self.diags.extend(ds);
@@ -1808,6 +1889,14 @@ impl Checker {
 
 fn fid_is_main(f: &FnDef) -> bool {
     f.decl.name.name == "main" && f.owner == FnOwner::Free
+}
+
+fn kind_name(k: u8) -> &'static str {
+    match k {
+        0 => "Fn",
+        1 => "FnMut",
+        _ => "FnOnce",
+    }
 }
 
 /// Map generic parameter names to concrete arguments.

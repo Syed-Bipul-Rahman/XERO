@@ -1,0 +1,95 @@
+// OS layer for Unix-like systems (Linux, macOS): POSIX threads.
+// The compiler picks this file as `std.sys` for Linux and macOS targets.
+
+module std.sys
+
+import std.mem
+
+unsafe fn pthread_create(thread: *usize, attr: *u8, start: fn(*u8) -> *u8, arg: *u8) -> i32
+unsafe fn pthread_join(thread: usize, result: *u8) -> i32
+unsafe fn pthread_mutex_init(m: *u8, attr: *u8) -> i32
+unsafe fn pthread_mutex_lock(m: *u8) -> i32
+unsafe fn pthread_mutex_unlock(m: *u8) -> i32
+unsafe fn pthread_mutex_destroy(m: *u8) -> i32
+unsafe fn pthread_cond_init(c: *u8, attr: *u8) -> i32
+unsafe fn pthread_cond_wait(c: *u8, m: *u8) -> i32
+unsafe fn pthread_cond_signal(c: *u8) -> i32
+unsafe fn pthread_cond_broadcast(c: *u8) -> i32
+unsafe fn pthread_cond_destroy(c: *u8) -> i32
+unsafe fn nanosleep(req: *i64, rem: *i64) -> i32
+unsafe fn sched_yield() -> i32
+
+pub const THREADS: bool = true
+
+/// Start a thread running `entry(arg)`; returns its handle.
+pub unsafe fn thread_start(entry: fn(*u8) -> *u8, arg: *u8) -> usize {
+    let mut t: usize = 0
+    if pthread_create(&mut t as *usize, 0 as *u8, entry, arg) != 0 {
+        panic("could not start a thread")
+    }
+    t
+}
+
+/// Wait for a thread to finish.
+pub unsafe fn thread_join(t: usize) {
+    pthread_join(t, 0 as *u8)
+}
+
+// Locks and condition variables live in their own allocation: the OS
+// objects must not move once initialized. 64 bytes fits every platform.
+
+pub unsafe fn lock_new() -> *u8 {
+    let m = mem.alloc<[u64; 8]>(1) as *u8
+    pthread_mutex_init(m, 0 as *u8)
+    m
+}
+
+pub unsafe fn lock_acquire(m: *u8) {
+    pthread_mutex_lock(m)
+}
+
+pub unsafe fn lock_release(m: *u8) {
+    pthread_mutex_unlock(m)
+}
+
+pub unsafe fn lock_free(m: *u8) {
+    pthread_mutex_destroy(m)
+    mem.dealloc(m)
+}
+
+pub unsafe fn cond_new() -> *u8 {
+    let c = mem.alloc<[u64; 8]>(1) as *u8
+    pthread_cond_init(c, 0 as *u8)
+    c
+}
+
+/// Atomically release `m`, wait for a notification, and re-acquire `m`.
+pub unsafe fn cond_wait(c: *u8, m: *u8) {
+    pthread_cond_wait(c, m)
+}
+
+pub unsafe fn cond_notify_one(c: *u8) {
+    pthread_cond_signal(c)
+}
+
+pub unsafe fn cond_notify_all(c: *u8) {
+    pthread_cond_broadcast(c)
+}
+
+pub unsafe fn cond_free(c: *u8) {
+    pthread_cond_destroy(c)
+    mem.dealloc(c)
+}
+
+pub fn sleep_ms(ms: u64) {
+    let ts = [(ms / 1000) as i64, ((ms % 1000) * 1000000) as i64]
+    unsafe {
+        nanosleep(&ts as *i64, 0 as *i64)
+    }
+}
+
+pub fn yield_now() {
+    unsafe {
+        sched_yield()
+    }
+}

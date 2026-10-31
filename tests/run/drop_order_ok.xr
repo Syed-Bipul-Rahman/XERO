@@ -1,0 +1,28 @@
+// Borrowing containers whose destructors don't read the borrows are fine,
+// and declaring the borrowed value first is always fine.
+
+struct Logger {
+    msg: &str
+}
+
+impl Logger {
+    drop {
+        println(self.msg)
+    }
+}
+
+fn main() {
+    let mut names: Vec<&str> = Vec.new()
+    let a = String.from("ada")
+    names.push(a.as_str())
+    println(names.len())
+
+    let text = String.from("bye")
+    let mut keep: Vec<Logger> = Vec.new()
+    keep.push(Logger { msg: text.as_str() })
+    println("end")
+}
+// output:
+// 1
+// end
+// bye

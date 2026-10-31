@@ -1,0 +1,35 @@
+// Threads without data races: scoped borrows, move, Mutex and Channel.
+
+import std.sync
+
+fn main() {
+    let data = [1, 2, 3, 4]
+    let mut evens: Vec<i32> = Vec.new()
+
+    let sum = spawn { data[0] + data[1] + data[2] + data[3] }   // borrows `data`
+    let fill = spawn {                                          // borrows `evens` exclusively
+        for x in data {
+            if x % 2 == 0 { evens.push(x) }
+        }
+    }
+    println(sum.join())       // 10
+    fill.join()
+    println(evens.len())      // 2
+
+    let owned = String.from("moved in")
+    let t = spawn move { owned.len() }   // the thread owns `owned`
+    println(t.join())
+
+    let counter = sync.Mutex.new(0)
+    let jobs: sync.Channel<i32> = sync.Channel.new()
+    {
+        let worker = spawn {
+            while jobs.recv() is Some(n) {
+                counter.with(|c| *c += n)
+            }
+        }
+        for n in 1..=10 { jobs.send(n) }
+        jobs.close()
+    }                         // `worker` is joined here
+    println(*counter.lock().get())   // 55
+}

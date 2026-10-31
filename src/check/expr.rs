@@ -362,11 +362,26 @@ impl<'a> FnCx<'a> {
     fn defaulted_expr(&self, v: &X) -> Option<Span> {
         match &v.kind {
             K::Use(Place::Local(l), _) => self.defaulted.get(l).copied(),
+            K::Use(p @ Place::Index(..), _) => self.place_default_key(p),
             K::Use(p, _) if self.captures.is_some() => self.capture_key(p),
             K::Binary(op, a, b) if !op.is_comparison() && !matches!(op, BinOp::And | BinOp::Or) => {
                 self.defaulted_expr(a).or_else(|| self.defaulted_expr(b))
             }
             K::Unary(UnOp::Neg, a) => self.defaulted_expr(a),
+            _ => None,
+        }
+    }
+
+    /// The literal key of a variable (or an element of an array variable,
+    /// or a captured variable) typed by a defaulted literal.
+    fn place_default_key(&self, p: &Place) -> Option<Span> {
+        let root = match p {
+            Place::Index(b, _) => &**b,
+            p => p,
+        };
+        match root {
+            Place::Local(l) => self.defaulted.get(l).copied(),
+            other if self.captures.is_some() => self.capture_key(other),
             _ => None,
         }
     }
@@ -458,8 +473,9 @@ impl<'a> FnCx<'a> {
     /// `expr_as` for a value stored into `place`: if the place is a variable
     /// typed by a defaulted literal, a differently typed value retypes it.
     fn expr_as_into(&mut self, place: &Place, e: &ast::Expr, expected: &Ty) -> Result<X> {
-        if let Place::Local(l) = place {
-            if let Some(k) = self.defaulted.get(l).copied() {
+        // `arr[i] = v` where `arr` came from a literal array: retype its elements
+        {
+            if let Some(k) = self.place_default_key(place) {
                 let v = self.expr(e, Some(expected))?;
                 if v.ty != *expected && !v.ty.is_never() {
                     let found = v.ty.clone();
@@ -544,15 +560,26 @@ impl<'a> FnCx<'a> {
                     } else {
                         None
                     };
+                    // `[0; 4]` / `[1, 2]`: the element literals can be retyped too
+                    let array_key = if declared.is_none() && literal_array(init) {
+                        Some(init.span)
+                    } else {
+                        None
+                    };
                     let hinted = literal_key.and_then(|k| self.overrides.get(&k).cloned());
-                    let v = match (&declared, &hinted) {
-                        (Some(t), _) | (None, Some(t)) => {
+                    let elem_hint = array_key.and_then(|k| self.overrides.get(&k).cloned());
+                    let v = match (&declared, &hinted, &elem_hint) {
+                        (Some(t), _, _) | (None, Some(t), _) => {
                             let t = t.clone();
                             let v = self.expr(init, Some(&t))?;
                             self.coerce(v, &t, init.span)?
                         }
-                        (None, None) => self.expr(init, None)?,
+                        (None, None, Some(e)) => {
+                            self.expr(init, Some(&Ty::Array(Box::new(e.clone()), 0)))?
+                        }
+                        (None, None, None) => self.expr(init, None)?,
                     };
+                    let literal_key = literal_key.or(array_key);
                     let default_key = match literal_key {
                         Some(k) => Some(k),
                         None if declared.is_none() => self.defaulted_expr(&v),
@@ -984,6 +1011,46 @@ impl<'a> FnCx<'a> {
                 Ok(x(K::Return(Some(Box::new(val))), Ty::Never, span))
             }
             E::Closure(c) => self.closure_expr(c, expected, span),
+            E::Spawn(is_move, body) => {
+                // `spawn { body }` is `std.thread.start(|| body)`
+                let fid = self.ck.find_module("std.thread").and_then(|m| {
+                    match self.ck.modules[m as usize]
+                        .scope
+                        .get("start")
+                        .map(|b| b.def)
+                    {
+                        Some(Def::Fn(f)) => Some(f),
+                        _ => None,
+                    }
+                });
+                let Some(fid) = fid else {
+                    return self.err(
+                        span,
+                        "`spawn` needs the standard library module `std.thread`",
+                    );
+                };
+                let closure = ast::Expr {
+                    kind: E::Closure(Box::new(ast::ClosureExpr {
+                        params: Vec::new(),
+                        ret: None,
+                        body: ast::Expr {
+                            kind: E::Block(body.clone()),
+                            span: body.span,
+                        },
+                        is_move: *is_move,
+                    })),
+                    span,
+                };
+                self.fn_call(
+                    fid,
+                    Vec::new(),
+                    None,
+                    std::slice::from_ref(&closure),
+                    expected,
+                    span,
+                    span,
+                )
+            }
             E::Catch(inner, binding, handler) => {
                 self.catch_expr(inner, binding.as_ref(), handler, expected, span)
             }
@@ -1219,6 +1286,36 @@ impl<'a> FnCx<'a> {
         }
         self.ck.use_static(sid);
         Ok((Place::Static(sym, mutable), ty))
+    }
+
+    /// The value being matched: a place, or a temporary held in a hidden
+    /// local (so patterns may move out of it: `while ch.recv() is Some(v)`).
+    fn scrutinee(&mut self, e: &ast::Expr) -> Result<(Option<xir::Stmt>, Place, Ty)> {
+        if let Some((p, t)) = self.place(e)? {
+            return Ok((None, p, t));
+        }
+        let v = self.expr(e, None)?;
+        let t = v.ty.clone();
+        let tmp = self.synthetic("scrutinee", t.clone(), e.span);
+        Ok((Some(xir::Stmt::Let(tmp, v)), Place::Local(tmp), t))
+    }
+
+    fn with_pre(&self, pre: Option<xir::Stmt>, m: X) -> X {
+        match pre {
+            None => m,
+            Some(s) => {
+                let (ty, span) = (m.ty.clone(), m.span);
+                x(
+                    K::Block(xir::Block {
+                        stmts: vec![s],
+                        tail: Some(Box::new(m)),
+                        scope: Vec::new(),
+                    }),
+                    ty,
+                    span,
+                )
+            }
+        }
     }
 
     pub fn place_or_temp(&mut self, e: &ast::Expr) -> Result<(Place, Ty)> {
@@ -2404,6 +2501,60 @@ impl<'a> FnCx<'a> {
                     ))
                 }
             }
+            IntrinsicFn::Fence => {
+                want(self, 0)?;
+                Ok(x(
+                    K::Intrinsic(xir::Intrinsic::Fence, Vec::new()),
+                    Ty::unit(),
+                    span,
+                ))
+            }
+            IntrinsicFn::AtomicLoad
+            | IntrinsicFn::AtomicStore
+            | IntrinsicFn::AtomicSwap
+            | IntrinsicFn::AtomicAdd
+            | IntrinsicFn::AtomicSub
+            | IntrinsicFn::AtomicCas => {
+                let n = match i {
+                    IntrinsicFn::AtomicLoad => 1,
+                    IntrinsicFn::AtomicCas => 3,
+                    _ => 2,
+                };
+                want(self, n)?;
+                self.require_unsafe(span, "atomic access through a raw pointer")?;
+                let exp = targs.first().map(|t| Ty::Ptr(Box::new(t.clone())));
+                let p = match &exp {
+                    Some(t) => self.expr_as(&args[0], t)?,
+                    None => self.expr(&args[0], None)?,
+                };
+                let Ty::Ptr(elem) = p.ty.clone() else {
+                    return self.err(args[0].span, "expected a raw pointer");
+                };
+                let arith = matches!(i, IntrinsicFn::AtomicAdd | IntrinsicFn::AtomicSub);
+                if !(elem.is_int() || (!arith && matches!(*elem, Ty::Ptr(_)))) {
+                    return self.err(
+                        span,
+                        format!(
+                            "atomics work on integers{}; found `{}`",
+                            if arith { "" } else { " and raw pointers" },
+                            self.ts(&elem)
+                        ),
+                    );
+                }
+                let mut xs = vec![p];
+                for a in &args[1..] {
+                    xs.push(self.expr_as(a, &elem)?);
+                }
+                let (k, ty) = match i {
+                    IntrinsicFn::AtomicLoad => (xir::Intrinsic::AtomicLoad, *elem),
+                    IntrinsicFn::AtomicStore => (xir::Intrinsic::AtomicStore, Ty::unit()),
+                    IntrinsicFn::AtomicSwap => (xir::Intrinsic::AtomicRmw("xchg"), *elem),
+                    IntrinsicFn::AtomicAdd => (xir::Intrinsic::AtomicRmw("add"), *elem),
+                    IntrinsicFn::AtomicSub => (xir::Intrinsic::AtomicRmw("sub"), *elem),
+                    _ => (xir::Intrinsic::AtomicCas, *elem),
+                };
+                Ok(x(K::Intrinsic(k, xs), ty, span))
+            }
             IntrinsicFn::PtrWrite | IntrinsicFn::VolatileStore => {
                 want(self, 2)?;
                 self.require_unsafe(span, "writing through a raw pointer")?;
@@ -2425,6 +2576,9 @@ impl<'a> FnCx<'a> {
             }
             IntrinsicFn::Forget => {
                 want(self, 1)?;
+                // leaking a value skips its destructor; scoped threads rely on
+                // their handles being joined on drop, so this must be explicit
+                self.require_unsafe(span, "`forget` (skipping a destructor)")?;
                 let v = self.expr(&args[0], targs.first())?;
                 Ok(x(
                     K::Intrinsic(xir::Intrinsic::Forget, vec![v]),
@@ -2961,7 +3115,7 @@ impl<'a> FnCx<'a> {
         expected: Option<&Ty>,
         span: Span,
     ) -> Result<X> {
-        let (p, sty) = self.place_or_temp(scrut)?;
+        let (pre, p, sty) = self.scrutinee(scrut)?;
         let ty_target = if els.is_none() {
             Some(Ty::unit())
         } else {
@@ -3027,7 +3181,7 @@ impl<'a> FnCx<'a> {
             },
         ];
         self.check_match_moves(&p, &arms, span)?;
-        Ok(x(K::Match(p, arms), ty, span))
+        Ok(self.with_pre(pre, x(K::Match(p, arms), ty, span)))
     }
 
     fn while_loop(&mut self, cond: &ast::Expr, body: &ast::Block, span: Span) -> Result<X> {
@@ -3043,7 +3197,7 @@ impl<'a> FnCx<'a> {
             if let E::Is(scrut, pat) = &cond.kind {
                 if pattern_binds(pat) {
                     // loop { match scrut { pat => body, _ => break } }
-                    let (p, sty) = self.place_or_temp(scrut)?;
+                    let (pre, p, sty) = self.scrutinee(scrut)?;
                     self.push_scope();
                     let mut binds = Vec::new();
                     let xp = self.pattern(pat, &sty, BindMode::Value, &mut binds);
@@ -3085,7 +3239,7 @@ impl<'a> FnCx<'a> {
                         },
                     ];
                     self.check_match_moves(&p, &arms, span)?;
-                    return Ok(x(K::Match(p, arms), Ty::unit(), span));
+                    return Ok(self.with_pre(pre, x(K::Match(p, arms), Ty::unit(), span)));
                 }
             }
             let c = self.expr_as(cond, &Ty::Bool)?;
@@ -3476,7 +3630,7 @@ impl<'a> FnCx<'a> {
         expected: Option<&Ty>,
         span: Span,
     ) -> Result<X> {
-        let (p, sty) = self.place_or_temp(scrut)?;
+        let (pre, p, sty) = self.scrutinee(scrut)?;
         if arms.is_empty() && !matches!(&sty, Ty::Never) {
             return self.err(span, "`match` needs at least one arm");
         }
@@ -3547,7 +3701,7 @@ impl<'a> FnCx<'a> {
         }
         super::exhaust::check(self.ck, &sty, &out, span)?;
         self.check_match_moves(&p, &out, span)?;
-        Ok(x(K::Match(p, out), ty, span))
+        Ok(self.with_pre(pre, x(K::Match(p, out), ty, span)))
     }
 
     /// Moving bindings require the scrutinee to be an owned local.
@@ -3819,6 +3973,15 @@ impl<'a> FnCx<'a> {
             val_ty,
             span,
         ))
+    }
+}
+
+/// An array literal of untyped literals: `[0; 4]`, `[1, 2, 3]`.
+fn literal_array(e: &ast::Expr) -> bool {
+    match &e.kind {
+        E::ArrayRepeat(v, _) => untyped_literal(v),
+        E::Array(items) => !items.is_empty() && items.iter().all(untyped_literal),
+        _ => false,
     }
 }
 

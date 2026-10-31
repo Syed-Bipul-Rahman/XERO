@@ -1,0 +1,41 @@
+// OS layer for targets without an operating system (bare metal, wasm32).
+// There is one thread of execution: locks are no-ops, and starting a
+// thread is an error.
+
+module std.sys
+
+pub const THREADS: bool = false
+
+pub unsafe fn thread_start(entry: fn(*u8) -> *u8, arg: *u8) -> usize {
+    panic("threads are not available on this target")
+}
+
+pub unsafe fn thread_join(t: usize) {}
+
+pub unsafe fn lock_new() -> *u8 {
+    1 as *u8
+}
+
+pub unsafe fn lock_acquire(m: *u8) {}
+
+pub unsafe fn lock_release(m: *u8) {}
+
+pub unsafe fn lock_free(m: *u8) {}
+
+pub unsafe fn cond_new() -> *u8 {
+    1 as *u8
+}
+
+pub unsafe fn cond_wait(c: *u8, m: *u8) {
+    panic("waiting would block forever: there is only one thread on this target")
+}
+
+pub unsafe fn cond_notify_one(c: *u8) {}
+
+pub unsafe fn cond_notify_all(c: *u8) {}
+
+pub unsafe fn cond_free(c: *u8) {}
+
+pub fn sleep_ms(ms: u64) {}
+
+pub fn yield_now() {}

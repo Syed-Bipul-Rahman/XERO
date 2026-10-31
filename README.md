@@ -100,7 +100,7 @@ fn main() {
 | Pillar | How Xero delivers it |
 |---|---|
 | **Performance** | Native code via LLVM · no GC · monomorphized generics · static dispatch · structs laid out like C · predictable destruction · no hidden allocations |
-| **Safety** | Ownership and moves · borrowing (`&T` / `&mut T`) with aliasing-XOR-mutation · no dangling references · no null (`Option<T>`) · exhaustive `match` · bounds-checked indexing · `unsafe` as an explicit escape hatch · `static mut` access requires `unsafe` |
+| **Safety** | Data races are compile errors · ownership and moves · borrowing (`&T` / `&mut T`) with aliasing-XOR-mutation · no dangling references · no null (`Option<T>`) · exhaustive `match` · bounds-checked indexing · `unsafe` as an explicit escape hatch · `static mut` access requires `unsafe` |
 | **Simplicity** | Small keyword set · no semicolons needed · type inference for locals · `struct` + `trait` + `impl` instead of classes and inheritance · errors as values (`Result`, `try`, `throw`, `catch`) |
 
 Xero takes ideas from four languages:
@@ -166,6 +166,7 @@ xeroc targets                       list supported targets
 | [`examples/hello.xr`](examples/hello.xr) | the smallest program |
 | [`examples/tour.xr`](examples/tour.xr) | a tour of the language |
 | [`examples/ownership.xr`](examples/ownership.xr) | moves, borrows, RAII |
+| [`examples/concurrency.xr`](examples/concurrency.xr) | threads, `Mutex`, `Channel`, no data races |
 | [`examples/sieve.xr`](examples/sieve.xr) | CPU-bound code (within about 10% of C at `-O3`) |
 | [`examples/wasm_math.xr`](examples/wasm_math.xr) | a 447-byte WebAssembly module |
 | [`examples/baremetal.xr`](examples/baremetal.xr) | no OS: MMIO with `volatile_load`/`volatile_store`, inline asm |
@@ -183,14 +184,16 @@ on `static mut`, non-exhaustive matches and more.
 
 ## Status
 
-Xero 0.2 is a working compiler. Language features:
+Xero 0.3 is a working compiler. Language features:
 
 * **Types:** structs and enums (which can hold references), enums with data,
-  closures, and function pointers.
+  closures (`Fn`, `FnMut`, `FnOnce`), and function pointers.
 * **Traits and generics:** traits with default methods and supertraits,
   operator traits, and generics with bounds.
 * **Control flow:** pattern matching with exhaustiveness checking, slicing,
   and errors as values.
+* **Concurrency:** threads with `spawn`, where data races are compile errors,
+  plus `Mutex`, `Channel` and atomics.
 
 Compiler and runtime support:
 
@@ -199,8 +202,7 @@ Compiler and runtime support:
 * **Low level:** unsafe code, raw pointers, C FFI, inline assembly, and
   cross-compilation.
 
-The concurrency keywords (`spawn`, `async`, `await`) are reserved and are the
-next major milestone; see the [roadmap](docs/ROADMAP.md) and the
+`async` and `await` are reserved; see the [roadmap](docs/ROADMAP.md) and the
 [changelog](CHANGELOG.md).
 
 ```console

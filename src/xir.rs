@@ -172,6 +172,14 @@ pub enum Intrinsic {
     /// Memory-mapped I/O: loads/stores the optimizer may not remove or merge.
     VolatileLoad,
     VolatileStore,
+    /// Sequentially consistent atomics on integers and pointers.
+    AtomicLoad,
+    AtomicStore,
+    /// Read-modify-write returning the old value: "xchg", "add" or "sub".
+    AtomicRmw(&'static str),
+    /// Compare-and-swap `(p, expected, new)` returning the old value.
+    AtomicCas,
+    Fence,
 }
 
 #[derive(Clone, Debug)]

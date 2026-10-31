@@ -1,0 +1,6 @@
+fn main() {
+    let mut total = 0
+    let a = spawn { total += 1 }
+    let b = spawn { total += 2 }
+}
+// error: cannot borrow `total` because it is mutably borrowed

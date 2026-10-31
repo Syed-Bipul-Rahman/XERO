@@ -1,0 +1,9 @@
+import std.thread
+
+fn main() {
+    let mut v: Vec<i32> = Vec.new()
+    let t = spawn { v.push(1) }
+    println(v.len())
+    t.join()
+}
+// error: cannot borrow `v` because it is mutably borrowed
