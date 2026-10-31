@@ -657,6 +657,15 @@ impl<'a> FnCx<'a> {
                 } else {
                     ty.clone()
                 };
+                if self.overloadable(*op, &ty) {
+                    // `a += b` on a user type is `a = a + b`
+                    if !self.ck.is_copy(&ty) {
+                        return self.err(span, format!("`{}=` on the move-only type `{}` is not supported yet; write `x = x {} y`", op.symbol(), self.ts(&ty), op.symbol()));
+                    }
+                    let cur = x(K::Use(p.clone(), UseKind::Copy), ty.clone(), lhs.span);
+                    let v = self.overloaded_arith(*op, cur, rhs, span)?;
+                    return Ok(x(K::Assign(p, Box::new(v)), Ty::unit(), span));
+                }
                 let ok = match op {
                     BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
                         ty.is_numeric()
@@ -2372,6 +2381,10 @@ impl<'a> FnCx<'a> {
             }
         }
         let v = self.expr(inner, expected)?;
+        if op == UnOp::Neg && self.overloadable(BinOp::Sub, &v.ty) {
+            let t = v.ty.clone();
+            return self.call_operator("Neg", "neg", "-", &t, vec![v], span);
+        }
         let ok = match op {
             UnOp::Neg => matches!(v.ty, Ty::Float(_)) || matches!(v.ty, Ty::Int(it) if it.signed()),
             UnOp::Not => v.ty == Ty::Bool || v.ty.is_int(),
@@ -2457,7 +2470,25 @@ impl<'a> FnCx<'a> {
             };
             (l, r)
         } else {
-            let l = self.expr(a, arith_expected)?;
+            // user types dispatch to the prelude's operator traits
+            let l = match self.place(a)? {
+                Some((p, t)) if op.is_comparison() && self.overloadable(op, &t) => {
+                    let lref = x(K::Borrow(p, false), Ty::reference(t, false), a.span);
+                    return self.overloaded_compare(op, lref, b, span);
+                }
+                Some((p, t)) => {
+                    self.check_sized(&t, a.span)?;
+                    self.use_place(p, t, a.span)
+                }
+                None => self.expr(a, arith_expected)?,
+            };
+            if self.overloadable(op, &l.ty) {
+                if op.is_comparison() {
+                    let lref = self.borrow_value(l, false);
+                    return self.overloaded_compare(op, lref, b, span);
+                }
+                return self.overloaded_arith(op, l, b, span);
+            }
             let lt = l.ty.clone();
             let r = match &lt {
                 Ty::Ptr(_) if matches!(op, BinOp::Add | BinOp::Sub) => {
@@ -2550,6 +2581,82 @@ impl<'a> FnCx<'a> {
             BinOp::And | BinOp::Or => unreachable!(),
         };
         Ok(x(K::Binary(op, Box::new(l), Box::new(r)), ty, span))
+    }
+
+    /// Does `op` on values of type `t` go through an operator trait?
+    fn overloadable(&self, op: BinOp, t: &Ty) -> bool {
+        match t {
+            Ty::Adt(..) => !(self.is_fieldless_enum(t) && matches!(op, BinOp::Eq | BinOp::Ne)),
+            Ty::Tuple(ts) => !ts.is_empty(),
+            Ty::Array(..) => true,
+            _ => false,
+        }
+    }
+
+    /// Call operator-trait method `method` of prelude trait `trait_name` on `self_ty`.
+    fn call_operator(&mut self, trait_name: &str, method: &str, symbol: &str, self_ty: &Ty, args: Vec<X>, span: Span) -> Result<X> {
+        let tid = self.ck.prelude.and_then(|p| match self.ck.modules[p as usize].scope.get(trait_name).map(|b| b.def) {
+            Some(Def::Trait(t)) => Some(t),
+            _ => None,
+        });
+        let Some(tid) = tid else {
+            return self.err(span, format!("operator `{symbol}` needs the prelude trait `{trait_name}`"));
+        };
+        let Some((iid, iargs)) = self.ck.find_trait_impl(self_ty, tid) else {
+            let tn = self.ts(self_ty);
+            let sig = match trait_name {
+                "Eq" => format!("fn eq(&self, other: &{tn}) -> bool"),
+                "Ord" => format!("fn cmp(&self, other: &{tn}) -> Ordering"),
+                "Neg" => format!("fn neg(self) -> {tn}"),
+                _ => format!("fn {method}(self, other: {tn}) -> {tn}"),
+            };
+            return self.err(span, format!("operator `{symbol}` is not defined for `{tn}`; implement `{trait_name}` for it:  impl {trait_name} for {tn} {{ {sig} {{ ... }} }}"));
+        };
+        if let Some(&fid) = self.ck.impls[iid as usize].methods.get(method) {
+            return self.invoke(fid, Vec::new(), Some(iargs), None, args, &[], None, span, span);
+        }
+        match self.ck.traits[tid as usize].defaults.get(method).copied() {
+            Some(fid) => self.invoke(fid, Vec::new(), None, Some(self_ty.clone()), args, &[], None, span, span),
+            None => self.err(span, format!("trait `{trait_name}` has no method `{method}`")),
+        }
+    }
+
+    /// `a == b`, `a < b`, ... on user types: `Eq.eq(&a, &b)`, `Ord.lt(&a, &b)`, ...
+    fn overloaded_compare(&mut self, op: BinOp, lref: X, b: &ast::Expr, span: Span) -> Result<X> {
+        let Ty::Ref(t, _) = lref.ty.clone() else { unreachable!() };
+        let t = *t;
+        let rref = match self.place(b)? {
+            Some((p, rt)) => x(K::Borrow(p, false), Ty::reference(rt, false), b.span),
+            None => {
+                let v = self.expr(b, Some(&t))?;
+                self.borrow_value(v, false)
+            }
+        };
+        let rref = self.coerce(rref, &Ty::reference(t.clone(), false), b.span)?;
+        let (tr, m) = match op {
+            BinOp::Eq => ("Eq", "eq"),
+            BinOp::Ne => ("Eq", "ne"),
+            BinOp::Lt => ("Ord", "lt"),
+            BinOp::Le => ("Ord", "le"),
+            BinOp::Gt => ("Ord", "gt"),
+            _ => ("Ord", "ge"),
+        };
+        self.call_operator(tr, m, op.symbol(), &t, vec![lref, rref], span)
+    }
+
+    /// `a + b`, ... on user types: `Add.add(a, b)`, ... (operands are moved).
+    fn overloaded_arith(&mut self, op: BinOp, l: X, b: &ast::Expr, span: Span) -> Result<X> {
+        let t = l.ty.clone();
+        let r = self.expr_as(b, &t)?;
+        let (tr, m) = match op {
+            BinOp::Add => ("Add", "add"),
+            BinOp::Sub => ("Sub", "sub"),
+            BinOp::Mul => ("Mul", "mul"),
+            BinOp::Div => ("Div", "div"),
+            BinOp::Rem => ("Rem", "rem"),
+            _ => return self.err(span, format!("operator `{}` cannot be overloaded", op.symbol())),
+        };
+        self.call_operator(tr, m, op.symbol(), &t, vec![l, r], span)
     }
 
     fn is_fieldless_enum(&self, t: &Ty) -> bool {

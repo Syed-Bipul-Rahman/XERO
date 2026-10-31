@@ -1,0 +1,7 @@
+copy struct P { x: i32 }
+
+fn main() {
+    let a = P { x: 1 }
+    let c = a + a
+}
+// error: operator `+` is not defined for `P`; implement `Add` for it

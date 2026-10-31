@@ -115,6 +115,472 @@ impl<T, E> Result<T, E> {
     }
 }
 
+// ------------------------------------------------------------ operators
+//
+// Operators on your own types call these traits, dispatched statically:
+//   a == b, a != b        Eq.eq / Eq.ne      (operands are borrowed)
+//   a < b, <=, >, >=      Ord.lt / le / gt / ge, all derived from `cmp`
+//   a + b, -, *, /, %     Add.add, Sub.sub, Mul.mul, Div.div, Rem.rem (moved)
+//   -a                    Neg.neg
+// Built-in numbers, bool and pointers never go through them.
+
+pub copy enum Ordering {
+    Less
+    Equal
+    Greater
+}
+
+pub trait Eq {
+    fn eq(&self, other: &Self) -> bool
+
+    fn ne(&self, other: &Self) -> bool {
+        !self.eq(other)
+    }
+}
+
+pub trait Ord extends Eq {
+    fn cmp(&self, other: &Self) -> Ordering
+
+    fn lt(&self, other: &Self) -> bool {
+        match self.cmp(other) {
+            Ordering.Less => true
+            _ => false
+        }
+    }
+
+    fn le(&self, other: &Self) -> bool {
+        match self.cmp(other) {
+            Ordering.Greater => false
+            _ => true
+        }
+    }
+
+    fn gt(&self, other: &Self) -> bool {
+        match self.cmp(other) {
+            Ordering.Greater => true
+            _ => false
+        }
+    }
+
+    fn ge(&self, other: &Self) -> bool {
+        match self.cmp(other) {
+            Ordering.Less => false
+            _ => true
+        }
+    }
+}
+
+pub trait Add {
+    fn add(self, other: Self) -> Self
+}
+
+pub trait Sub {
+    fn sub(self, other: Self) -> Self
+}
+
+pub trait Mul {
+    fn mul(self, other: Self) -> Self
+}
+
+pub trait Div {
+    fn div(self, other: Self) -> Self
+}
+
+pub trait Rem {
+    fn rem(self, other: Self) -> Self
+}
+
+pub trait Neg {
+    fn neg(self) -> Self
+}
+
+/// Three-way comparison of anything with `<` and `>`: numbers or `Ord` types.
+pub fn compare<T>(a: T, b: T) -> Ordering {
+    if a < b {
+        Ordering.Less
+    } else if a > b {
+        Ordering.Greater
+    } else {
+        Ordering.Equal
+    }
+}
+
+
+// Built-in types implement the operator traits too, so generic code with
+// bounds like `T: Ord` or `T: Add` accepts numbers.
+
+impl Eq for i8 {
+    fn eq(&self, other: &i8) -> bool { *self == *other }
+}
+
+impl Eq for i16 {
+    fn eq(&self, other: &i16) -> bool { *self == *other }
+}
+
+impl Eq for i32 {
+    fn eq(&self, other: &i32) -> bool { *self == *other }
+}
+
+impl Eq for i64 {
+    fn eq(&self, other: &i64) -> bool { *self == *other }
+}
+
+impl Eq for isize {
+    fn eq(&self, other: &isize) -> bool { *self == *other }
+}
+
+impl Eq for u8 {
+    fn eq(&self, other: &u8) -> bool { *self == *other }
+}
+
+impl Eq for u16 {
+    fn eq(&self, other: &u16) -> bool { *self == *other }
+}
+
+impl Eq for u32 {
+    fn eq(&self, other: &u32) -> bool { *self == *other }
+}
+
+impl Eq for u64 {
+    fn eq(&self, other: &u64) -> bool { *self == *other }
+}
+
+impl Eq for usize {
+    fn eq(&self, other: &usize) -> bool { *self == *other }
+}
+
+impl Eq for f32 {
+    fn eq(&self, other: &f32) -> bool { *self == *other }
+}
+
+impl Eq for f64 {
+    fn eq(&self, other: &f64) -> bool { *self == *other }
+}
+
+impl Eq for bool {
+    fn eq(&self, other: &bool) -> bool { *self == *other }
+}
+
+impl Ord for i8 {
+    fn cmp(&self, other: &i8) -> Ordering { compare(*self, *other) }
+}
+
+impl Add for i8 {
+    fn add(self, other: i8) -> i8 { self + other }
+}
+
+impl Sub for i8 {
+    fn sub(self, other: i8) -> i8 { self - other }
+}
+
+impl Mul for i8 {
+    fn mul(self, other: i8) -> i8 { self * other }
+}
+
+impl Div for i8 {
+    fn div(self, other: i8) -> i8 { self / other }
+}
+
+impl Rem for i8 {
+    fn rem(self, other: i8) -> i8 { self % other }
+}
+
+impl Ord for i16 {
+    fn cmp(&self, other: &i16) -> Ordering { compare(*self, *other) }
+}
+
+impl Add for i16 {
+    fn add(self, other: i16) -> i16 { self + other }
+}
+
+impl Sub for i16 {
+    fn sub(self, other: i16) -> i16 { self - other }
+}
+
+impl Mul for i16 {
+    fn mul(self, other: i16) -> i16 { self * other }
+}
+
+impl Div for i16 {
+    fn div(self, other: i16) -> i16 { self / other }
+}
+
+impl Rem for i16 {
+    fn rem(self, other: i16) -> i16 { self % other }
+}
+
+impl Ord for i32 {
+    fn cmp(&self, other: &i32) -> Ordering { compare(*self, *other) }
+}
+
+impl Add for i32 {
+    fn add(self, other: i32) -> i32 { self + other }
+}
+
+impl Sub for i32 {
+    fn sub(self, other: i32) -> i32 { self - other }
+}
+
+impl Mul for i32 {
+    fn mul(self, other: i32) -> i32 { self * other }
+}
+
+impl Div for i32 {
+    fn div(self, other: i32) -> i32 { self / other }
+}
+
+impl Rem for i32 {
+    fn rem(self, other: i32) -> i32 { self % other }
+}
+
+impl Ord for i64 {
+    fn cmp(&self, other: &i64) -> Ordering { compare(*self, *other) }
+}
+
+impl Add for i64 {
+    fn add(self, other: i64) -> i64 { self + other }
+}
+
+impl Sub for i64 {
+    fn sub(self, other: i64) -> i64 { self - other }
+}
+
+impl Mul for i64 {
+    fn mul(self, other: i64) -> i64 { self * other }
+}
+
+impl Div for i64 {
+    fn div(self, other: i64) -> i64 { self / other }
+}
+
+impl Rem for i64 {
+    fn rem(self, other: i64) -> i64 { self % other }
+}
+
+impl Ord for isize {
+    fn cmp(&self, other: &isize) -> Ordering { compare(*self, *other) }
+}
+
+impl Add for isize {
+    fn add(self, other: isize) -> isize { self + other }
+}
+
+impl Sub for isize {
+    fn sub(self, other: isize) -> isize { self - other }
+}
+
+impl Mul for isize {
+    fn mul(self, other: isize) -> isize { self * other }
+}
+
+impl Div for isize {
+    fn div(self, other: isize) -> isize { self / other }
+}
+
+impl Rem for isize {
+    fn rem(self, other: isize) -> isize { self % other }
+}
+
+impl Ord for u8 {
+    fn cmp(&self, other: &u8) -> Ordering { compare(*self, *other) }
+}
+
+impl Add for u8 {
+    fn add(self, other: u8) -> u8 { self + other }
+}
+
+impl Sub for u8 {
+    fn sub(self, other: u8) -> u8 { self - other }
+}
+
+impl Mul for u8 {
+    fn mul(self, other: u8) -> u8 { self * other }
+}
+
+impl Div for u8 {
+    fn div(self, other: u8) -> u8 { self / other }
+}
+
+impl Rem for u8 {
+    fn rem(self, other: u8) -> u8 { self % other }
+}
+
+impl Ord for u16 {
+    fn cmp(&self, other: &u16) -> Ordering { compare(*self, *other) }
+}
+
+impl Add for u16 {
+    fn add(self, other: u16) -> u16 { self + other }
+}
+
+impl Sub for u16 {
+    fn sub(self, other: u16) -> u16 { self - other }
+}
+
+impl Mul for u16 {
+    fn mul(self, other: u16) -> u16 { self * other }
+}
+
+impl Div for u16 {
+    fn div(self, other: u16) -> u16 { self / other }
+}
+
+impl Rem for u16 {
+    fn rem(self, other: u16) -> u16 { self % other }
+}
+
+impl Ord for u32 {
+    fn cmp(&self, other: &u32) -> Ordering { compare(*self, *other) }
+}
+
+impl Add for u32 {
+    fn add(self, other: u32) -> u32 { self + other }
+}
+
+impl Sub for u32 {
+    fn sub(self, other: u32) -> u32 { self - other }
+}
+
+impl Mul for u32 {
+    fn mul(self, other: u32) -> u32 { self * other }
+}
+
+impl Div for u32 {
+    fn div(self, other: u32) -> u32 { self / other }
+}
+
+impl Rem for u32 {
+    fn rem(self, other: u32) -> u32 { self % other }
+}
+
+impl Ord for u64 {
+    fn cmp(&self, other: &u64) -> Ordering { compare(*self, *other) }
+}
+
+impl Add for u64 {
+    fn add(self, other: u64) -> u64 { self + other }
+}
+
+impl Sub for u64 {
+    fn sub(self, other: u64) -> u64 { self - other }
+}
+
+impl Mul for u64 {
+    fn mul(self, other: u64) -> u64 { self * other }
+}
+
+impl Div for u64 {
+    fn div(self, other: u64) -> u64 { self / other }
+}
+
+impl Rem for u64 {
+    fn rem(self, other: u64) -> u64 { self % other }
+}
+
+impl Ord for usize {
+    fn cmp(&self, other: &usize) -> Ordering { compare(*self, *other) }
+}
+
+impl Add for usize {
+    fn add(self, other: usize) -> usize { self + other }
+}
+
+impl Sub for usize {
+    fn sub(self, other: usize) -> usize { self - other }
+}
+
+impl Mul for usize {
+    fn mul(self, other: usize) -> usize { self * other }
+}
+
+impl Div for usize {
+    fn div(self, other: usize) -> usize { self / other }
+}
+
+impl Rem for usize {
+    fn rem(self, other: usize) -> usize { self % other }
+}
+
+impl Ord for f32 {
+    fn cmp(&self, other: &f32) -> Ordering { compare(*self, *other) }
+}
+
+impl Add for f32 {
+    fn add(self, other: f32) -> f32 { self + other }
+}
+
+impl Sub for f32 {
+    fn sub(self, other: f32) -> f32 { self - other }
+}
+
+impl Mul for f32 {
+    fn mul(self, other: f32) -> f32 { self * other }
+}
+
+impl Div for f32 {
+    fn div(self, other: f32) -> f32 { self / other }
+}
+
+impl Rem for f32 {
+    fn rem(self, other: f32) -> f32 { self % other }
+}
+
+impl Ord for f64 {
+    fn cmp(&self, other: &f64) -> Ordering { compare(*self, *other) }
+}
+
+impl Add for f64 {
+    fn add(self, other: f64) -> f64 { self + other }
+}
+
+impl Sub for f64 {
+    fn sub(self, other: f64) -> f64 { self - other }
+}
+
+impl Mul for f64 {
+    fn mul(self, other: f64) -> f64 { self * other }
+}
+
+impl Div for f64 {
+    fn div(self, other: f64) -> f64 { self / other }
+}
+
+impl Rem for f64 {
+    fn rem(self, other: f64) -> f64 { self % other }
+}
+
+impl Neg for i8 {
+    fn neg(self) -> i8 { -self }
+}
+
+impl Neg for i16 {
+    fn neg(self) -> i16 { -self }
+}
+
+impl Neg for i32 {
+    fn neg(self) -> i32 { -self }
+}
+
+impl Neg for i64 {
+    fn neg(self) -> i64 { -self }
+}
+
+impl Neg for isize {
+    fn neg(self) -> isize { -self }
+}
+
+impl Neg for f32 {
+    fn neg(self) -> f32 { -self }
+}
+
+impl Neg for f64 {
+    fn neg(self) -> f64 { -self }
+}
+
+impl Eq for str {
+    fn eq(&self, other: &str) -> bool { str_eq(self, other) }
+}
+
 // ------------------------------------------------------------ output
 
 unsafe fn write(fd: i32, buf: *u8, count: usize) -> isize
