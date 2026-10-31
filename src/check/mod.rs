@@ -40,6 +40,13 @@ pub enum IntrinsicFn {
     Forget,
     VolatileLoad,
     VolatileStore,
+    AtomicLoad,
+    AtomicStore,
+    AtomicSwap,
+    AtomicAdd,
+    AtomicSub,
+    AtomicCas,
+    Fence,
 }
 
 const INTRINSICS: &[(&str, IntrinsicFn)] = &[
@@ -56,6 +63,13 @@ const INTRINSICS: &[(&str, IntrinsicFn)] = &[
     ("forget", IntrinsicFn::Forget),
     ("volatile_load", IntrinsicFn::VolatileLoad),
     ("volatile_store", IntrinsicFn::VolatileStore),
+    ("atomic_load", IntrinsicFn::AtomicLoad),
+    ("atomic_store", IntrinsicFn::AtomicStore),
+    ("atomic_swap", IntrinsicFn::AtomicSwap),
+    ("atomic_add", IntrinsicFn::AtomicAdd),
+    ("atomic_sub", IntrinsicFn::AtomicSub),
+    ("atomic_cas", IntrinsicFn::AtomicCas),
+    ("fence", IntrinsicFn::Fence),
 ];
 
 /// Types from other std modules that are visible everywhere, like the prelude.

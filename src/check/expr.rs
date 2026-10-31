@@ -2404,6 +2404,60 @@ impl<'a> FnCx<'a> {
                     ))
                 }
             }
+            IntrinsicFn::Fence => {
+                want(self, 0)?;
+                Ok(x(
+                    K::Intrinsic(xir::Intrinsic::Fence, Vec::new()),
+                    Ty::unit(),
+                    span,
+                ))
+            }
+            IntrinsicFn::AtomicLoad
+            | IntrinsicFn::AtomicStore
+            | IntrinsicFn::AtomicSwap
+            | IntrinsicFn::AtomicAdd
+            | IntrinsicFn::AtomicSub
+            | IntrinsicFn::AtomicCas => {
+                let n = match i {
+                    IntrinsicFn::AtomicLoad => 1,
+                    IntrinsicFn::AtomicCas => 3,
+                    _ => 2,
+                };
+                want(self, n)?;
+                self.require_unsafe(span, "atomic access through a raw pointer")?;
+                let exp = targs.first().map(|t| Ty::Ptr(Box::new(t.clone())));
+                let p = match &exp {
+                    Some(t) => self.expr_as(&args[0], t)?,
+                    None => self.expr(&args[0], None)?,
+                };
+                let Ty::Ptr(elem) = p.ty.clone() else {
+                    return self.err(args[0].span, "expected a raw pointer");
+                };
+                let arith = matches!(i, IntrinsicFn::AtomicAdd | IntrinsicFn::AtomicSub);
+                if !(elem.is_int() || (!arith && matches!(*elem, Ty::Ptr(_)))) {
+                    return self.err(
+                        span,
+                        format!(
+                            "atomics work on integers{}; found `{}`",
+                            if arith { "" } else { " and raw pointers" },
+                            self.ts(&elem)
+                        ),
+                    );
+                }
+                let mut xs = vec![p];
+                for a in &args[1..] {
+                    xs.push(self.expr_as(a, &elem)?);
+                }
+                let (k, ty) = match i {
+                    IntrinsicFn::AtomicLoad => (xir::Intrinsic::AtomicLoad, *elem),
+                    IntrinsicFn::AtomicStore => (xir::Intrinsic::AtomicStore, Ty::unit()),
+                    IntrinsicFn::AtomicSwap => (xir::Intrinsic::AtomicRmw("xchg"), *elem),
+                    IntrinsicFn::AtomicAdd => (xir::Intrinsic::AtomicRmw("add"), *elem),
+                    IntrinsicFn::AtomicSub => (xir::Intrinsic::AtomicRmw("sub"), *elem),
+                    _ => (xir::Intrinsic::AtomicCas, *elem),
+                };
+                Ok(x(K::Intrinsic(k, xs), ty, span))
+            }
             IntrinsicFn::PtrWrite | IntrinsicFn::VolatileStore => {
                 want(self, 2)?;
                 self.require_unsafe(span, "writing through a raw pointer")?;

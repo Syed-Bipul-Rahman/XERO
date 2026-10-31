@@ -1779,6 +1779,56 @@ impl<'a> Codegen<'a> {
                 self.ins(&format!("store {vol}{lt} {v}, ptr {p}"));
                 self.unit()
             }
+            Intrinsic::Fence => {
+                self.ins("fence seq_cst");
+                self.unit()
+            }
+            Intrinsic::AtomicLoad
+            | Intrinsic::AtomicStore
+            | Intrinsic::AtomicRmw(_)
+            | Intrinsic::AtomicCas => {
+                let vals: Vec<String> = args.iter().map(|a| self.expr(a)).collect();
+                let Ty::Ptr(elem) = &args[0].ty else {
+                    unreachable!()
+                };
+                let lt = self.llty(elem);
+                let align = self.layout(elem).0.max(1);
+                let p = &vals[0];
+                match i {
+                    Intrinsic::AtomicLoad => {
+                        let r = self.fresh();
+                        self.ins(&format!(
+                            "{r} = load atomic {lt}, ptr {p} seq_cst, align {align}"
+                        ));
+                        r
+                    }
+                    Intrinsic::AtomicStore => {
+                        self.ins(&format!(
+                            "store atomic {lt} {}, ptr {p} seq_cst, align {align}",
+                            vals[1]
+                        ));
+                        self.unit()
+                    }
+                    Intrinsic::AtomicRmw(op) => {
+                        let r = self.fresh();
+                        self.ins(&format!(
+                            "{r} = atomicrmw {op} ptr {p}, {lt} {} seq_cst",
+                            vals[1]
+                        ));
+                        r
+                    }
+                    _ => {
+                        let pair = self.fresh();
+                        self.ins(&format!(
+                            "{pair} = cmpxchg ptr {p}, {lt} {}, {lt} {} seq_cst seq_cst",
+                            vals[1], vals[2]
+                        ));
+                        let r = self.fresh();
+                        self.ins(&format!("{r} = extractvalue {{ {lt}, i1 }} {pair}, 0"));
+                        r
+                    }
+                }
+            }
             Intrinsic::DropInPlace(t) => {
                 let p = self.expr(&args[0]);
                 let t = t.clone();
