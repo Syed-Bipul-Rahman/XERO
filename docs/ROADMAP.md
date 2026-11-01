@@ -33,6 +33,13 @@
 - [x] `std.sync`: `Mutex<T>`, `Channel<T>`, `Atomic<T>`, `AtomicBool`
 - [x] `FnOnce` closures and atomic intrinsics
 
+## Done in v0.4
+
+- [x] No libc on Linux: direct system calls, an `mmap`-based allocator with per-thread arenas, `clone` threads, futexes and our own entry point
+- [x] Static executables, and cross-compiling Linux programs for ARM64 and RISC-V with only `lld`
+- [x] `std.fs`, `std.env`, `std.os`
+- [x] CI on ARM64 Linux, and every test program run for ARM64 and RISC-V under qemu
+
 ## Next
 
 ### Concurrency
@@ -42,9 +49,8 @@
 - Thread pools and parallel iterators in the standard library.
 
 ### Self-contained programs
-- No libc on Linux: direct system calls, an `mmap`-based allocator and our
-  own program entry point, so programs are small static binaries.
 - No C runtime on Windows: call `kernel32` directly.
+- Directories, environment variables, time and processes in the standard library.
 
 ### Type system
 - Trait objects (`dyn Trait`) as an opt-in for dynamic dispatch.

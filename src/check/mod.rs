@@ -47,6 +47,9 @@ pub enum IntrinsicFn {
     AtomicSub,
     AtomicCas,
     Fence,
+    Syscall,
+    OsArgc,
+    OsArgv,
 }
 
 const INTRINSICS: &[(&str, IntrinsicFn)] = &[
@@ -70,6 +73,9 @@ const INTRINSICS: &[(&str, IntrinsicFn)] = &[
     ("atomic_sub", IntrinsicFn::AtomicSub),
     ("atomic_cas", IntrinsicFn::AtomicCas),
     ("fence", IntrinsicFn::Fence),
+    ("syscall", IntrinsicFn::Syscall),
+    ("os_argc", IntrinsicFn::OsArgc),
+    ("os_argv", IntrinsicFn::OsArgv),
 ];
 
 /// Types from other std modules that are visible everywhere, like the prelude.

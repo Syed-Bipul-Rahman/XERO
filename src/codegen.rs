@@ -52,7 +52,15 @@ enum PlacePtr {
     Fat(String),
 }
 
-pub fn generate(ck: &Checker, prog: &Program, triple: &str, ptr_bits: u32) -> String {
+/// `own_runtime`: the program runs without libc (Linux), so emit its entry
+/// point `_start` and the thread-creation trampoline.
+pub fn generate(
+    ck: &Checker,
+    prog: &Program,
+    triple: &str,
+    ptr_bits: u32,
+    own_runtime: bool,
+) -> String {
     let mut cg = Codegen {
         ck,
         ptr_bits,
@@ -82,7 +90,139 @@ pub fn generate(ck: &Checker, prog: &Program, triple: &str, ptr_bits: u32) -> St
         scopes: Vec::new(),
         loops: Vec::new(),
     };
-    cg.module(prog)
+    let mut m = cg.module(prog);
+    if own_runtime {
+        m.push('\n');
+        for line in runtime_asm(triple).lines() {
+            let _ = writeln!(m, "module asm \"{}\"", line.trim());
+        }
+    }
+    m
+}
+
+/// Program entry and `clone` trampoline for programs without libc.
+///
+/// `_start` passes `argc` and `argv` from the initial stack to `main` and
+/// exits with its result. `__xero_clone(entry, stack, flags, arg, ptid, tls,
+/// ctid)` starts a thread running `entry(arg)` on `stack`; the thread exits
+/// (only itself) when `entry` returns.
+fn runtime_asm(triple: &str) -> &'static str {
+    match triple.split('-').next().unwrap_or("") {
+        "x86_64" => {
+            "
+            .text
+            .globl _start
+            .type _start,@function
+            _start:
+            xor %ebp, %ebp
+            mov (%rsp), %rdi
+            lea 8(%rsp), %rsi
+            and $-16, %rsp
+            call main
+            mov %eax, %edi
+            mov $231, %eax
+            syscall
+            hlt
+            .globl __xero_clone
+            .type __xero_clone,@function
+            __xero_clone:
+            mov %rdi, %r11
+            mov %rdx, %rdi
+            mov %r8, %rdx
+            mov %r9, %r8
+            mov 8(%rsp), %r10
+            mov %r11, %r9
+            and $-16, %rsi
+            sub $16, %rsi
+            mov %rcx, (%rsi)
+            mov $56, %eax
+            syscall
+            test %rax, %rax
+            jnz 1f
+            xor %ebp, %ebp
+            mov (%rsp), %rdi
+            call *%r9
+            xor %edi, %edi
+            mov $60, %eax
+            syscall
+            hlt
+            1:
+            ret"
+        }
+        "aarch64" => {
+            "
+            .text
+            .globl _start
+            .type _start,%function
+            _start:
+            mov x29, #0
+            mov x30, #0
+            ldr x0, [sp]
+            add x1, sp, #8
+            bl main
+            mov x8, #94
+            svc #0
+            .globl __xero_clone
+            .type __xero_clone,%function
+            __xero_clone:
+            and x1, x1, #-16
+            stp x0, x3, [x1, #-16]!
+            mov x0, x2
+            mov x2, x4
+            mov x3, x5
+            mov x4, x6
+            mov x8, #220
+            svc #0
+            cbz x0, 1f
+            ret
+            1:
+            ldp x1, x0, [sp], #16
+            blr x1
+            mov x0, #0
+            mov x8, #93
+            svc #0"
+        }
+        "riscv64" => {
+            "
+            .text
+            .globl _start
+            .type _start,@function
+            _start:
+            .option push
+            .option norelax
+            lla gp, __global_pointer$
+            .option pop
+            ld a0, 0(sp)
+            addi a1, sp, 8
+            andi sp, sp, -16
+            call main
+            li a7, 94
+            ecall
+            .globl __xero_clone
+            .type __xero_clone,@function
+            __xero_clone:
+            andi a1, a1, -16
+            addi a1, a1, -16
+            sd a0, 0(a1)
+            sd a3, 8(a1)
+            mv a0, a2
+            mv a2, a4
+            mv a3, a5
+            mv a4, a6
+            li a7, 220
+            ecall
+            beqz a0, 1f
+            ret
+            1:
+            ld a1, 0(sp)
+            ld a0, 8(sp)
+            jalr a1
+            li a0, 0
+            li a7, 93
+            ecall"
+        }
+        _ => "",
+    }
 }
 
 fn quote(name: &str) -> String {
@@ -112,7 +252,12 @@ impl<'a> Codegen<'a> {
                 init
             );
         }
-        for e in &prog.externs {
+        let defined: HashSet<&str> = prog.funcs.iter().map(|f| f.name.as_str()).collect();
+        for e in prog
+            .externs
+            .iter()
+            .filter(|e| !defined.contains(e.name.as_str()))
+        {
             let params: Vec<String> = e.params.iter().map(|t| self.abi_param(t)).collect();
             let mut ps = params.join(", ");
             if e.variadic {
@@ -135,8 +280,16 @@ impl<'a> Codegen<'a> {
         while let Some(t) = self.glue_queue.pop() {
             self.drop_glue(&t);
         }
+        let ut = self.usize_ty();
+        let _ = writeln!(self.globals, "@xero.argc = internal global {ut} 0");
+        let _ = writeln!(self.globals, "@xero.argv = internal global ptr null");
         if let Some((name, ret)) = &prog.entry {
-            let _ = writeln!(self.out, "define i32 @main() {{");
+            let _ = writeln!(self.out, "define i32 @main(i32 %argc, ptr %argv) {{");
+            let _ = writeln!(
+                self.out,
+                "  %argc.u = {} i32 %argc to {ut}\n  store {ut} %argc.u, ptr @xero.argc\n  store ptr %argv, ptr @xero.argv",
+                if self.ptr_bits > 32 { "zext" } else { "bitcast" }
+            );
             if *ret == Ty::Int(IntTy::I32) {
                 let _ = writeln!(
                     self.out,
@@ -500,7 +653,7 @@ impl<'a> Codegen<'a> {
         let linkage = if f.export { "" } else { "internal " };
         let _ = writeln!(
             self.out,
-            "define {}{} {}({}) nounwind {{",
+            "define {}{} {}({}) nounwind{} {{",
             linkage,
             self.ret_llty(&f.ret),
             if f.export {
@@ -508,7 +661,18 @@ impl<'a> Codegen<'a> {
             } else {
                 quote(&f.name)
             },
-            params.join(", ")
+            params.join(", "),
+            // the runtime's own memcpy & co. must not be turned into calls to themselves
+            if f.export
+                && matches!(
+                    f.name.as_str(),
+                    "memcpy" | "memmove" | "memset" | "memcmp" | "bcmp"
+                )
+            {
+                " \"no-builtins\""
+            } else {
+                ""
+            }
         );
         let _ = writeln!(self.out, "entry:");
         self.out.push_str(&self.allocas);
@@ -1789,6 +1953,56 @@ impl<'a> Codegen<'a> {
                 };
                 self.ins(&format!("store {vol}{lt} {v}, ptr {p}"));
                 self.unit()
+            }
+            Intrinsic::Syscall => {
+                let us = Ty::Int(IntTy::Usize);
+                let mut vals: Vec<String> = args.iter().map(|a| self.cast(a, &us)).collect();
+                let ut = self.usize_ty();
+                let arch = self.triple.split('-').next().unwrap_or("");
+                let (inst, regs, clobbers): (&str, &[&str], &str) = match arch {
+                    "x86_64" => (
+                        "syscall",
+                        &["rax", "rdi", "rsi", "rdx", "r10", "r8", "r9"],
+                        ",~{rcx},~{r11}",
+                    ),
+                    "aarch64" => ("svc #0", &["x8", "x0", "x1", "x2", "x3", "x4", "x5"], ""),
+                    "riscv64" => (
+                        "ecall",
+                        &["x17", "x10", "x11", "x12", "x13", "x14", "x15"],
+                        "",
+                    ),
+                    _ => {
+                        self.trap();
+                        return "poison".into();
+                    }
+                };
+                while vals.len() < 7 {
+                    vals.push("0".into());
+                }
+                let out = if arch == "x86_64" { "rax" } else { regs[1] };
+                let mut cons = format!("={{{out}}}");
+                for r in regs {
+                    cons.push_str(&format!(",{{{r}}}"));
+                }
+                cons.push_str(clobbers);
+                cons.push_str(",~{memory}");
+                let ops: Vec<String> = vals.iter().map(|v| format!("{ut} {v}")).collect();
+                let r = self.fresh();
+                self.ins(&format!(
+                    "{r} = call {ut} asm sideeffect \"{inst}\", \"{cons}\"({})",
+                    ops.join(", ")
+                ));
+                r
+            }
+            Intrinsic::OsArgc | Intrinsic::OsArgv => {
+                let (g, t) = if matches!(i, Intrinsic::OsArgc) {
+                    ("@xero.argc", self.usize_ty())
+                } else {
+                    ("@xero.argv", "ptr".to_string())
+                };
+                let r = self.fresh();
+                self.ins(&format!("{r} = load {t}, ptr {g}"));
+                r
             }
             Intrinsic::Fence => {
                 self.ins("fence seq_cst");

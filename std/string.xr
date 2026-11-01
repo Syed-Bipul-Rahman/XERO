@@ -59,6 +59,27 @@ impl String {
         }
     }
 
+    /// Take ownership of `bytes` if they are valid UTF-8.
+    pub fn from_utf8(bytes: Vec<u8>) -> Option<String> {
+        if !is_utf8(bytes.as_slice()) {
+            return None
+        }
+        Some(String { bytes: bytes })
+    }
+
+    /// Take ownership of `bytes`, which the caller promises are valid UTF-8.
+    pub unsafe fn from_utf8_unchecked(bytes: Vec<u8>) -> String {
+        String { bytes: bytes }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        self.bytes.as_slice()
+    }
+
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+
     pub fn as_str(&self) -> &str {
         let s = self.bytes.as_slice()
         unsafe { str_from_raw(s as *u8, s.len()) }
@@ -71,6 +92,53 @@ impl String {
     pub fn equals(&self, other: &str) -> bool {
         self.as_str() == other
     }
+}
+
+/// Is `b` well-formed UTF-8 (no overlong forms, surrogates or values
+/// above U+10FFFF)?
+pub fn is_utf8(b: &[u8]) -> bool {
+    let n = b.len()
+    let mut i: usize = 0
+    while i < n {
+        let c = b[i]
+        if c < 0x80 {
+            i += 1
+            continue
+        }
+        let (len, lo, hi) = if c >= 0xC2 && c <= 0xDF {
+            (2 as usize, 0x80u8, 0xBFu8)
+        } else if c == 0xE0 {
+            (3, 0xA0u8, 0xBFu8)
+        } else if c == 0xED {
+            (3, 0x80u8, 0x9Fu8)
+        } else if c >= 0xE1 && c <= 0xEF {
+            (3, 0x80u8, 0xBFu8)
+        } else if c == 0xF0 {
+            (4, 0x90u8, 0xBFu8)
+        } else if c >= 0xF1 && c <= 0xF3 {
+            (4, 0x80u8, 0xBFu8)
+        } else if c == 0xF4 {
+            (4, 0x80u8, 0x8Fu8)
+        } else {
+            return false
+        }
+        if i + len > n {
+            return false
+        }
+        // the second byte has a narrower range; the rest are continuation bytes
+        if b[i + 1] < lo || b[i + 1] > hi {
+            return false
+        }
+        let mut j: usize = 2
+        while j < len {
+            if b[i + j] < 0x80 || b[i + j] > 0xBF {
+                return false
+            }
+            j += 1
+        }
+        i += len
+    }
+    true
 }
 
 impl Print for String {

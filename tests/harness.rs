@@ -46,6 +46,16 @@ fn expected_output(src: &str) -> (String, i32) {
     (out, code)
 }
 
+/// Extra `xeroc build` flags from `XERO_TEST_FLAGS` (e.g. `--libc`, or
+/// `--target aarch64-linux` together with `XERO_TEST_RUNNER=qemu-aarch64`).
+fn extra_flags() -> Vec<String> {
+    std::env::var("XERO_TEST_FLAGS")
+        .unwrap_or_default()
+        .split_whitespace()
+        .map(String::from)
+        .collect()
+}
+
 #[test]
 fn run_programs() {
     let tmp = std::env::temp_dir().join(format!("xero-tests-{}", std::process::id()));
@@ -54,11 +64,16 @@ fn run_programs() {
     for f in files("tests/run") {
         let src = std::fs::read_to_string(&f).unwrap();
         let (want, want_code) = expected_output(&src);
+        // programs that call C functions need the target's C library to link
+        if src.contains("// test: native-only") && extra_flags().iter().any(|f| f == "--target") {
+            continue;
+        }
         let exe = tmp
             .join(f.file_stem().unwrap())
             .with_extension(std::env::consts::EXE_EXTENSION);
         let build = Command::new(xeroc())
             .arg("build")
+            .args(extra_flags())
             .arg(&f)
             .arg("-o")
             .arg(&exe)
@@ -72,7 +87,10 @@ fn run_programs() {
             ));
             continue;
         }
-        let run = Command::new(&exe).output().unwrap();
+        let run = match std::env::var("XERO_TEST_RUNNER") {
+            Ok(r) if !r.is_empty() => Command::new(r).arg(&exe).output().unwrap(),
+            _ => Command::new(&exe).output().unwrap(),
+        };
         // the Windows C runtime writes text-mode stdout with CRLF line endings
         let got = String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n");
         let code = run.status.code().unwrap_or(-1);
@@ -81,11 +99,28 @@ fn run_programs() {
         }
     }
     let _ = std::fs::remove_dir_all(&tmp);
+    annotate(&failures);
     if !failures.is_empty() {
         panic!(
             "{} program(s) failed:\n\n{}",
             failures.len(),
             failures.join("\n")
+        );
+    }
+}
+
+/// On GitHub Actions, report each failure as an error annotation too.
+fn annotate(failures: &[String]) {
+    if std::env::var_os("GITHUB_ACTIONS").is_none() {
+        return;
+    }
+    for f in failures {
+        let msg: String = f.chars().take(4000).collect();
+        println!(
+            "::error title=xero test::{}",
+            msg.replace('%', "%25")
+                .replace('\r', "")
+                .replace('\n', "%0A")
         );
     }
 }
@@ -123,6 +158,7 @@ fn rejected_programs() {
             }
         }
     }
+    annotate(&failures);
     if !failures.is_empty() {
         panic!(
             "{} program(s) failed:\n\n{}",
@@ -178,5 +214,42 @@ fn add_is_zero_cost() {
         vec!["lea\teax, [rdi + rsi]", "ret"],
         "unexpected code for add:\n{text}"
     );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// On Linux, programs that declare no C functions run on Xero's own runtime:
+/// a small static executable with no dynamic loader and no libc.
+#[test]
+#[cfg(target_os = "linux")]
+fn linux_programs_need_no_libc() {
+    let tmp = std::env::temp_dir().join(format!("xero-static-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let exe = tmp.join("hello");
+    let hello = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/hello.xr");
+    let out = Command::new(xeroc())
+        .arg("build")
+        .arg(&hello)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let bytes = std::fs::read(&exe).unwrap();
+    // ELF program headers: no PT_INTERP (3) and no PT_DYNAMIC (2)
+    let phoff = u64::from_le_bytes(bytes[32..40].try_into().unwrap()) as usize;
+    let phentsize = u16::from_le_bytes(bytes[54..56].try_into().unwrap()) as usize;
+    let phnum = u16::from_le_bytes(bytes[56..58].try_into().unwrap()) as usize;
+    for i in 0..phnum {
+        let at = phoff + i * phentsize;
+        let kind = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+        assert!(kind != 2 && kind != 3, "hello is dynamically linked");
+    }
+    assert!(bytes.len() < 32 * 1024, "hello is {} bytes", bytes.len());
+    let run = Command::new(&exe).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "Hello, Xero!\n");
     let _ = std::fs::remove_dir_all(&tmp);
 }

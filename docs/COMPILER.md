@@ -118,12 +118,45 @@ LLVM IR, and invokes `clang -x ir --target=<triple> -O<n>` to produce assembly,
 an object file, an executable or a wasm module. Set `XERO_CLANG` to choose a
 specific clang binary.
 
+The driver also chooses the OS layer, `std.sys`, for the target. It is the
+only part of the standard library that knows about the operating system:
+
+| File | Used for |
+|---|---|
+| `std/sys/linux.xr` | Linux without libc: system calls, heap, threads, futexes, `memcpy` & co. |
+| `std/sys/unix.xr` | macOS, and Linux programs that use libc |
+| `std/sys/windows.xr` | Windows: the C runtime and `kernel32` |
+| `std/sys/none.xr` | bare metal and wasm |
+
+Whether a Linux program uses libc is decided after parsing: it does if any
+of the program's own modules declares a C function (a `fn` without a body),
+or for `--lib` and `--emit obj`, unless `--libc`/`--no-libc` says otherwise.
+So `std.sys` is loaded last. Two small modules are generated per target:
+`std.os` (`NAME`, `ARCH`, `POINTER_BITS`) and `std.sys.target` (system call
+numbers, `open` flags and the `errno` accessor).
+
+Without libc, codegen adds the entry point `_start` (which passes `argc` and
+`argv` to `main` and exits with its result) and the `__xero_clone` thread
+trampoline as module-level assembly for x86-64, ARM64 and RISC-V, and the
+driver links with `-nostdlib -static` and `--gc-sections`, using `lld` when
+the target isn't the host. The `syscall` intrinsic becomes an inline `syscall`,
+`svc #0` or `ecall` instruction. The runtime's `memcpy`, `memmove`, `memset`,
+`memcmp` and `bcmp` get LLVM's `no-builtins` attribute, so their loops are
+never turned back into calls to themselves.
+
 ## Testing
 
-`cargo test` runs `tests/harness.rs`, which has three suites:
+`cargo test` runs `tests/harness.rs`, which has these suites:
 
 * `tests/run/*.xr` are compiled and run, and their stdout is compared with the
   `// output:` block at the end of each file;
 * `tests/fail/*.xr` must be rejected with the messages listed in their
   `// error:` lines;
-* `add_is_zero_cost` checks that `add` compiles to exactly `lea eax, [rdi + rsi]; ret`.
+* `add_is_zero_cost` checks that `add` compiles to exactly `lea eax, [rdi + rsi]; ret`;
+* `linux_programs_need_no_libc` checks that "hello, world" on Linux is a small
+  static executable.
+
+`XERO_TEST_FLAGS` adds flags to every build (for example `--libc`, or
+`--target aarch64-linux`) and `XERO_TEST_RUNNER` runs the programs through
+another program (for example `qemu-aarch64`). Programs marked
+`// test: native-only` are skipped when cross-compiling.

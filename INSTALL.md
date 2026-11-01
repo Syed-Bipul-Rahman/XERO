@@ -66,6 +66,11 @@ into machine code and link it.
 If clang isn't on your `PATH` under the name `clang`, point `XERO_CLANG` at it,
 for example `XERO_CLANG=/opt/homebrew/opt/llvm/bin/clang`.
 
+On Linux, `lld` is needed only to build for another architecture
+(`--target aarch64-linux` on an x86-64 machine, for example). Xero programs
+don't use the C library on Linux, so no cross-compiling toolchain or sysroot
+is needed beyond that.
+
 ## 3. Try it
 
 ```console

@@ -1,3 +1,19 @@
+## 0.4.0
+
+* Adds Xero's own runtime on Linux: programs make system calls directly and no longer use the C library, so executables are small and static ("hello, world" is about 9 KB) and run on any Linux system of the same architecture.
+* Adds the runtime's memory allocator (built on `mmap`, with an arena per thread), threads (`clone` and futexes) and program entry point.
+* Adds cross-compiling Linux executables for ARM64 and RISC-V (`--target aarch64-linux`, `--target riscv64-linux`) with only `lld` installed.
+* Adds `--libc` and `--no-libc`; a program that declares C functions is linked with the C library automatically.
+* Adds `std.fs`: `File` (`open`, `create`, `append`, `read`, `read_all`, `read_to_string`, `write`, `write_str`), closed when destroyed, plus `read_to_string`, `read`, `write`, `remove` and a printable `Error`.
+* Adds `std.env` with `args`, `arg` and `arg_count`.
+* Adds `std.os` with `NAME`, `ARCH` and `POINTER_BITS`.
+* Adds `String.from_utf8`, `as_bytes`, `into_bytes` and `std.string.is_utf8`.
+* Adds the `syscall` intrinsic for raw Linux system calls, and `os_argc`/`os_argv`.
+* Changes `std.io` functions to return positive `errno` values as errors.
+* Changes threads to get 8 MiB stacks on every OS (macOS and Windows defaulted to 512 KiB and 1 MiB).
+* Fixes `%` on floating-point values computed at run time failing to link on Linux.
+* Fixes `std.io.read_into` failing to compile.
+
 ## 0.3.0
 
 * Adds threads: `spawn { ... }` runs a block on a new OS thread and returns a handle whose `join()` gives the block's value.

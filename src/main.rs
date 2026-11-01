@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::process::{exit, Command};
 
-use xeroc::driver::{build, Emit, Options};
+use xeroc::driver::{build, Emit, Libc, Options};
 
 const USAGE: &str = "\
 xeroc — the Xero compiler
@@ -19,6 +19,9 @@ OPTIONS:
                          optimization level (default: -O2)
     --target <name>      cross-compile (see `xeroc targets`)
     --lib                no `main` required; build a library object
+    --libc               link the C library (Linux; automatic when the
+                         program declares C functions)
+    --no-libc            never link the C library (Linux)
     --att                AT&T assembly syntax on x86 (default: Intel)
 ";
 
@@ -50,6 +53,7 @@ fn main() {
     let mut target = xeroc::target::host();
     let mut lib = false;
     let mut intel = true;
+    let mut libc = Libc::Auto;
     let mut run_args = Vec::new();
     let mut i = 1;
     while i < args.len() {
@@ -100,6 +104,8 @@ fn main() {
             "-O3" => opt_level = 3,
             "-Os" => opt_level = 2,
             "--lib" => lib = true,
+            "--libc" => libc = Libc::Yes,
+            "--no-libc" => libc = Libc::No,
             "--att" => intel = false,
             s if s.starts_with("--emit=") => {
                 args_emit(&s[7..], &mut emit);
@@ -137,6 +143,7 @@ fn main() {
             target,
             lib,
             intel_syntax: intel,
+            libc,
         };
         let mut fe = xeroc::driver::Frontend {
             sm: Default::default(),
@@ -172,6 +179,7 @@ fn main() {
         target,
         lib,
         intel_syntax: intel,
+        libc,
     };
     match build(&opts) {
         Ok(path) => {

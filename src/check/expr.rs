@@ -2501,6 +2501,46 @@ impl<'a> FnCx<'a> {
                     ))
                 }
             }
+            IntrinsicFn::Syscall => {
+                if args.is_empty() || args.len() > 7 {
+                    return self.err(
+                        span,
+                        "`syscall` takes a system call number and up to 6 arguments",
+                    );
+                }
+                self.require_unsafe(span, "a system call")?;
+                let mut xs = Vec::new();
+                for a in args {
+                    let v = self.expr(a, Some(&usize_t))?;
+                    if !(v.ty.is_int() || matches!(v.ty, Ty::Ptr(_))) {
+                        return self.err(
+                            a.span,
+                            format!(
+                                "system call arguments must be integers or raw pointers; found `{}`",
+                                self.ts(&v.ty)
+                            ),
+                        );
+                    }
+                    xs.push(v);
+                }
+                Ok(x(
+                    K::Intrinsic(xir::Intrinsic::Syscall, xs),
+                    Ty::Int(IntTy::Isize),
+                    span,
+                ))
+            }
+            IntrinsicFn::OsArgc | IntrinsicFn::OsArgv => {
+                want(self, 0)?;
+                let (k, t) = if i == IntrinsicFn::OsArgc {
+                    (xir::Intrinsic::OsArgc, usize_t)
+                } else {
+                    (
+                        xir::Intrinsic::OsArgv,
+                        Ty::Ptr(Box::new(Ty::Ptr(Box::new(Ty::Int(IntTy::U8))))),
+                    )
+                };
+                Ok(x(K::Intrinsic(k, Vec::new()), t, span))
+            }
             IntrinsicFn::Fence => {
                 want(self, 0)?;
                 Ok(x(

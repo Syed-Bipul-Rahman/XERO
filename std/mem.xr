@@ -3,17 +3,12 @@
 
 module std.mem
 
-unsafe fn malloc(size: usize) -> *u8
-unsafe fn calloc(count: usize, size: usize) -> *u8
-unsafe fn realloc(ptr: *u8, size: usize) -> *u8
-unsafe fn free(ptr: *u8)
-unsafe fn memcpy(dst: *u8, src: *u8, count: usize) -> *u8
-unsafe fn memmove(dst: *u8, src: *u8, count: usize) -> *u8
+import std.sys
 
 /// Allocate uninitialized storage for `count` values of `T`.
 pub unsafe fn alloc<T>(count: usize) -> *T {
     let size = size_of<T>() * count
-    let p = malloc(if size == 0 { 1 } else { size }) as *T
+    let p = sys.heap_alloc(if size == 0 { 1 } else { size }) as *T
     if p as usize == 0 {
         panic("out of memory")
     }
@@ -23,7 +18,7 @@ pub unsafe fn alloc<T>(count: usize) -> *T {
 /// Resize storage previously returned by `alloc`.
 pub unsafe fn realloc_array<T>(ptr: *T, count: usize) -> *T {
     let size = size_of<T>() * count
-    let p = realloc(ptr as *u8, if size == 0 { 1 } else { size }) as *T
+    let p = sys.heap_realloc(ptr as *u8, if size == 0 { 1 } else { size }) as *T
     if p as usize == 0 {
         panic("out of memory")
     }
@@ -31,12 +26,12 @@ pub unsafe fn realloc_array<T>(ptr: *T, count: usize) -> *T {
 }
 
 pub unsafe fn dealloc<T>(ptr: *T) {
-    free(ptr as *u8)
+    sys.heap_free(ptr as *u8)
 }
 
 /// Copy `count` values from `src` to `dst` (regions may overlap).
 pub unsafe fn copy_values<T>(src: *T, dst: *T, count: usize) {
-    memmove(dst as *u8, src as *u8, size_of<T>() * count)
+    sys.mem_move(dst as *u8, src as *u8, size_of<T>() * count)
 }
 
 /// Exchange two values without copying either through a temporary owner.
@@ -90,7 +85,7 @@ impl<T> Box<T> {
     pub fn into_inner(self) -> T {
         unsafe {
             let value = ptr_read(self.ptr)
-            free(self.ptr as *u8)
+            sys.heap_free(self.ptr as *u8)
             forget(self)
             value
         }
@@ -103,7 +98,7 @@ impl<T> Box<T> {
     drop {
         unsafe {
             drop_in_place(self.ptr)
-            free(self.ptr as *u8)
+            sys.heap_free(self.ptr as *u8)
         }
     }
 }

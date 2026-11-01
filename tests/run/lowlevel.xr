@@ -1,4 +1,5 @@
 // Unsafe code, raw pointers, slices, inline assembly, C interop.
+// test: native-only (calls C functions, which needs the target's C library)
 
 unsafe fn strlen(s: *u8) -> usize
 unsafe fn printf(fmt: *u8, ...) -> i32
