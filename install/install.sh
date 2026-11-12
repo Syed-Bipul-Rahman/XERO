@@ -114,7 +114,13 @@ main() {
 
     # ---------------------------------------------------------- clang
     local cc
-    if cc="$(find_clang)"; then
+    if "$bindir/xeroc" --version 2>/dev/null | grep -q "LLVM built in"; then
+        # xeroc generates code itself; only macOS needs Apple's linker and SDK
+        if [ "$os" = "Darwin" ] && ! xcode-select -p >/dev/null 2>&1; then
+            warn "linking on macOS needs the Xcode Command Line Tools; installing them"
+            xcode-select --install 2>/dev/null || true
+        fi
+    elif cc="$(find_clang)"; then
         say "found clang: $(clang_version "$cc")"
     elif [ "$no_deps" = "1" ]; then
         warn "no clang with LLVM $MIN_LLVM+ found; install one before using xeroc"

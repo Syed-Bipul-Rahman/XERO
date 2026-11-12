@@ -32,7 +32,11 @@ fn main() {
         return;
     }
     if args[0] == "--version" || args[0] == "-V" {
-        println!("xeroc {}", env!("CARGO_PKG_VERSION"));
+        if cfg!(feature = "llvm") {
+            println!("xeroc {} (LLVM built in)", env!("CARGO_PKG_VERSION"));
+        } else {
+            println!("xeroc {}", env!("CARGO_PKG_VERSION"));
+        }
         return;
     }
     let cmd = args[0].as_str();

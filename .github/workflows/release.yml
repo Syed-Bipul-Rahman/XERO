@@ -22,50 +22,75 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # static musl binaries with LLVM inside, built on Alpine
           - name: linux-x86_64
             os: ubuntu-24.04
-            target: x86_64-unknown-linux-musl
-            test: true
+            mode: alpine
           - name: linux-aarch64
             os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
-            test: true
+            mode: alpine
+          # LLVM inside, from LLVM's prebuilt libraries
           - name: macos-arm64
             os: macos-15
-            target: aarch64-apple-darwin
-            test: true
-          - name: macos-x86_64
-            os: macos-15
-            target: x86_64-apple-darwin
-            test: false
+            mode: prebuilt
+            llvm: clang+llvm-18.1.8-arm64-apple-macos11
           - name: windows-x86_64
             os: windows-2022
-            target: x86_64-pc-windows-msvc
-            test: true
+            mode: prebuilt
+            llvm: clang+llvm-18.1.8-x86_64-pc-windows-msvc
+          # no prebuilt LLVM for Intel Macs: this one uses the system clang
+          - name: macos-x86_64
+            os: macos-15
+            mode: plain
+            target: x86_64-apple-darwin
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - name: Install LLVM and musl (Linux)
-        if: runner.os == 'Linux'
+      - name: Build (Alpine)
+        if: matrix.mode == 'alpine'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y clang lld musl-tools
-      - name: Add Rust target
-        run: rustup target add ${{ matrix.target }}
-      - name: Build (static where possible)
-        run: cargo build --release --target ${{ matrix.target }}
-      - name: Test
-        if: matrix.test
-        run: cargo test --release
+          docker run --rm -v "$PWD:/src" -w /src alpine:3.21 sh .github/scripts/build-alpine.sh test
+          sudo chown -R "$(id -u)" target
+          echo "BIN=target/release/xeroc" >> "$GITHUB_ENV"
+      - name: Download LLVM
+        if: matrix.mode == 'prebuilt'
+        shell: bash
+        run: |
+          curl -fsSL "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/${{ matrix.llvm }}.tar.xz" -o llvm.tar.xz
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            7z x -y llvm.tar.xz > /dev/null && 7z x -y llvm.tar -o"$RUNNER_TEMP" > /dev/null && mv "$RUNNER_TEMP/${{ matrix.llvm }}" "$RUNNER_TEMP/llvm" && rm llvm.tar
+          else
+            mkdir -p "$RUNNER_TEMP/llvm" && tar -xJf llvm.tar.xz -C "$RUNNER_TEMP/llvm" --strip-components=1
+            echo "XERO_LLVM_STATIC_SYSLIBS=zstd" >> "$GITHUB_ENV"
+            echo "RUSTFLAGS=-L $(brew --prefix zstd)/lib" >> "$GITHUB_ENV"
+          fi
+          rm llvm.tar.xz
+          echo "XERO_LLVM_CONFIG=$RUNNER_TEMP/llvm/bin/llvm-config" >> "$GITHUB_ENV"
+      - name: Build and test (prebuilt LLVM)
+        if: matrix.mode == 'prebuilt'
+        shell: bash
+        run: |
+          cargo build --release --features llvm
+          export PATH="$(echo "$PATH" | tr ':' '\n' | grep -viE "llvm" | paste -sd: -)"
+          cargo test --release --features llvm
+          exe=xeroc; [ "$RUNNER_OS" = "Windows" ] && exe=xeroc.exe
+          [ "$RUNNER_OS" = "macOS" ] && strip "target/release/$exe"
+          echo "BIN=target/release/$exe" >> "$GITHUB_ENV"
+      - name: Build (system clang)
+        if: matrix.mode == 'plain'
+        shell: bash
+        run: |
+          rustup target add ${{ matrix.target }}
+          cargo build --release --target ${{ matrix.target }}
+          echo "BIN=target/${{ matrix.target }}/release/xeroc" >> "$GITHUB_ENV"
       - name: Package
         shell: bash
         run: |
           dir="xeroc-${{ matrix.name }}"
           mkdir -p "$dir"
-          exe=xeroc
-          if [ "${{ runner.os }}" = "Windows" ]; then exe=xeroc.exe; fi
-          cp "target/${{ matrix.target }}/release/$exe" "$dir/"
+          cp "$BIN" "$dir/"
           cp -r README.md INSTALL.md docs examples "$dir/"
+          "$dir/$(basename "$BIN")" --version || true
           if [ "${{ runner.os }}" = "Windows" ]; then
             7z a "$dir.zip" "$dir" > /dev/null
             echo "ASSET=$dir.zip" >> "$GITHUB_ENV"
@@ -73,6 +98,7 @@ jobs:
             tar czf "$dir.tar.gz" "$dir"
             echo "ASSET=$dir.tar.gz" >> "$GITHUB_ENV"
           fi
+          ls -l "$ASSET" 2>/dev/null || ls -l "$dir".*
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
@@ -111,8 +137,8 @@ jobs:
           irm https://download.xerolang.org/install.ps1 | iex
           \`\`\`
 
-          The installers pick the right archive below, verify it against \`SHA256SUMS\`,
-          and install clang (Xero's LLVM back end) if it is missing.
+          The installers pick the right archive below and verify it against \`SHA256SUMS\`.
+          xeroc has LLVM built in (except on Intel Macs, where the installer sets up clang).
           Manual install: see INSTALL.md inside each archive.
           NOTES
           gh release create "$TAG" dist/* \
