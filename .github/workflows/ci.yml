@@ -112,6 +112,7 @@ jobs:
             set -e
             apk add --no-cache bash git build-base rust cargo llvm18-dev llvm18-static lld-dev zlib-static zstd-static libxml2-static xz-static ncurses-static linux-headers > /tmp/apk.log 2>&1 || { tail -5 /tmp/apk.log; exit 1; }
             echo "::warning title=alpine::lld libs: $(ls /usr/lib/liblld*.a 2>/dev/null | tr "\n" " ") llvm: $(/usr/lib/llvm18/bin/llvm-config --version) syslibs: $(/usr/lib/llvm18/bin/llvm-config --system-libs --link-static)"
+            echo "::warning title=alpine lld::search: $(apk search lld | tr "\n" " ") files: $(find / -name "liblld*" 2>/dev/null | head -20 | tr "\n" " ") llvm static: $(apk search llvm | grep -E "static|dev" | tr "\n" " ")"
             export XERO_LLVM_CONFIG=/usr/lib/llvm18/bin/llvm-config
             export RUSTFLAGS="-C target-feature=+crt-static"
             if ! cargo build --release --features llvm > /tmp/build.log 2>&1; then
