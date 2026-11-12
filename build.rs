@@ -3,6 +3,7 @@
 
 fn main() {
     println!("cargo:rerun-if-env-changed=XERO_LLVM_CONFIG");
+    println!("cargo:rerun-if-env-changed=XERO_LLVM_EXTRA_LIBS");
     println!("cargo:rerun-if-changed=src/llvm/lld_shim.cpp");
     #[cfg(feature = "llvm")]
     link_llvm();
@@ -99,6 +100,12 @@ fn link_llvm() {
             .trim_end_matches(".tbd");
         if !name.is_empty() {
             println!("cargo:rustc-link-lib={name}");
+        }
+    }
+    // libraries a static build also needs (e.g. `static=lzma static=gcc`)
+    if let Ok(extra) = std::env::var("XERO_LLVM_EXTRA_LIBS") {
+        for lib in extra.split_whitespace() {
+            println!("cargo:rustc-link-lib={lib}");
         }
     }
     println!("cargo:rustc-cfg=xero_llvm");
