@@ -40,27 +40,37 @@
 - [x] `std.fs`, `std.env`, `std.os`
 - [x] CI on ARM64 Linux, and every test program run for ARM64 and RISC-V under qemu
 
+## Done in v0.5
+
+- [x] Generic traits, default type arguments, associated types, static trait functions
+- [x] `Index`/`IndexMut`, the `Iterator` trait and adapters, `for` over iterators, ranges as values
+- [x] Struct patterns and bindings inside `|` patterns
+- [x] `impl Trait` return types and trait objects (`dyn Trait`)
+- [x] `async fn` and `.await` as state machines, with `std.task`
+- [x] LLVM and lld built into `xeroc`
+
 ## Next
 
 ### Concurrency
-- `async fn` and `await` compiled to state machines, with no mandatory runtime.
+- `async` blocks and closures; async I/O and timers in `std.task`.
 - Thread-safety marker traits (the role of Rust's `Send` and `Sync`) for
   user types with interior mutability built on `unsafe`.
 - Thread pools and parallel iterators in the standard library.
 
+### Standard library (v0.6)
+- Collections (`HashMap`, `HashSet`), string formatting, time, directories,
+  environment variables and processes.
+
 ### Self-contained programs
 - No C runtime on Windows: call `kernel32` directly.
-- Directories, environment variables, time and processes in the standard library.
 
 ### Type system
-- Trait objects (`dyn Trait`) as an opt-in for dynamic dispatch.
-- `impl Fn(A) -> R` return types, so functions can return capturing closures.
-- An `Index` operator trait, and `+=` on move-only user types.
-- Generic traits, associated types and constants.
-- Struct patterns with named fields, and bindings inside `|` patterns.
+- `+=` on move-only user types; associated constants.
+- Bounds on associated types (`I: Iterator<Item = i32>`).
+- Lending iterators: items from `iter_mut()` that outlive the next call.
 
 ### Toolchain
-- LLVM (and lld) built into `xeroc`, so no separate clang install is needed.
+- LLVM built in on Intel Macs too.
 
 ### Performance and the hardware
 - SIMD vector types (`f32x4`, `i32x8`, ...) mapped to LLVM vectors.
