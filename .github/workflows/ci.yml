@@ -178,13 +178,11 @@ jobs:
       - name: Build
         shell: bash
         run: |
-          if [ "$RUNNER_OS" = "Windows" ]; then export RUSTFLAGS="-C target-feature=+crt-static"; fi
           cargo build --release --features llvm > build.log 2>&1 || { echo "::error title=build::$(grep -E "error|unresolved|undefined" build.log | sort -u | head -30 | tr '\n' '|')"; exit 1; }
           ls -l target/release/
       - name: Test
         shell: bash
         run: |
-          if [ "$RUNNER_OS" = "Windows" ]; then export RUSTFLAGS="-C target-feature=+crt-static"; fi
           # the runner's own LLVM must not be used
           export PATH="$(echo "$PATH" | tr ':' '\n' | grep -viE "llvm" | paste -sd: -)"
           ./target/release/xeroc run examples/hello.xr > hello.log 2>&1 || { echo "::error title=hello::$(tail -30 hello.log | tr '\n' '|')"; exit 1; }

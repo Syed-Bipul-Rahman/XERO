@@ -41,7 +41,11 @@ fn link_llvm() {
     );
     let libdir = run(&["--libdir"]);
     let incdir = run(&["--includedir"]);
-    println!("cargo:rustc-link-search=native={libdir}");
+    // link against a directory holding only LLVM's static libraries, so the
+    // linker never picks up the LLVM package's own shared C++ runtime
+    // (macOS: its libc++.dylib would shadow the system one)
+    let search = static_lib_dir(&libdir);
+    println!("cargo:rustc-link-search=native={search}");
 
     // lld (a library through the C++ shim), then LLVM itself
     cc::Build::new()
@@ -121,4 +125,25 @@ fn link_llvm() {
         }
     }
     println!("cargo:rustc-cfg=xero_llvm");
+}
+
+#[cfg(feature = "llvm")]
+fn static_lib_dir(libdir: &str) -> String {
+    #[cfg(unix)]
+    {
+        let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("llvm-static");
+        let _ = std::fs::remove_dir_all(&out);
+        std::fs::create_dir_all(&out).unwrap();
+        for e in std::fs::read_dir(libdir).unwrap().flatten() {
+            let p = e.path();
+            if p.extension().is_some_and(|x| x == "a") {
+                std::os::unix::fs::symlink(&p, out.join(e.file_name())).unwrap();
+            }
+        }
+        out.display().to_string()
+    }
+    #[cfg(not(unix))]
+    {
+        libdir.to_string()
+    }
 }
