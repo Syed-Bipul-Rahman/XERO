@@ -4,6 +4,7 @@
 fn main() {
     println!("cargo:rerun-if-env-changed=XERO_LLVM_CONFIG");
     println!("cargo:rerun-if-env-changed=XERO_LLVM_EXTRA_LIBS");
+    println!("cargo:rerun-if-env-changed=XERO_LLVM_STATIC_SYSLIBS");
     println!("cargo:rerun-if-changed=src/llvm/lld_shim.cpp");
     #[cfg(feature = "llvm")]
     link_llvm();
@@ -98,7 +99,11 @@ fn link_llvm() {
             .trim_end_matches(".a")
             .trim_end_matches(".so")
             .trim_end_matches(".tbd");
-        if !name.is_empty() {
+        // system libraries to link statically, e.g. Homebrew's zstd on macOS
+        let static_sys = std::env::var("XERO_LLVM_STATIC_SYSLIBS").unwrap_or_default();
+        if static_sys.split_whitespace().any(|s| s == name) {
+            println!("cargo:rustc-link-lib=static={name}");
+        } else if !name.is_empty() {
             println!("cargo:rustc-link-lib={name}");
         }
     }

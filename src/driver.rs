@@ -700,7 +700,7 @@ fn link_with_system(opts: &Options, obj: &Path, out: &Path, libc: bool) -> Resul
         if c.ends_with("link.exe") {
             // Visual Studio's linker, with the environment it needs
             #[cfg(windows)]
-            if let Some(tool) = cc_runtime::windows_registry::find_tool("x86_64-pc-windows-msvc", "link.exe") {
+            if let Some(tool) = cc::windows_registry::find_tool("x86_64-pc-windows-msvc", "link.exe") {
                 cmd = tool.to_command();
             }
             cmd.arg("/nologo")

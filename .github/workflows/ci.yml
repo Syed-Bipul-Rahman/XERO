@@ -161,8 +161,17 @@ jobs:
         shell: bash
         run: |
           curl -fsSL "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/${{ matrix.llvm }}.tar.xz" -o llvm.tar.xz
-          mkdir -p "$RUNNER_TEMP/llvm" && tar -xJf llvm.tar.xz -C "$RUNNER_TEMP/llvm" --strip-components=1
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            7z x -y llvm.tar.xz > /dev/null && 7z x -y llvm.tar -o"$RUNNER_TEMP" > /dev/null && mv "$RUNNER_TEMP/${{ matrix.llvm }}" "$RUNNER_TEMP/llvm" && rm llvm.tar
+          else
+            mkdir -p "$RUNNER_TEMP/llvm" && tar -xJf llvm.tar.xz -C "$RUNNER_TEMP/llvm" --strip-components=1
+          fi
           rm llvm.tar.xz
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            # link zstd into xeroc (the prebuilt LLVM uses it; macOS does not ship it)
+            echo "XERO_LLVM_STATIC_SYSLIBS=zstd" >> "$GITHUB_ENV"
+            echo "RUSTFLAGS=-L $(brew --prefix zstd)/lib" >> "$GITHUB_ENV"
+          fi
           ls "$RUNNER_TEMP/llvm/lib" | grep -iE "^(lib)?lld" | tr '\n' ' ' > lld.txt || true
           echo "::warning title=llvm package::lld: $(cat lld.txt) syslibs: $("$RUNNER_TEMP/llvm/bin/llvm-config" --system-libs --link-static 2>&1 | tr '\n' ' ')"
           echo "XERO_LLVM_CONFIG=$RUNNER_TEMP/llvm/bin/llvm-config" >> "$GITHUB_ENV"
