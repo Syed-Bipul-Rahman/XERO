@@ -120,8 +120,8 @@ jobs:
             done
             mkdir -p llvm
             # the LLVM CMake exports of Alpine name a few libraries it does not ship
-            for f in $(grep -ohE "/usr/lib/llvm18/lib/lib[A-Za-z0-9_]+\.a" /usr/lib/llvm18/lib/cmake/llvm/LLVMExports*.cmake | sort -u); do
-              [ -e "$f" ] || ar rc "$f"
+            for f in $(grep -ohE "lib/lib[A-Za-z0-9_]+\.a" /usr/lib/llvm18/lib/cmake/llvm/LLVMExports*.cmake | sort -u); do
+              [ -e "/usr/lib/llvm18/$f" ] || ar rc "/usr/lib/llvm18/$f"
             done
             cmake -G Ninja -S lld -B lld-build -DCMAKE_BUILD_TYPE=Release -DLLVM_DIR=/usr/lib/llvm18/lib/cmake/llvm -DLLVM_MAIN_SRC_DIR=/tmp/llvm-src/llvm -DLLVM_INCLUDE_TESTS=OFF -DBUILD_SHARED_LIBS=OFF -DCMAKE_INSTALL_PREFIX=/opt/lld > /tmp/lld-cmake.log 2>&1 || { echo "::error title=lld cmake::$(tail -30 /tmp/lld-cmake.log | tr "\n" "|")"; exit 1; }
             ninja -C lld-build lldCOFF lldELF lldMachO lldWasm lldCommon > /tmp/lld-build.log 2>&1 || { echo "::error title=lld build::$(grep -E "error" /tmp/lld-build.log | head -20 | tr "\n" "|")"; exit 1; }
