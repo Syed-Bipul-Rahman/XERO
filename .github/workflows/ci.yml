@@ -143,6 +143,45 @@ jobs:
             tail -3 /tmp/test.log
           '
 
+  prebuilt-llvm:
+    # macOS and Windows release builds: LLVM's official prebuilt libraries.
+    name: built-in LLVM (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            llvm: clang+llvm-18.1.8-arm64-apple-macos11
+          - os: windows-2022
+            llvm: clang+llvm-18.1.8-x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download LLVM
+        shell: bash
+        run: |
+          curl -fsSL "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/${{ matrix.llvm }}.tar.xz" -o llvm.tar.xz
+          mkdir -p "$RUNNER_TEMP/llvm" && tar -xJf llvm.tar.xz -C "$RUNNER_TEMP/llvm" --strip-components=1
+          rm llvm.tar.xz
+          ls "$RUNNER_TEMP/llvm/lib" | grep -iE "^(lib)?lld" | tr '\n' ' ' > lld.txt || true
+          echo "::warning title=llvm package::lld: $(cat lld.txt) syslibs: $("$RUNNER_TEMP/llvm/bin/llvm-config" --system-libs --link-static 2>&1 | tr '\n' ' ')"
+          echo "XERO_LLVM_CONFIG=$RUNNER_TEMP/llvm/bin/llvm-config" >> "$GITHUB_ENV"
+      - name: Build
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then export RUSTFLAGS="-C target-feature=+crt-static"; fi
+          cargo build --release --features llvm > build.log 2>&1 || { echo "::error title=build::$(grep -E "error|unresolved|undefined" build.log | sort -u | head -30 | tr '\n' '|')"; exit 1; }
+          ls -l target/release/
+      - name: Test
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then export RUSTFLAGS="-C target-feature=+crt-static"; fi
+          # the runner's own LLVM must not be used
+          export PATH="$(echo "$PATH" | tr ':' '\n' | grep -viE "llvm" | paste -sd: -)"
+          ./target/release/xeroc run examples/hello.xr
+          cargo test --release --features llvm > test.log 2>&1 || { echo "::error title=test::$(tail -40 test.log | tr '\n' '|')"; exit 1; }
+          tail -5 test.log
+
   installers:
     # Builds a release-style archive and installs it with the real install scripts.
     name: installer (${{ matrix.os }})

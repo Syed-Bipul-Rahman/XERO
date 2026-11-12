@@ -15,9 +15,11 @@ path = "src/lib.rs"
 
 [features]
 # Link LLVM and lld into xeroc, so no clang is needed (see build.rs).
-llvm = ["dep:cc"]
+llvm = ["dep:cc", "dep:cc-runtime"]
 
 [dependencies]
+# finds MSVC's link.exe (and its library paths) on Windows
+cc-runtime = { package = "cc", version = "1", optional = true }
 
 [build-dependencies]
 cc = { version = "1", optional = true }
