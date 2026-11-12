@@ -644,6 +644,11 @@ impl<'a> Ck<'a> {
                 Loans::new()
             }
             K::FnRef(_) => Loans::new(),
+            // suspending keeps every local where it is (the frame does not move)
+            K::Suspend(_, v) => {
+                self.expr(v);
+                Loans::new()
+            }
             K::CallPtr(f, args) => {
                 let lf = self.expr(f);
                 self.in_flight.push(lf);
@@ -890,10 +895,20 @@ impl<'a> Ck<'a> {
             if !self.ck.has_refs(inner) {
                 continue;
             }
+            // a poll's `cx: &mut Context` is only stored by something that
+            // can hold a Context (a frame keeps it just for one poll)
+            let ctx = self.ck.prelude_adt("Context");
+            let holds_ctx = ctx.is_some_and(|c| {
+                !matches!(**inner, Ty::Frame(_)) && self.ck.mentions_adt(inner, c)
+            });
             let mut others: Loans = per
                 .iter()
                 .enumerate()
                 .filter(|(j, _)| *j != i)
+                .filter(|(j, _)| {
+                    let is_cx = matches!(&args[*j].ty, Ty::Ref(t, _) if matches!(&**t, Ty::Adt(id, _) if Some(*id) == ctx));
+                    !is_cx || holds_ctx
+                })
                 .flat_map(|(_, l)| l.iter().copied())
                 .collect();
             let deep = self.inner_loans(&others);
@@ -1596,6 +1611,10 @@ impl OriginCx<'_> {
             | K::Unit
             | K::Continue(_)
             | K::FnRef(_) => Origins::new(),
+            K::Suspend(_, v) => {
+                self.expr(v);
+                Origins::new()
+            }
         }
     }
 }

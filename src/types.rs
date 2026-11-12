@@ -111,6 +111,9 @@ pub enum Ty {
     Assoc(Box<AssocTy>),
     /// A trait object (`dyn Shape`): unsized; used behind `&`, `&mut`, `Box`.
     Dyn(u32),
+    /// The future returned by calling an `async fn` instance: its state
+    /// machine (the state, the function's locals and their drop flags).
+    Frame(u32),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -324,6 +327,7 @@ impl fmt::Display for TyFmt<'_> {
             Ty::Param(i) => write!(f, "{}", (self.param_name)(*i)),
             Ty::Assoc(a) => write!(f, "{}.{}", sub(&a.base), a.name),
             Ty::Dyn(t) => write!(f, "dyn {}", (self.trait_name)(*t)),
+            Ty::Frame(id) => write!(f, "future#{id}"),
             Ty::Closure(id) => write!(f, "closure#{id}"),
             Ty::FnPtr(ps, r) => {
                 write!(f, "fn(")?;

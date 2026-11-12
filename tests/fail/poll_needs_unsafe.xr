@@ -1,0 +1,7 @@
+async fn one() -> i32 { 1 }
+fn main() {
+    let mut f = one()
+    let mut cx = Context.new(Waker.noop())
+    f.poll(&mut cx)
+}
+// error: polling a future (it must not move afterwards) is unsafe and requires an `unsafe { ... }` block

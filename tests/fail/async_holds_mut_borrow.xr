@@ -1,0 +1,8 @@
+async fn count(v: &mut Vec<i32>) { v.push(1) }
+fn main() {
+    let mut v: Vec<i32> = Vec.new()
+    let f = count(&mut v)
+    v.push(2)
+    let g = f
+}
+// error: cannot borrow `v` because it is mutably borrowed

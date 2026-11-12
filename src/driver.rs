@@ -61,6 +61,7 @@ pub const STD_MODULES: &[(&str, &str)] = &[
     ("std.sync", include_str!("../std/sync.xr")),
     ("std.env", include_str!("../std/env.xr")),
     ("std.fs", include_str!("../std/fs.xr")),
+    ("std.task", include_str!("../std/task.xr")),
 ];
 
 /// The OS layer `std.sys`, chosen per target.

@@ -1,0 +1,72 @@
+// .await in conditions, matches and loops; async methods; generic async fns; a hand-written future.
+
+import std.task
+
+/// A leaf future: pending `n` times, waking itself each time.
+struct Countdown { n: i32 }
+impl Future for Countdown {
+    type Output = i32
+    unsafe fn poll(&mut self, cx: &mut Context) -> Poll<i32> {
+        if self.n == 0 { return Poll.Ready(42) }
+        self.n -= 1
+        cx.waker().wake()
+        Poll.Pending
+    }
+}
+
+struct Account { balance: i64 }
+impl Account {
+    async fn deposit(&mut self, amount: i64) -> i64 {
+        task.yield_now().await
+        self.balance += amount
+        self.balance
+    }
+}
+
+async fn is_even(n: i32) -> bool {
+    task.yield_now().await
+    n % 2 == 0
+}
+
+async fn pick<T>(a: T, b: T, first: bool) -> T {
+    task.yield_now().await
+    if first { a } else { b }
+}
+
+async fn classify(n: i32) -> String {
+    let mut s = String.new()
+    if is_even(n).await {
+        s.push_str("even")
+    } else {
+        s.push_str("odd")
+    }
+    match (Countdown { n: 2 }).await {
+        42 => s.push_str("!")
+        _ => s.push_str("?")
+    }
+    let mut k = 0
+    while !is_even(k + n).await {
+        k += 1
+    }
+    s.push_int(k as i64)
+    s.push_int(pick(10, 20, n > 2).await as i64)
+    s
+}
+
+fn main() {
+    println(task.block_on(Countdown { n: 3 }))
+    let mut acc = Account { balance: 100 }
+    println(task.block_on(acc.deposit(50)))
+    println(acc.balance)
+    println(&task.block_on(classify(3)))
+    println(&task.block_on(classify(4)))
+    println(&task.block_on(pick(String.from("a"), String.from("b"), false)))
+}
+
+// output:
+// 42
+// 150
+// 150
+// odd!110
+// even!010
+// b

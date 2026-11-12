@@ -37,6 +37,8 @@ pub struct Codegen<'a> {
     externs: HashMap<String, (Vec<Ty>, Ty, bool)>,
     // per function
     func: Option<&'a Func>,
+    /// `async fn` instances by frame id (their locals give the frame layout).
+    frames: HashMap<u32, &'a Func>,
     body: String,
     allocas: String,
     tmp: u32,
@@ -82,6 +84,11 @@ pub fn generate(
             })
             .collect(),
         func: None,
+        frames: prog
+            .funcs
+            .iter()
+            .filter_map(|f| f.async_frame.map(|(id, _)| (id, f)))
+            .collect(),
         body: String::new(),
         allocas: String::new(),
         tmp: 0,
@@ -360,6 +367,10 @@ impl<'a> Codegen<'a> {
             Ty::Bool => "i1".into(),
             Ty::Never => "{}".into(),
             Ty::Str | Ty::Slice(_) | Ty::Dyn(_) => "i8".into(),
+            Ty::Frame(id) => {
+                let t = self.frame_tuple(*id);
+                self.llty(&t)
+            }
             Ty::Ref(inner, _) | Ty::Ptr(inner) => {
                 if inner.is_unsized() {
                     format!("{{ ptr, {} }}", self.usize_ty())
@@ -423,6 +434,10 @@ impl<'a> Codegen<'a> {
             Ty::Bool => (1, 1),
             Ty::Never | Ty::Param(_) | Ty::Assoc(_) => (0, 1),
             Ty::Str | Ty::Slice(_) | Ty::Dyn(_) => (0, 1),
+            Ty::Frame(id) => {
+                let t = self.frame_tuple(*id);
+                self.layout(&t)
+            }
             Ty::Ref(inner, _) | Ty::Ptr(inner) => {
                 if inner.is_unsized() {
                     (2 * p, p)
@@ -642,7 +657,34 @@ impl<'a> Codegen<'a> {
         self.loops.clear();
 
         let mut params = Vec::new();
+        if let Some((id, _)) = f.async_frame {
+            // an async fn's `poll(frame, cx)`: its locals are frame fields
+            params.push("ptr %frame".to_string());
+            params.push("ptr %cx".to_string());
+            let ft = self.llty(&Ty::Frame(id));
+            let _ = writeln!(
+                self.allocas,
+                "  %frame.state = getelementptr inbounds {ft}, ptr %frame, i32 0, i32 0"
+            );
+            for (i, l) in f.locals.iter().enumerate() {
+                let _ = writeln!(
+                    self.allocas,
+                    "  %l{i} = getelementptr inbounds {ft}, ptr %frame, i32 0, i32 {}",
+                    i + 1
+                );
+                if let Some(fi) = self.frame_flag_index(id, i) {
+                    let _ = writeln!(
+                        self.allocas,
+                        "  %f{i} = getelementptr inbounds {ft}, ptr %frame, i32 0, i32 {fi}"
+                    );
+                    self.require_glue(&l.ty);
+                }
+            }
+        }
         for (i, &p) in f.params.iter().enumerate() {
+            if f.async_frame.is_some() {
+                break;
+            }
             let t = &f.locals[p as usize].ty;
             let pty = if f.export {
                 self.abi_param(t)
@@ -652,6 +694,9 @@ impl<'a> Codegen<'a> {
             params.push(format!("{pty} %p{i}"));
         }
         for (i, l) in f.locals.iter().enumerate() {
+            if f.async_frame.is_some() {
+                break;
+            }
             let _ = writeln!(self.allocas, "  %l{i} = alloca {}", self.llty(&l.ty));
             if self.needs_drop(&l.ty) {
                 let _ = writeln!(self.allocas, "  %f{i} = alloca i1");
@@ -660,6 +705,9 @@ impl<'a> Codegen<'a> {
             }
         }
         for (i, &p) in f.params.iter().enumerate() {
+            if f.async_frame.is_some() {
+                break;
+            }
             let t = f.locals[p as usize].ty.clone();
             let _ = writeln!(self.body, "  store {} %p{i}, ptr %l{p}", self.llty(&t));
             if self.needs_drop(&t) {
@@ -667,9 +715,15 @@ impl<'a> Codegen<'a> {
             }
         }
         self.scopes.push(f.params.clone());
+        if f.async_frame.is_some() {
+            self.async_entry(f);
+        }
         let v = self.expr(&f.body);
         if !self.terminated {
             self.exit_scopes(0);
+            if f.async_frame.is_some() {
+                self.ins("store i32 -1, ptr %frame.state");
+            }
             if f.ret.is_unit() || f.ret.is_never() {
                 self.term("ret void");
             } else {
@@ -717,6 +771,56 @@ impl<'a> Codegen<'a> {
         if self.needs_drop(t) && self.glue_done.insert(t.clone()) {
             self.glue_queue.push(t.clone());
         }
+    }
+
+    /// A frame laid out as a tuple: the state, every local, then a drop
+    /// flag for each local that needs one.
+    fn frame_tuple(&self, id: u32) -> Ty {
+        let Some(f) = self.frames.get(&id) else {
+            // never polled or generated: only its state
+            return Ty::Tuple(vec![Ty::Int(IntTy::U32)]);
+        };
+        let mut ts = vec![Ty::Int(IntTy::U32)];
+        ts.extend(f.locals.iter().map(|l| l.ty.clone()));
+        for l in &f.locals {
+            if self.needs_drop(&l.ty) {
+                ts.push(Ty::Bool);
+            }
+        }
+        Ty::Tuple(ts)
+    }
+
+    /// Field index of local `l`'s drop flag in frame `id`.
+    fn frame_flag_index(&self, id: u32, l: usize) -> Option<usize> {
+        let f = self.frames.get(&id)?;
+        if !self.needs_drop(&f.locals[l].ty) {
+            return None;
+        }
+        let before = f.locals[..l]
+            .iter()
+            .filter(|x| self.needs_drop(&x.ty))
+            .count();
+        Some(1 + f.locals.len() + before)
+    }
+
+    /// Start of an async fn's `poll`: remember the context, then continue
+    /// where the previous `poll` stopped.
+    fn async_entry(&mut self, f: &Func) {
+        let (_, cx) = f.async_frame.unwrap();
+        self.ins(&format!("store ptr %cx, ptr %l{cx}"));
+        let mut states = Vec::new();
+        collect_suspends(&f.body, &mut states);
+        let st = self.fresh();
+        self.ins(&format!("{st} = load i32, ptr %frame.state"));
+        let mut cases = String::from("i32 0, label %start");
+        for k in &states {
+            cases.push_str(&format!(" i32 {k}, label %resume{k}"));
+        }
+        // polling a finished future is a bug
+        self.term(&format!("switch i32 {st}, label %polled_done [ {cases} ]"));
+        self.start("polled_done");
+        self.trap();
+        self.start("start");
     }
 
     fn glue_name(&self, t: &Ty) -> String {
@@ -852,6 +956,37 @@ impl<'a> Codegen<'a> {
             Ty::Closure(id) => {
                 let fs = self.ck.closures[*id as usize].fields.clone();
                 self.drop_fields(t, &fs);
+            }
+            Ty::Frame(id) => {
+                // drop the locals that are alive in the suspended function
+                let id = *id;
+                if let Some(f) = self.frames.get(&id).copied() {
+                    let ft = self.llty(t);
+                    for (i, l) in f.locals.iter().enumerate().rev() {
+                        let Some(fi) = self.frame_flag_index(id, i) else {
+                            continue;
+                        };
+                        let fp = self.fresh();
+                        self.ins(&format!(
+                            "{fp} = getelementptr inbounds {ft}, ptr %p, i32 0, i32 {fi}"
+                        ));
+                        let c = self.fresh();
+                        self.ins(&format!("{c} = load i1, ptr {fp}"));
+                        let yes = self.new_label("live");
+                        let no = self.new_label("dead");
+                        self.term(&format!("br i1 {c}, label %{yes}, label %{no}"));
+                        self.start(&yes);
+                        let lp = self.fresh();
+                        self.ins(&format!(
+                            "{lp} = getelementptr inbounds {ft}, ptr %p, i32 0, i32 {}",
+                            i + 1
+                        ));
+                        let lt = l.ty.clone();
+                        self.drop_at(&lp, &lt);
+                        self.br(&no);
+                        self.start(&no);
+                    }
+                }
             }
             Ty::Array(e, n) => {
                 let aty = self.llty(t);
@@ -1493,12 +1628,23 @@ impl<'a> Codegen<'a> {
                 self.br(&head);
                 "poison".into()
             }
+            K::Suspend(k, pending) => {
+                let v = self.expr(pending);
+                self.ins(&format!("store i32 {k}, ptr %frame.state"));
+                let lt = self.llty(&pending.ty);
+                self.term(&format!("ret {lt} {v}"));
+                self.start(&format!("resume{k}"));
+                self.unit()
+            }
             K::Return(v) => {
                 let val = v.as_ref().map(|v| self.expr(v));
                 if self.terminated {
                     return "poison".into();
                 }
                 self.exit_scopes(0);
+                if self.func.unwrap().async_frame.is_some() {
+                    self.ins("store i32 -1, ptr %frame.state");
+                }
                 let rt = self.func.unwrap().ret.clone();
                 match val {
                     Some(v) if !rt.is_unit() && !rt.is_never() => {
@@ -2160,6 +2306,29 @@ impl<'a> Codegen<'a> {
                 ));
                 r
             }
+            Intrinsic::MakeFrame(id) => {
+                // state 0, the arguments in their locals, all other flags clear
+                let vals: Vec<String> = args.iter().map(|a| self.expr(a)).collect();
+                let ft = self.llty(ty);
+                let mut cur = "zeroinitializer".to_string();
+                if let Some(f) = self.frames.get(id).copied() {
+                    for (k, (&p, v)) in f.params.iter().zip(&vals).enumerate() {
+                        let lt = self.llty(&args[k].ty);
+                        let r = self.fresh();
+                        self.ins(&format!(
+                            "{r} = insertvalue {ft} {cur}, {lt} {v}, {}",
+                            p as usize + 1
+                        ));
+                        cur = r;
+                        if let Some(fi) = self.frame_flag_index(*id, p as usize) {
+                            let r = self.fresh();
+                            self.ins(&format!("{r} = insertvalue {ft} {cur}, i1 true, {fi}"));
+                            cur = r;
+                        }
+                    }
+                }
+                cur
+            }
             Intrinsic::DataPtr => {
                 let v = self.expr(&args[0]);
                 let lt = self.llty(&args[0].ty);
@@ -2593,4 +2762,12 @@ fn pat_has_binds(p: &Pat) -> bool {
         Pat::Deref(inner) => pat_has_binds(inner),
         _ => false,
     }
+}
+
+/// The states of an async fn's suspension points.
+fn collect_suspends(e: &crate::xir::Expr, out: &mut Vec<u32>) {
+    if let crate::xir::ExprKind::Suspend(k, _) = &e.kind {
+        out.push(*k);
+    }
+    crate::check::xir_children(e, &mut |c| collect_suspends(c, out));
 }

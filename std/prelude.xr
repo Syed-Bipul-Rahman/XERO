@@ -1217,3 +1217,71 @@ impl<T> [T] {
         SliceIterMut { s: self, i: 0 }
     }
 }
+
+// ------------------------------------------------------------ futures
+
+/// The result of polling a future: its value, or not yet.
+pub enum Poll<T> {
+    Ready(T)
+    Pending
+}
+
+impl<T> Poll<T> {
+    pub fn is_ready(&self) -> bool {
+        match self {
+            Poll.Ready(_) => true
+            Poll.Pending => false
+        }
+    }
+}
+
+/// Tells an executor that a task can make progress: `waker.wake()`.
+pub copy struct Waker {
+    data: *u8
+    wake_fn: fn(*u8)
+}
+
+fn wake_nothing(data: *u8) {}
+
+impl Waker {
+    /// A waker that calls `wake_fn(data)`.
+    pub fn new(data: *u8, wake_fn: fn(*u8)) -> Waker {
+        Waker { data: data, wake_fn: wake_fn }
+    }
+
+    /// A waker that does nothing (for futures that never wait).
+    pub fn noop() -> Waker {
+        Waker { data: 0 as *u8, wake_fn: wake_nothing }
+    }
+
+    pub fn wake(&self) {
+        self.wake_fn(self.data)
+    }
+}
+
+/// What a future gets when polled: the waker of the task polling it.
+pub struct Context {
+    waker: Waker
+}
+
+impl Context {
+    pub fn new(waker: Waker) -> Context {
+        Context { waker: waker }
+    }
+
+    pub fn waker(&self) -> Waker {
+        self.waker
+    }
+}
+
+/// A value that will be ready later. `async fn` returns one; `.await`
+/// waits for one. `poll` makes progress and returns `Ready(value)` or
+/// `Pending` (after arranging for `cx.waker()` to be woken).
+///
+/// `poll` is unsafe to call: once a future has been polled it must not be
+/// moved, because an `async fn`'s locals may borrow each other. `.await`
+/// and the executors in `std.task` uphold this.
+pub trait Future {
+    type Output
+    unsafe fn poll(&mut self, cx: &mut Context) -> Poll<Self.Output>
+}

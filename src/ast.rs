@@ -110,6 +110,8 @@ pub struct FnDecl {
     pub body: Option<Block>,
     pub is_unsafe: bool,
     pub is_export: bool,
+    /// `async fn`: calling it returns a future.
+    pub is_async: bool,
     pub span: Span,
 }
 
@@ -327,6 +329,8 @@ pub enum ExprKind {
     Closure(Box<ClosureExpr>),
     /// `spawn { ... }` / `spawn move { ... }`: start a thread.
     Spawn(bool, Block),
+    /// `future.await`
+    Await(Box<Expr>),
 }
 
 #[derive(Clone, Debug)]

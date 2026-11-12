@@ -26,6 +26,15 @@ pub struct Scope {
 }
 
 #[derive(Clone)]
+pub struct AsyncCx {
+    /// The `&mut Context` of the current `poll`.
+    pub cx: LocalId,
+    /// `Poll<T>` for the function's return type `T`.
+    pub poll_ty: Ty,
+    pub next_state: u32,
+}
+
+#[derive(Clone)]
 pub enum IndexCall {
     /// `a[i]` through `Index`: the base type and the index value.
     Index(Ty, X),
@@ -68,6 +77,8 @@ pub struct FnCx<'a> {
     pub index_calls: HashMap<Span, IndexCall>,
     /// Variables bound by the first alternative of the `|` pattern being lowered.
     pub or_reuse: Option<Vec<(String, LocalId)>>,
+    /// Inside an `async fn`: where `.await` gets its context and what `poll` returns.
+    pub async_cx: Option<AsyncCx>,
 }
 
 /// What a path-like expression (`a`, `a.b`, `Type.member`) refers to.
@@ -204,6 +215,7 @@ fn check_fn_inner(
         method_expected: None,
         index_calls: HashMap::new(),
         or_reuse: None,
+        async_cx: None,
     };
     if decl.is_unsafe {
         cx.unsafe_depth = 1;
@@ -243,6 +255,9 @@ fn check_fn_inner(
         }
     }
     let body_ast = decl.body.as_ref().unwrap();
+    if decl.is_async {
+        return check_async_body(cx, key, name, &decl, params, ret_ty, pending_out);
+    }
     let (body, ret_ty) = if let Some(bounds) = &opaque_bounds {
         // `-> impl Trait`: the body's type is the return type. An `Fn(A) -> R`
         // bound types a returned closure's parameters.
@@ -295,12 +310,342 @@ fn check_fn_inner(
             body,
             export: decl.is_export,
             span: decl.span,
+            async_frame: None,
         },
         closures,
     ))
 }
 
+/// The body of an `async fn` instance: checked like any function, then its
+/// result is wrapped in `Poll.Ready`, as its frame's `poll` returns.
+fn check_async_body(
+    mut cx: FnCx,
+    key: &FnKey,
+    name: String,
+    decl: &ast::FnDecl,
+    params: Vec<LocalId>,
+    ret_ty: Ty,
+    pending_out: &mut Option<(Span, Ty)>,
+) -> Result<(xir::Func, Vec<xir::Func>)> {
+    let span = decl.span;
+    let Some(poll_id) = cx.ck.prelude_adt("Poll") else {
+        return Err(Diagnostic::new(
+            span,
+            "`async fn` needs the prelude type `Poll`",
+        ));
+    };
+    let Some(ctx_id) = cx.ck.prelude_adt("Context") else {
+        return Err(Diagnostic::new(
+            span,
+            "`async fn` needs the prelude type `Context`",
+        ));
+    };
+    let poll_ty = Ty::Adt(poll_id, vec![ret_ty.clone()]);
+    let param_tys: Vec<Ty> = params
+        .iter()
+        .map(|p| cx.locals[*p as usize].ty.clone())
+        .collect();
+    let frame = cx.ck.frame_for(key, &name, ret_ty.clone(), param_tys);
+    let cx_ty = Ty::reference(Ty::Adt(ctx_id, Vec::new()), true);
+    let cx_local = cx.new_local("cx#poll", cx_ty, false, span, true);
+    cx.async_cx = Some(AsyncCx {
+        cx: cx_local,
+        poll_ty: poll_ty.clone(),
+        next_state: 1,
+    });
+    cx.ret_ty = ret_ty.clone();
+    let body_ast = decl.body.as_ref().unwrap();
+    let body = cx.block(body_ast, Some(&ret_ty));
+    let body = body.and_then(|b| cx.coerce(b, &ret_ty, body_ast.span));
+    *pending_out = cx.pending.take();
+    let body = body?;
+    let bs = body.span;
+    let body = cx.ready(body, bs);
+    let mut locals = cx.locals;
+    let body = spill_suspends(body, &mut locals);
+    let closures = std::mem::take(&mut cx.pending_funcs);
+    Ok((
+        xir::Func {
+            name,
+            params,
+            ret: poll_ty,
+            locals,
+            body,
+            export: false,
+            span,
+            async_frame: Some((frame, cx_local)),
+        },
+        closures,
+    ))
+}
+
+/// Make values computed before a suspension point survive it: the operands
+/// of an operation, up to one that suspends, are stored in locals first
+/// (locals live in the frame; registers do not survive a suspension).
+fn spill_suspends(e: X, locals: &mut Vec<xir::Local>) -> X {
+    fn suspends(e: &X) -> bool {
+        let mut found = matches!(e.kind, K::Suspend(..));
+        if !found {
+            super::xir_children(e, &mut |c| {
+                if suspends(c) {
+                    found = true;
+                }
+            });
+        }
+        found
+    }
+    fn spill_list(
+        xs: Vec<X>,
+        locals: &mut Vec<xir::Local>,
+        pre: &mut Vec<xir::Stmt>,
+        scope: &mut Vec<LocalId>,
+    ) -> Vec<X> {
+        let last = xs.iter().rposition(suspends);
+        let mut out = Vec::new();
+        for (i, a) in xs.into_iter().enumerate() {
+            let a = spill_suspends(a, locals);
+            match last {
+                // operands up to the one that suspends are evaluated (and
+                // stored) first; the operation then reads them all afterwards
+                Some(l) if i <= l => {
+                    let id = locals.len() as LocalId;
+                    locals.push(xir::Local {
+                        name: "spill".into(),
+                        ty: a.ty.clone(),
+                        mutable: true,
+                        span: a.span,
+                        synthetic: true,
+                    });
+                    let (ty, sp) = (a.ty.clone(), a.span);
+                    pre.push(xir::Stmt::Let(id, a));
+                    scope.push(id);
+                    out.push(x(K::Use(Place::Local(id), UseKind::Move), ty, sp));
+                }
+                _ => out.push(a),
+            }
+        }
+        out
+    }
+    if !suspends(&e) {
+        return e;
+    }
+    let (ty, span) = (e.ty.clone(), e.span);
+    let mut pre = Vec::new();
+    let mut scope = Vec::new();
+    let kind = match e.kind {
+        K::Binary(op, a, b) => {
+            let mut v = spill_list(vec![*a, *b], locals, &mut pre, &mut scope);
+            let b = v.pop().unwrap();
+            let a = v.pop().unwrap();
+            K::Binary(op, Box::new(a), Box::new(b))
+        }
+        K::Call(n, args) => K::Call(n, spill_list(args, locals, &mut pre, &mut scope)),
+        K::CallPtr(f, args) => {
+            let mut all = vec![*f];
+            all.extend(args);
+            let mut v = spill_list(all, locals, &mut pre, &mut scope);
+            let f = v.remove(0);
+            K::CallPtr(Box::new(f), v)
+        }
+        K::Struct(xs) => K::Struct(spill_list(xs, locals, &mut pre, &mut scope)),
+        K::Tuple(xs) => K::Tuple(spill_list(xs, locals, &mut pre, &mut scope)),
+        K::Array(xs) => K::Array(spill_list(xs, locals, &mut pre, &mut scope)),
+        K::Variant(i, xs) => K::Variant(i, spill_list(xs, locals, &mut pre, &mut scope)),
+        K::Intrinsic(i, xs) => K::Intrinsic(i, spill_list(xs, locals, &mut pre, &mut scope)),
+        K::Block(b) => K::Block(xir::Block {
+            stmts: b
+                .stmts
+                .into_iter()
+                .map(|s| match s {
+                    xir::Stmt::Let(l, v) => xir::Stmt::Let(l, spill_suspends(v, locals)),
+                    xir::Stmt::LetPat(p, v) => xir::Stmt::LetPat(p, spill_suspends(v, locals)),
+                    xir::Stmt::Expr(v) => xir::Stmt::Expr(spill_suspends(v, locals)),
+                })
+                .collect(),
+            tail: b.tail.map(|t| Box::new(spill_suspends(*t, locals))),
+            scope: b.scope,
+        }),
+        K::If(c, t, f) => K::If(
+            Box::new(spill_suspends(*c, locals)),
+            Box::new(spill_suspends(*t, locals)),
+            f.map(|f| Box::new(spill_suspends(*f, locals))),
+        ),
+        K::Loop(b, id) => K::Loop(Box::new(spill_suspends(*b, locals)), id),
+        K::Match(p, arms) => K::Match(
+            p,
+            arms.into_iter()
+                .map(|a| xir::Arm {
+                    body: spill_suspends(a.body, locals),
+                    ..a
+                })
+                .collect(),
+        ),
+        K::Assign(p, v) => K::Assign(p, Box::new(spill_suspends(*v, locals))),
+        K::Return(Some(v)) => K::Return(Some(Box::new(spill_suspends(*v, locals)))),
+        K::Break(id, Some(v)) => K::Break(id, Some(Box::new(spill_suspends(*v, locals)))),
+        K::Cast(a, t) => K::Cast(Box::new(spill_suspends(*a, locals)), t),
+        K::Unary(op, a) => K::Unary(op, Box::new(spill_suspends(*a, locals))),
+        k => k,
+    };
+    let inner = x(kind, ty.clone(), span);
+    if pre.is_empty() {
+        return inner;
+    }
+    x(
+        K::Block(xir::Block {
+            stmts: pre,
+            tail: Some(Box::new(inner)),
+            scope,
+        }),
+        ty,
+        span,
+    )
+}
+
 impl<'a> FnCx<'a> {
+    // ---------------------------------------------------------------- async
+
+    /// `Poll.Ready(v)` of this `async fn`'s `Poll<T>`.
+    fn ready(&self, v: X, span: Span) -> X {
+        let poll_ty = self.async_cx.as_ref().unwrap().poll_ty.clone();
+        let Ty::Adt(pid, _) = &poll_ty else {
+            unreachable!()
+        };
+        let idx = self.ck.adts[*pid as usize].variant_index("Ready").unwrap();
+        x(K::Variant(idx, vec![v]), poll_ty, span)
+    }
+
+    /// The `poll` function for a future of type `t`, and its output type.
+    fn poll_fn_of(&mut self, t: &Ty, span: Span) -> Result<(String, Ty)> {
+        if let Ty::Frame(id) = t {
+            let f = &self.ck.frames[*id as usize];
+            return Ok((f.name.clone(), f.output.clone()));
+        }
+        let Some(tid) = self.ck.prelude_trait("Future") else {
+            return self.err(span, "`.await` needs the prelude trait `Future`");
+        };
+        let Some((iid, args)) = self.ck.find_trait_impl(t, tid) else {
+            return self.err(span, format!("`{}` is not a future (it does not implement `Future`), so it cannot be awaited", self.ts(t)));
+        };
+        let Some(&fid) = self.ck.impls[iid as usize].methods.get("poll") else {
+            return self.err(span, "`Future` implementation without `poll`");
+        };
+        let out = self
+            .ck
+            .project(t, Some((tid, Vec::new())), "Output", span)?;
+        let name = self.ck.instance(FnKey {
+            fid,
+            targs: args,
+            self_ty: None,
+        });
+        Ok((name, out))
+    }
+
+    /// `fut.await`:
+    /// `{ let f = fut; loop { match poll(&mut f, cx) { Ready(v) => break v, Pending => suspend } } }`
+    fn await_expr(&mut self, inner: &ast::Expr, span: Span) -> Result<X> {
+        let Some(actx) = self.async_cx.clone() else {
+            return self.err(span, "`.await` is only allowed inside an `async fn`");
+        };
+        let fut = self.expr(inner, None)?;
+        let fty = fut.ty.clone();
+        let (poll, out) = self.poll_fn_of(&fty, span)?;
+        let state = actx.next_state;
+        self.async_cx.as_mut().unwrap().next_state += 1;
+        let Ty::Adt(pid, _) = &actx.poll_ty else {
+            unreachable!()
+        };
+        let pid = *pid;
+        let ready = self.ck.adts[pid as usize].variant_index("Ready").unwrap();
+        let pending = self.ck.adts[pid as usize].variant_index("Pending").unwrap();
+        let inner_poll = Ty::Adt(pid, vec![out.clone()]);
+        let id = self.next_loop;
+        self.next_loop += 1;
+        self.push_scope();
+        let f = self.synthetic("await", fty.clone(), span);
+        let pl = self.synthetic("poll", inner_poll.clone(), span);
+        let v = self.new_local("ready", out.clone(), false, span, true);
+        let cx_ty = self.locals[actx.cx as usize].ty.clone();
+        let Ty::Ref(ctx_inner, _) = cx_ty.clone() else {
+            unreachable!()
+        };
+        let cx_use = x(
+            K::Use(Place::Local(actx.cx), UseKind::Copy),
+            cx_ty.clone(),
+            span,
+        );
+        let cx_arg = x(
+            K::Borrow(Place::Deref(Box::new(cx_use)), true),
+            Ty::reference(*ctx_inner, true),
+            span,
+        );
+        let call = x(
+            K::Call(
+                poll,
+                vec![
+                    x(
+                        K::Borrow(Place::Local(f), true),
+                        Ty::reference(fty.clone(), true),
+                        span,
+                    ),
+                    cx_arg,
+                ],
+            ),
+            inner_poll,
+            span,
+        );
+        let pending_val = x(K::Variant(pending, Vec::new()), actx.poll_ty.clone(), span);
+        let arms = vec![
+            xir::Arm {
+                pat: Pat::Variant(ready, vec![Pat::Bind(v, BindMode::Value)]),
+                guard: None,
+                body: x(
+                    K::Break(
+                        id,
+                        Some(Box::new(x(
+                            K::Use(Place::Local(v), UseKind::Move),
+                            out.clone(),
+                            span,
+                        ))),
+                    ),
+                    Ty::Never,
+                    span,
+                ),
+                span,
+            },
+            xir::Arm {
+                pat: Pat::Variant(pending, Vec::new()),
+                guard: None,
+                body: x(K::Suspend(state, Box::new(pending_val)), Ty::unit(), span),
+                span,
+            },
+        ];
+        let body = x(
+            K::Block(xir::Block {
+                stmts: vec![xir::Stmt::Let(pl, call)],
+                tail: Some(Box::new(x(
+                    K::Match(Place::Local(pl), arms),
+                    Ty::unit(),
+                    span,
+                ))),
+                scope: vec![v],
+            }),
+            Ty::unit(),
+            span,
+        );
+        let lp = x(K::Loop(Box::new(body), id), out.clone(), span);
+        let scope = self.pop_scope();
+        Ok(x(
+            K::Block(xir::Block {
+                stmts: vec![xir::Stmt::Let(f, fut)],
+                tail: Some(Box::new(lp)),
+                scope,
+            }),
+            out,
+            span,
+        ))
+    }
+
     // ------------------------------------------------------------- helpers
 
     pub fn err<T>(&self, span: Span, msg: impl Into<String>) -> Result<T> {
@@ -951,6 +1296,7 @@ impl<'a> FnCx<'a> {
                 self.path_value(e, expected)
             }
             E::Call(callee, args) => self.call(callee, args, expected, span),
+            E::Await(inner) => self.await_expr(inner, span),
             E::Unary(op, inner) => self.unary(*op, inner, expected, span),
             E::Binary(op, a, b) => self.binary(*op, a, b, expected, span),
             E::Assign(lhs, rhs) => {
@@ -1274,6 +1620,14 @@ impl<'a> FnCx<'a> {
                     return self.err(span, "to use `return` in a closure, give it a return type: `|x: i32| -> i32 { ... }`");
                 }
                 let val = match v {
+                    Some(v) if self.async_cx.is_some() => {
+                        let r = self.expr_as(v, &rt)?;
+                        Some(Box::new(self.ready(r, span)))
+                    }
+                    None if self.async_cx.is_some() && rt.is_unit() => {
+                        let u = x(K::Unit, Ty::unit(), span);
+                        Some(Box::new(self.ready(u, span)))
+                    }
                     Some(v) => Some(Box::new(self.expr_as(v, &rt)?)),
                     None => {
                         if !rt.is_unit() {
@@ -2593,6 +2947,15 @@ impl<'a> FnCx<'a> {
             self_ty,
         };
         let name = self.ck.instance(key.clone());
+        if self.ck.fns[fid as usize].decl.is_async {
+            let ptys: Vec<Ty> = xs.iter().map(|a| a.ty.clone()).collect();
+            let frame = self.ck.frame_for(&key, &name, ret, ptys);
+            return Ok(x(
+                K::Intrinsic(xir::Intrinsic::MakeFrame(frame), xs),
+                Ty::Frame(frame),
+                span,
+            ));
+        }
         let ret = if opaque {
             self.ck.opaque_ty(&key, &name, span)?
         } else {
@@ -2828,6 +3191,34 @@ impl<'a> FnCx<'a> {
                     recv_ty = sref.ty.clone();
                     recv = Recv::Value(sref);
                 }
+            }
+        }
+        // `fut.poll(cx)` on an async fn's future
+        if let Ty::Frame(fid) = recv_ty.deref_all().clone() {
+            if name.name == "poll" {
+                self.require_unsafe(span, "polling a future (it must not move afterwards)")?;
+                let fr = &self.ck.frames[fid as usize];
+                let (sym, out) = (fr.name.clone(), fr.output.clone());
+                let Some(pid) = self.ck.prelude_adt("Poll") else {
+                    return self.err(span, "needs the prelude type `Poll`");
+                };
+                let Some(cid) = self.ck.prelude_adt("Context") else {
+                    return self.err(span, "needs the prelude type `Context`");
+                };
+                if args.len() != 1 {
+                    return self.err(span, "`poll` takes one argument: `&mut Context`");
+                }
+                let (mut p, mut t) = self.recv_place(recv, span);
+                while let Ty::Ref(..) = t.clone() {
+                    let (np, nt) = self.deref_place(p, &t, span);
+                    p = np;
+                    t = nt;
+                }
+                p = self.mut_place(p)?;
+                self.note_mut(&p);
+                let r = x(K::Borrow(p, true), Ty::reference(t, true), base.span);
+                let c = self.expr_as(&args[0], &Ty::reference(Ty::Adt(cid, Vec::new()), true))?;
+                return Ok(x(K::Call(sym, vec![r, c]), Ty::Adt(pid, vec![out]), span));
             }
         }
         // trait objects: `shape.area()` on `&dyn Shape`, `Box<dyn Shape>`

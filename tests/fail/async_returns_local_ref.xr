@@ -1,0 +1,6 @@
+async fn bad() -> &i32 {
+    let x = 1
+    &x
+}
+fn main() {}
+// error: `x` does not live long enough: the borrow escapes the block that owns it

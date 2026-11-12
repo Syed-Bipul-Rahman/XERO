@@ -272,6 +272,9 @@ impl Parser {
                 ItemKind::Import(Import { path, names, alias })
             }
             Tok::Kw(Kw::Fn | Kw::Unsafe | Kw::Export) => ItemKind::Fn(self.fn_decl()?),
+            Tok::Kw(Kw::Async) if matches!(self.peek_at(1), Tok::Kw(Kw::Fn)) => {
+                ItemKind::Fn(self.fn_decl()?)
+            }
             Tok::Kw(Kw::Copy) => {
                 self.bump();
                 match self.peek() {
@@ -391,6 +394,7 @@ impl Parser {
     fn fn_decl(&mut self) -> Result<FnDecl> {
         let start = self.span();
         let is_export = self.eat_kw(Kw::Export);
+        let is_async = self.eat_kw(Kw::Async);
         let is_unsafe = self.eat_kw(Kw::Unsafe);
         self.expect_kw(Kw::Fn)?;
         let name = self.ident()?;
@@ -465,6 +469,7 @@ impl Parser {
             body,
             is_unsafe,
             is_export,
+            is_async,
             span: start.to(self.prev_span()),
         })
     }
@@ -1265,14 +1270,27 @@ impl Parser {
                         Tok::Int(n, None) => {
                             let sp = self.bump().span;
                             let span = e.span.to(sp);
-                            e = Expr { kind: ExprKind::TupleField(Box::new(e), n as u32, sp), span };
+                            e = Expr {
+                                kind: ExprKind::TupleField(Box::new(e), n as u32, sp),
+                                span,
+                            };
                         }
-                        Tok::Kw(Kw::Await) => return self.err("`await` is reserved for Xero's concurrency model and not yet implemented"),
+                        Tok::Kw(Kw::Await) => {
+                            let sp = self.bump().span;
+                            let span = e.span.to(sp);
+                            e = Expr {
+                                kind: ExprKind::Await(Box::new(e)),
+                                span,
+                            };
+                        }
                         _ => {
                             let name = self.ident()?;
                             let args = self.try_generic_args().unwrap_or_default();
                             let span = e.span.to(self.prev_span());
-                            e = Expr { kind: ExprKind::Field(Box::new(e), name, args), span };
+                            e = Expr {
+                                kind: ExprKind::Field(Box::new(e), name, args),
+                                span,
+                            };
                         }
                     }
                 }

@@ -232,6 +232,15 @@ pub struct StaticDef {
     pub resolved: Option<Ty>,
 }
 
+/// The state machine of one `async fn` instance (`Ty::Frame`).
+pub struct FrameDef {
+    pub key: FnKey,
+    /// Symbol of the instance, which is the frame's `poll` function.
+    pub name: String,
+    pub output: Ty,
+    pub params: Vec<Ty>,
+}
+
 /// A vtable: drop glue, then the trait's methods, for one concrete type.
 pub struct Vtable {
     pub name: String,
@@ -287,6 +296,9 @@ pub struct Checker {
     assoc_depth: u32,
     /// Vtables for `dyn Trait`: one per (concrete type, trait).
     pub vtables: Vec<Vtable>,
+    /// `async fn` instances' futures.
+    pub frames: Vec<FrameDef>,
+    pub frame_index: HashMap<FnKey, u32>,
     vtable_index: HashMap<(Ty, TraitId), usize>,
     /// Return types of `-> impl Trait` instances, found by checking them early.
     pub opaque: HashMap<FnKey, Ty>,
@@ -350,6 +362,8 @@ impl Checker {
             alias_depth: 0,
             assoc_depth: 0,
             vtables: Vec::new(),
+            frames: Vec::new(),
+            frame_index: HashMap::new(),
             vtable_index: HashMap::new(),
             opaque: HashMap::new(),
             opaque_busy: HashSet::new(),
@@ -1131,6 +1145,7 @@ impl Checker {
                 body: Some(body),
                 is_unsafe: false,
                 is_export: false,
+                is_async: false,
                 span,
             };
             self.fns.push(FnDef {
@@ -1531,7 +1546,7 @@ impl Checker {
         match t {
             Ty::Int(_) | Ty::Float(_) | Ty::Bool | Ty::Never | Ty::Ptr(_) => true,
             Ty::Ref(_, m) => !m,
-            Ty::Str | Ty::Slice(_) | Ty::Dyn(_) => false,
+            Ty::Str | Ty::Slice(_) | Ty::Dyn(_) | Ty::Frame(_) => false,
             Ty::Array(e, _) => self.is_copy(e),
             Ty::Tuple(ts) => ts.iter().all(|t| self.is_copy(t)),
             Ty::Adt(id, args) => {
@@ -1594,6 +1609,11 @@ impl Checker {
         match t {
             // a trait object may hold references
             Ty::Ref(..) | Ty::Dyn(_) => true,
+            // a future holds its arguments
+            Ty::Frame(id) => self.frames[*id as usize]
+                .params
+                .iter()
+                .any(|t| self.has_refs_in(t, depth + 1, seen)),
             // memory owned through a raw pointer (a Vec's buffer) counts too
             Ty::Array(e, _) | Ty::Slice(e) | Ty::Ptr(e) => self.has_refs_in(e, depth + 1, seen),
             Ty::Tuple(ts) => ts.iter().any(|t| self.has_refs_in(t, depth + 1, seen)),
@@ -1635,7 +1655,7 @@ impl Checker {
             return true;
         }
         match t {
-            Ty::Dyn(_) => true,
+            Ty::Dyn(_) | Ty::Frame(_) => true,
             Ty::Array(e, _) | Ty::Ptr(e) => self.drop_uses_in(e, depth + 1, seen),
             Ty::Tuple(ts) => ts.iter().any(|t| self.drop_uses_in(t, depth + 1, seen)),
             Ty::Closure(id) => self.closures[*id as usize]
@@ -1674,7 +1694,7 @@ impl Checker {
             return false;
         }
         match t {
-            Ty::Dyn(_) => true,
+            Ty::Dyn(_) | Ty::Frame(_) => true,
             Ty::Array(e, n) => *n > 0 && self.needs_drop_depth(e, depth + 1),
             Ty::Tuple(ts) => ts.iter().any(|t| self.needs_drop_depth(t, depth + 1)),
             Ty::Closure(id) => self.closures[*id as usize]
@@ -1741,7 +1761,7 @@ impl Checker {
 
     /// Does concrete type `t` implement trait `tid`?
     pub fn implements(&mut self, t: &Ty, tid: TraitId) -> bool {
-        self.find_trait_impl(t, tid).is_some()
+        self.is_future_frame(t, tid) || self.find_trait_impl(t, tid).is_some()
     }
 
     /// Find the impl of `tid` for `t`, returning impl id and its generic args.
@@ -1884,7 +1904,9 @@ impl Checker {
                 }
                 let (tid, targs) =
                     self.resolve_trait_with_args(b, module, &env, Some(a.clone()))?;
-                if self.find_trait_impl_args(a, tid, Some(&targs)).is_none() {
+                if !self.is_future_frame(a, tid)
+                    && self.find_trait_impl_args(a, tid, Some(&targs)).is_none()
+                {
                     let tys = self.ty_str(a);
                     let tname = self.trait_str(tid, &targs);
                     return Err(Diagnostic::new(span, format!("the trait `{tname}` is not implemented for `{tys}` (required by `{}: {tname}`)", g.name.name)));
@@ -1917,7 +1939,8 @@ impl Checker {
             return Ok(ps == aps && r == ar && akind <= *bound_kind);
         }
         let (tid, targs) = self.resolve_trait_with_args(b, module, env, Some(arg.clone()))?;
-        Ok(self.find_trait_impl_args(arg, tid, Some(&targs)).is_some())
+        Ok(self.is_future_frame(arg, tid)
+            || self.find_trait_impl_args(arg, tid, Some(&targs)).is_some())
     }
 
     // ------------------------------------------------------ associated types
@@ -1986,6 +2009,12 @@ impl Checker {
         name: &str,
         span: Span,
     ) -> Result<Ty> {
+        // an `async fn`'s future: its `Output` is the function's return type
+        if let Ty::Frame(id) = base {
+            if name == "Output" {
+                return Ok(self.frames[*id as usize].output.clone());
+            }
+        }
         let mut found: Vec<(ImplId, Vec<Ty>)> = Vec::new();
         for iid in 0..self.impls.len() {
             let Some(tid) = self.impls[iid].trait_id else {
@@ -2232,9 +2261,37 @@ impl Checker {
                 Err(d) => self.error(d),
             }
         }
+        // an async fn whose future would contain itself has no finite size
+        let frame_locals: HashMap<u32, Vec<Ty>> = self
+            .out_funcs
+            .iter()
+            .filter_map(|f| {
+                f.async_frame
+                    .map(|(id, _)| (id, f.locals.iter().map(|l| l.ty.clone()).collect()))
+            })
+            .collect();
+        for (&id, _) in frame_locals.iter() {
+            let mut seen = Vec::new();
+            if self.frame_reaches(&Ty::Frame(id), id, &frame_locals, &mut seen, true) {
+                let fid = self.frames[id as usize].key.fid;
+                let d = &self.fns[fid as usize].decl;
+                let (n, sp) = (d.name.name.clone(), d.name.span);
+                self.error(Diagnostic::new(sp, format!("recursive `async fn` `{n}`: its future would contain itself and have no finite size; make the recursive call in a plain function, or restructure it as a loop")));
+                return;
+            }
+        }
         // Borrow checking runs once every function is known, so calls can use
         // what each callee's result borrows from.
         self.summaries = crate::borrowck::summaries(self, &self.out_funcs);
+        // a future's `poll(&mut frame, cx)` result holds what the frame holds
+        for f in &self.frames {
+            self.summaries
+                .insert(f.name.clone(), [(0, true)].into_iter().collect());
+        }
+        // a frame keeps the `cx` of the current poll only until it returns
+        for f in &self.frames {
+            self.storing.remove(&f.name);
+        }
         self.storing = crate::borrowck::storing_fns(&self.out_funcs);
         for i in 0..self.out_funcs.len() {
             if let Err(ds) = crate::borrowck::check(self, &self.out_funcs[i]) {
@@ -2269,6 +2326,142 @@ impl Checker {
                 Err(d)
             }
         }
+    }
+
+    // ---------------------------------------------------------------- async
+
+    /// The frame type of `async fn` instance `key`.
+    pub fn frame_for(&mut self, key: &FnKey, name: &str, output: Ty, params: Vec<Ty>) -> u32 {
+        if let Some(&id) = self.frame_index.get(key) {
+            return id;
+        }
+        let id = self.frames.len() as u32;
+        self.frames.push(FrameDef {
+            key: key.clone(),
+            name: name.to_string(),
+            output,
+            params,
+        });
+        self.frame_index.insert(key.clone(), id);
+        id
+    }
+
+    /// Does `t` contain frame `target` by value (through other frames' locals)?
+    fn frame_reaches(
+        &self,
+        t: &Ty,
+        target: u32,
+        locals: &HashMap<u32, Vec<Ty>>,
+        seen: &mut Vec<Ty>,
+        root: bool,
+    ) -> bool {
+        if *t == Ty::Frame(target) && !root {
+            return true;
+        }
+        if seen.contains(t) {
+            return false;
+        }
+        match t {
+            Ty::Frame(id) => {
+                if *id == target && !root {
+                    return true;
+                }
+                seen.push(t.clone());
+                let r = locals
+                    .get(id)
+                    .map(|ls| ls.clone())
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|l| self.frame_reaches(l, target, locals, seen, false));
+                r
+            }
+            Ty::Array(e, _) => self.frame_reaches(e, target, locals, seen, false),
+            Ty::Tuple(ts) => ts
+                .iter()
+                .any(|x| self.frame_reaches(x, target, locals, seen, false)),
+            Ty::Closure(id) => self.closures[*id as usize]
+                .fields
+                .clone()
+                .iter()
+                .any(|x| self.frame_reaches(x, target, locals, seen, false)),
+            Ty::Adt(id, args) => {
+                seen.push(t.clone());
+                let a = &self.adts[*id as usize];
+                let fs: Vec<Ty> = a
+                    .fields
+                    .iter()
+                    .chain(a.variants.iter().flatten())
+                    .map(|f| f.subst(args))
+                    .collect();
+                fs.iter()
+                    .any(|x| self.frame_reaches(x, target, locals, seen, false))
+            }
+            _ => false,
+        }
+    }
+
+    /// Can a value of type `t` contain an `adt` (directly, in fields, behind
+    /// references or pointers)?
+    pub fn mentions_adt(&self, t: &Ty, adt: AdtId) -> bool {
+        let mut seen = Vec::new();
+        self.mentions_adt_in(t, adt, &mut seen)
+    }
+
+    fn mentions_adt_in(&self, t: &Ty, adt: AdtId, seen: &mut Vec<Ty>) -> bool {
+        if seen.contains(t) {
+            return false;
+        }
+        match t {
+            Ty::Adt(id, args) => {
+                if *id == adt {
+                    return true;
+                }
+                seen.push(t.clone());
+                let a = &self.adts[*id as usize];
+                let fs: Vec<Ty> = a
+                    .fields
+                    .iter()
+                    .chain(a.variants.iter().flatten())
+                    .map(|f| f.subst(args))
+                    .collect();
+                fs.iter().any(|f| self.mentions_adt_in(f, adt, seen))
+            }
+            Ty::Ref(e, _) | Ty::Ptr(e) | Ty::Array(e, _) | Ty::Slice(e) => {
+                self.mentions_adt_in(e, adt, seen)
+            }
+            Ty::Tuple(ts) => ts.iter().any(|x| self.mentions_adt_in(x, adt, seen)),
+            Ty::Closure(id) => self.closures[*id as usize]
+                .fields
+                .iter()
+                .any(|x| self.mentions_adt_in(x, adt, seen)),
+            Ty::Frame(id) => self.frames[*id as usize]
+                .params
+                .iter()
+                .any(|x| self.mentions_adt_in(x, adt, seen)),
+            // a trait object could be anything
+            Ty::Dyn(_) => true,
+            _ => false,
+        }
+    }
+
+    pub fn prelude_trait(&self, name: &str) -> Option<TraitId> {
+        let p = self.prelude?;
+        match self.modules[p as usize].scope.get(name).map(|b| b.def) {
+            Some(Def::Trait(t)) => Some(t),
+            _ => None,
+        }
+    }
+
+    pub fn prelude_adt(&self, name: &str) -> Option<AdtId> {
+        let p = self.prelude?;
+        match self.modules[p as usize].scope.get(name).map(|b| b.def) {
+            Some(Def::Adt(t)) => Some(t),
+            _ => None,
+        }
+    }
+
+    fn is_future_frame(&self, t: &Ty, tid: TraitId) -> bool {
+        matches!(t, Ty::Frame(_)) && self.prelude_trait("Future") == Some(tid)
     }
 
     // ------------------------------------------------------- trait objects
@@ -2568,6 +2761,7 @@ pub fn xir_children(e: &xir::Expr, f: &mut dyn FnMut(&xir::Expr)) {
         | K::Cast(a, _)
         | K::ArrayToSlice(a)
         | K::ArrayRepeat(a, _)
+        | K::Suspend(_, a)
         | K::Loop(a, _) => f(a),
         K::Binary(_, a, b) => {
             f(a);

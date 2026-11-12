@@ -1,0 +1,6 @@
+async fn fact(n: i64) -> i64 {
+    if n == 0 { return 1 }
+    n * fact(n - 1).await
+}
+fn main() {}
+// error: recursive `async fn` `fact`: its future would contain itself and have no finite size; make the recursive call in a plain function, or restructure it as a loop

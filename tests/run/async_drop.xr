@@ -1,0 +1,31 @@
+// A future dropped half-way frees the locals it holds.
+
+import std.task
+
+async fn hold(n: i32) -> usize {
+    let a = String.from("held across await")
+    let mut v: Vec<String> = Vec.new()
+    v.push(String.from("x"))
+    task.yield_now().await
+    v.push(String.from("y"))
+    task.yield_now().await
+    a.len() + v.len() + n as usize
+}
+
+fn main() {
+    // poll once, then drop the half-finished future: its live locals are freed
+    {
+        let mut f = hold(1)
+        let mut cx = Context.new(Waker.noop())
+        let first = unsafe { f.poll(&mut cx) }
+        println(first.is_ready())
+    }
+    println(task.block_on(hold(2)))
+    let futs = [hold(3), hold(4)]
+    println(futs.len())
+}
+
+// output:
+// false
+// 21
+// 2

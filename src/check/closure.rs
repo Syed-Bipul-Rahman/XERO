@@ -371,6 +371,7 @@ impl FnCx<'_> {
             body,
             export: false,
             span,
+            async_frame: None,
         });
 
         // the closure value: its captured references or values
@@ -430,6 +431,7 @@ impl FnCx<'_> {
             method_expected: None,
             index_calls: HashMap::new(),
             or_reuse: None,
+            async_cx: None,
         };
         let mut params = Vec::new();
         if has_env {
@@ -743,7 +745,7 @@ pub fn ast_children(e: &ast::Expr, f: &mut dyn FnMut(&ast::Expr)) {
         | E::SelfValue
         | E::SelfType(_)
         | E::Continue => {}
-        E::Field(b, _, _) | E::TupleField(b, _, _) => f(b),
+        E::Field(b, _, _) | E::TupleField(b, _, _) | E::Await(b) => f(b),
         E::Call(c, args) => {
             f(c);
             args.iter().for_each(|a| f(a));

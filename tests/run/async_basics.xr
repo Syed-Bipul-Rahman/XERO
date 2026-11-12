@@ -1,0 +1,25 @@
+// async fn and .await, polled by hand.
+
+async fn add(a: i32, b: i32) -> i32 {
+    a + b
+}
+
+async fn twice(x: i32) -> i32 {
+    let a = add(x, 1).await
+    let b = add(a, 100).await
+    a + b
+}
+
+fn wake_nothing2(p: *u8) {}
+
+fn main() {
+    let mut f = twice(5)
+    let mut cx = Context.new(Waker.noop())
+    match unsafe { f.poll(&mut cx) } {
+        Poll.Ready(v) => println(v)
+        Poll.Pending => println("pending")
+    }
+}
+
+// output:
+// 112
