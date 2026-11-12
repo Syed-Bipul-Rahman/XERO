@@ -3,7 +3,9 @@
 // "ld64.lld" (Mach-O) or "wasm-ld".
 
 #include "lld/Common/Driver.h"
+#include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/WindowsManifest/WindowsManifestMerger.h"
 
 LLD_HAS_DRIVER(elf)
 LLD_HAS_DRIVER(coff)
@@ -102,3 +104,22 @@ void LLVMInitializeXtensaTarget() {}
 void LLVMInitializeXtensaTargetInfo() {}
 void LLVMInitializeXtensaTargetMC() {}
 }
+
+// lld-link can merge Windows manifests with libxml2. xeroc never embeds
+// manifests, so this replaces LLVM's WindowsManifest library (and with it
+// the libxml2 dependency).
+namespace llvm {
+namespace windows_manifest {
+class WindowsManifestMerger::WindowsManifestMergerImpl {};
+char WindowsManifestError::ID = 0;
+WindowsManifestError::WindowsManifestError(const Twine &Msg) : Msg(Msg.str()) {}
+void WindowsManifestError::log(raw_ostream &OS) const { OS << Msg; }
+bool isAvailable() { return false; }
+WindowsManifestMerger::WindowsManifestMerger() {}
+WindowsManifestMerger::~WindowsManifestMerger() {}
+Error WindowsManifestMerger::merge(MemoryBufferRef) {
+  return make_error<WindowsManifestError>("manifest merging is not supported");
+}
+std::unique_ptr<MemoryBuffer> WindowsManifestMerger::getMergedManifest() { return nullptr; }
+} // namespace windows_manifest
+} // namespace llvm
