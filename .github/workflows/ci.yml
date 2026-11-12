@@ -131,7 +131,7 @@ jobs:
             echo "::warning title=alpine lld::built $(ls /usr/lib/llvm18/lib/liblld*.a | tr "\n" " ")"
             export XERO_LLVM_CONFIG=/usr/lib/llvm18/bin/llvm-config
             export RUSTFLAGS="-C target-feature=+crt-static"
-            export XERO_LLVM_EXTRA_LIBS="static=lzma static=gcc"
+            export XERO_LLVM_EXTRA_LIBS="lzma gcc"
             if ! cargo build --release --features llvm > /tmp/build.log 2>&1; then
               echo "::error title=alpine build::$(grep -E "error|undefined|cannot find" /tmp/build.log | sort -u | head -30 | tr "\n" "|")"
               exit 1
