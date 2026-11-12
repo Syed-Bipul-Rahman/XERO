@@ -119,7 +119,7 @@ jobs:
               mv "$p-$V.src" "$p"
             done
             mkdir -p llvm
-            # Alpine's LLVM CMake exports name a few libraries it does not ship
+            # the LLVM CMake exports of Alpine name a few libraries it does not ship
             for f in $(grep -ohE "/usr/lib/llvm18/lib/lib[A-Za-z0-9_]+\.a" /usr/lib/llvm18/lib/cmake/llvm/LLVMExports*.cmake | sort -u); do
               [ -e "$f" ] || ar rc "$f"
             done
