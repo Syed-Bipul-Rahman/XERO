@@ -185,6 +185,12 @@ pub enum Intrinsic {
     /// The program's `argc` (as `usize`) and `argv` (as `**u8`).
     OsArgc,
     OsArgv,
+    /// Address of a vtable, as `usize` (the metadata half of `&dyn T`).
+    Vtable(String),
+    /// Method `slot` of a `&dyn T` (`args[0]`), as a function pointer.
+    DynMethod(u32),
+    /// `Box<S>` (`args[0]`) to `Box<dyn T>` with the given vtable.
+    UnsizeBox(String),
 }
 
 #[derive(Clone, Debug)]

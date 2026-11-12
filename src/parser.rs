@@ -742,6 +742,10 @@ impl Parser {
                 }
                 TypeKind::Impl(bounds)
             }
+            Tok::Ident(name) if name == "dyn" && matches!(self.peek_at(1), Tok::Ident(_)) => {
+                self.bump();
+                TypeKind::Dyn(Box::new(self.ty()?))
+            }
             Tok::Ident(name)
                 if (name == "Fn" || name == "FnMut" || name == "FnOnce")
                     && matches!(self.peek_at(1), Tok::LParen) =>

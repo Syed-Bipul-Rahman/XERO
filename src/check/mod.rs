@@ -232,6 +232,14 @@ pub struct StaticDef {
     pub resolved: Option<Ty>,
 }
 
+/// A vtable: drop glue, then the trait's methods, for one concrete type.
+pub struct Vtable {
+    pub name: String,
+    pub ty: Ty,
+    /// Method instance symbols, in `dyn_methods` order.
+    pub methods: Vec<String>,
+}
+
 /// A function instance to generate: definition + concrete generic arguments.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FnKey {
@@ -277,6 +285,9 @@ pub struct Checker {
     pub drop_fns: HashMap<Ty, String>,
     alias_depth: u32,
     assoc_depth: u32,
+    /// Vtables for `dyn Trait`: one per (concrete type, trait).
+    pub vtables: Vec<Vtable>,
+    vtable_index: HashMap<(Ty, TraitId), usize>,
     /// Return types of `-> impl Trait` instances, found by checking them early.
     pub opaque: HashMap<FnKey, Ty>,
     opaque_busy: HashSet<FnKey>,
@@ -338,6 +349,8 @@ impl Checker {
             drop_fns: HashMap::new(),
             alias_depth: 0,
             assoc_depth: 0,
+            vtables: Vec::new(),
+            vtable_index: HashMap::new(),
             opaque: HashMap::new(),
             opaque_busy: HashSet::new(),
             prechecked: HashMap::new(),
@@ -1309,10 +1322,12 @@ impl Checker {
     pub fn ty_str(&self, t: &Ty) -> String {
         let adt_name = |id: AdtId| self.adts[id as usize].name.clone();
         let param_name = |i: u32| format!("T{i}");
+        let trait_name = |i: u32| self.traits[i as usize].name.clone();
         TyFmt {
             ty: t,
             adt_name: &adt_name,
             param_name: &param_name,
+            trait_name: &trait_name,
         }
         .to_string()
     }
@@ -1324,10 +1339,12 @@ impl Checker {
             format!("{}.{}", self.modules[a.module as usize].path, a.name)
         };
         let param_name = |i: u32| format!("T{i}");
+        let trait_name = |i: u32| self.traits[i as usize].name.clone();
         TyFmt {
             ty: t,
             adt_name: &adt_name,
             param_name: &param_name,
+            trait_name: &trait_name,
         }
         .to_string()
     }
@@ -1363,6 +1380,11 @@ impl Checker {
                     None => Ty::unit(),
                 }),
             ),
+            TypeKind::Dyn(tr) => {
+                let tid = self.resolve_trait_ref(tr, module)?;
+                self.check_object_safe(tid, tr.span)?;
+                Ty::Dyn(tid)
+            }
             TypeKind::Impl(_) => {
                 return Err(Diagnostic::new(
                     t.span,
@@ -1481,7 +1503,10 @@ impl Checker {
                         self.alias_depth -= 1;
                         r?
                     }
-                    Def::Trait(_) => return Err(Diagnostic::new(t.span, "trait objects (`dyn Trait`) are not supported yet; use a generic parameter `<T: Trait>`")),
+                    Def::Trait(_) => {
+                        let n = path.last().unwrap().name.clone();
+                        return Err(Diagnostic::new(t.span, format!("`{n}` is a trait, not a type; use `dyn {n}` behind a reference or `Box` (`&dyn {n}`, `Box<dyn {n}>`), or a generic parameter `<T: {n}>`")));
+                    }
                     _ => return Err(Diagnostic::new(t.span, format!("`{}` is not a type", path.last().unwrap().name))),
                 }
             }
@@ -1509,7 +1534,7 @@ impl Checker {
         match t {
             Ty::Int(_) | Ty::Float(_) | Ty::Bool | Ty::Never | Ty::Ptr(_) => true,
             Ty::Ref(_, m) => !m,
-            Ty::Str | Ty::Slice(_) => false,
+            Ty::Str | Ty::Slice(_) | Ty::Dyn(_) => false,
             Ty::Array(e, _) => self.is_copy(e),
             Ty::Tuple(ts) => ts.iter().all(|t| self.is_copy(t)),
             Ty::Adt(id, args) => {
@@ -1570,7 +1595,8 @@ impl Checker {
             return true;
         }
         match t {
-            Ty::Ref(..) => true,
+            // a trait object may hold references
+            Ty::Ref(..) | Ty::Dyn(_) => true,
             // memory owned through a raw pointer (a Vec's buffer) counts too
             Ty::Array(e, _) | Ty::Slice(e) | Ty::Ptr(e) => self.has_refs_in(e, depth + 1, seen),
             Ty::Tuple(ts) => ts.iter().any(|t| self.has_refs_in(t, depth + 1, seen)),
@@ -1612,6 +1638,7 @@ impl Checker {
             return true;
         }
         match t {
+            Ty::Dyn(_) => true,
             Ty::Array(e, _) | Ty::Ptr(e) => self.drop_uses_in(e, depth + 1, seen),
             Ty::Tuple(ts) => ts.iter().any(|t| self.drop_uses_in(t, depth + 1, seen)),
             Ty::Closure(id) => self.closures[*id as usize]
@@ -1650,6 +1677,7 @@ impl Checker {
             return false;
         }
         match t {
+            Ty::Dyn(_) => true,
             Ty::Array(e, n) => *n > 0 && self.needs_drop_depth(e, depth + 1),
             Ty::Tuple(ts) => ts.iter().any(|t| self.needs_drop_depth(t, depth + 1)),
             Ty::Closure(id) => self.closures[*id as usize]
@@ -2244,6 +2272,124 @@ impl Checker {
                 Err(d)
             }
         }
+    }
+
+    // ------------------------------------------------------- trait objects
+
+    /// The methods of `tid` and its supertraits, in vtable order.
+    pub fn dyn_methods(&self, tid: TraitId) -> Vec<(TraitId, ast::FnDecl)> {
+        let mut out: Vec<(TraitId, ast::FnDecl)> = Vec::new();
+        let mut stack = vec![tid];
+        let mut seen = Vec::new();
+        while let Some(t) = stack.pop() {
+            if seen.contains(&t) {
+                continue;
+            }
+            seen.push(t);
+            for m in &self.traits[t as usize].decl.methods {
+                if !out.iter().any(|(_, o)| o.name.name == m.name.name) {
+                    out.push((t, m.clone()));
+                }
+            }
+            stack.extend(self.traits[t as usize].supertraits.iter().rev());
+        }
+        out
+    }
+
+    /// `dyn T` needs every method to be callable through a pointer.
+    fn check_object_safe(&self, tid: TraitId, span: Span) -> Result<()> {
+        let tr = &self.traits[tid as usize];
+        let why = |m: &str| {
+            Err(Diagnostic::new(
+                span,
+                format!("`{}` cannot be used as `dyn {}`: {m}", tr.name, tr.name),
+            ))
+        };
+        if !tr.decl.generics.params.is_empty() {
+            return why("it has generic parameters");
+        }
+        if !tr.decl.assoc_types.is_empty() {
+            return why("it has associated types");
+        }
+        fn mentions_self(t: &TypeExpr) -> bool {
+            match &t.kind {
+                TypeKind::SelfType => true,
+                TypeKind::Path(p, args) => p[0].name == "Self" || args.iter().any(mentions_self),
+                TypeKind::Ref(_, i)
+                | TypeKind::Ptr(i)
+                | TypeKind::Slice(i)
+                | TypeKind::Array(i, _) => mentions_self(i),
+                TypeKind::Tuple(ts) => ts.iter().any(mentions_self),
+                TypeKind::FnPtr(ps, r) | TypeKind::FnTrait(_, ps, r) => {
+                    ps.iter().any(mentions_self) || r.as_deref().is_some_and(mentions_self)
+                }
+                _ => false,
+            }
+        }
+        for (_, m) in self.dyn_methods(tid) {
+            let n = &m.name.name;
+            match m.self_param {
+                Some((SelfKind::Ref | SelfKind::RefMut, _, _)) => {}
+                _ => return why(&format!("method `{n}` takes `self` by value")),
+            }
+            if !m.generics.params.is_empty() {
+                return why(&format!("method `{n}` is generic"));
+            }
+            if m.params.iter().any(|p| mentions_self(&p.ty))
+                || m.ret.as_ref().is_some_and(mentions_self)
+            {
+                return why(&format!("method `{n}` mentions `Self`"));
+            }
+        }
+        Ok(())
+    }
+
+    /// The vtable for concrete type `t` as `dyn tid`; returns its symbol.
+    pub fn vtable(&mut self, t: &Ty, tid: TraitId, span: Span) -> Result<String> {
+        let key = (t.clone(), tid);
+        if let Some(i) = self.vtable_index.get(&key) {
+            return Ok(self.vtables[*i].name.clone());
+        }
+        let methods = self.dyn_methods(tid);
+        let mut names = Vec::new();
+        for (mt, m) in &methods {
+            let Some((iid, args)) = self.find_trait_impl(t, *mt) else {
+                return Err(Diagnostic::new(
+                    span,
+                    format!(
+                        "`{}` does not implement `{}`",
+                        self.ty_str(t),
+                        self.traits[*mt as usize].name
+                    ),
+                ));
+            };
+            let key = match self.impls[iid as usize].methods.get(&m.name.name) {
+                Some(&fid) => FnKey {
+                    fid,
+                    targs: args,
+                    self_ty: None,
+                },
+                None => FnKey {
+                    fid: self.traits[*mt as usize].defaults[&m.name.name],
+                    targs: Vec::new(),
+                    self_ty: Some(t.clone()),
+                },
+            };
+            names.push(self.instance(key));
+        }
+        self.ensure_drop(t);
+        let name = format!(
+            "vtable.<{} as {}>",
+            self.ty_mangle(t),
+            self.traits[tid as usize].name
+        );
+        self.vtable_index.insert(key, self.vtables.len());
+        self.vtables.push(Vtable {
+            name: name.clone(),
+            ty: t.clone(),
+            methods: names,
+        });
+        Ok(name)
     }
 
     pub fn declare_extern(&mut self, fid: FnId) -> Result<String> {

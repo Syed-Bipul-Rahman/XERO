@@ -520,6 +520,43 @@ impl<'a> FnCx<'a> {
                 if a == b && *m1 && !*m2 {
                     return Ok(self.weaken(v));
                 }
+                // &S -> &dyn Trait
+                if let Ty::Dyn(tid) = &**b {
+                    if !a.is_unsized() {
+                        let (s, tid, m2) = ((**a).clone(), *tid, *m2);
+                        let v = if *m1 && !m2 { self.weaken(v) } else { v };
+                        return self.to_dyn(v, &s, tid, expected.clone(), span);
+                    }
+                }
+            }
+            // Box<S> -> Box<dyn Trait>
+            (Ty::Adt(i1, a1), Ty::Adt(i2, a2))
+                if i1 == i2
+                    && a1.len() == 1
+                    && matches!(a2.first(), Some(Ty::Dyn(_)))
+                    && !a1[0].is_unsized()
+                    && self.ck.adts[*i1 as usize].name == "Box" =>
+            {
+                let Ty::Dyn(tid) = a2[0] else { unreachable!() };
+                let s = a1[0].clone();
+                if !self.ck.implements(&s, tid) {
+                    return self.err(
+                        span,
+                        format!(
+                            "`{}` does not implement `{}`, so it cannot become `{}`",
+                            self.ts(&s),
+                            self.ck.traits[tid as usize].name,
+                            self.ts(expected)
+                        ),
+                    );
+                }
+                let vt = self.ck.vtable(&s, tid, span)?;
+                let vs = v.span;
+                return Ok(x(
+                    K::Intrinsic(xir::Intrinsic::UnsizeBox(vt), vec![v]),
+                    expected.clone(),
+                    vs,
+                ));
             }
             _ => {}
         }
@@ -544,6 +581,137 @@ impl<'a> FnCx<'a> {
                 self.ts(&v.ty)
             ),
         )
+    }
+
+    /// `&S` (or `&mut S`) as `&dyn T`: the pointer plus `S`'s vtable.
+    fn to_dyn(&mut self, v: X, s: &Ty, tid: TraitId, target: Ty, span: Span) -> Result<X> {
+        if !self.ck.implements(s, tid) {
+            return self.err(
+                span,
+                format!(
+                    "`{}` does not implement `{}`, so it cannot become `{}`",
+                    self.ts(s),
+                    self.ck.traits[tid as usize].name,
+                    self.ts(&target)
+                ),
+            );
+        }
+        let vt = self.ck.vtable(s, tid, span)?;
+        let vs = v.span;
+        let meta = x(
+            K::Intrinsic(xir::Intrinsic::Vtable(vt), Vec::new()),
+            Ty::Int(IntTy::Usize),
+            vs,
+        );
+        Ok(x(
+            K::Intrinsic(xir::Intrinsic::MakeFat, vec![v, meta]),
+            target,
+            vs,
+        ))
+    }
+
+    /// `obj.method(args)` on `&dyn T` / `&mut dyn T`: a call through the vtable.
+    #[allow(clippy::too_many_arguments)]
+    fn dyn_call(
+        &mut self,
+        recv: X,
+        tid: TraitId,
+        name: &Ident,
+        args: &[ast::Expr],
+        span: Span,
+    ) -> Result<X> {
+        let methods = self.ck.dyn_methods(tid);
+        let Some(slot) = methods.iter().position(|(_, m)| m.name.name == name.name) else {
+            return self.err(
+                name.span,
+                format!(
+                    "no method named `{}` in trait `{}`",
+                    name.name, self.ck.traits[tid as usize].name
+                ),
+            );
+        };
+        let (mt, m) = methods[slot].clone();
+        let want_mut = m.self_param.map(|s| s.0) == Some(SelfKind::RefMut);
+        let Ty::Ref(_, is_mut) = recv.ty.clone() else {
+            unreachable!()
+        };
+        if want_mut && !is_mut {
+            return self.err(
+                name.span,
+                format!(
+                    "method `{}` takes `&mut self`; it needs a `&mut dyn {}`",
+                    name.name, self.ck.traits[tid as usize].name
+                ),
+            );
+        }
+        // parameter types, with `Self` unknown (object-safe methods never mention it)
+        let tmodule = self.ck.traits[mt as usize].module;
+        let env = Env::default();
+        let mut ps = Vec::new();
+        for p in &m.params {
+            ps.push(self.ck.resolve_type(&p.ty, tmodule, &env)?);
+        }
+        let ret = match &m.ret {
+            Some(t) => self.ck.resolve_type(t, tmodule, &env)?,
+            None => Ty::unit(),
+        };
+        if ps.len() != args.len() {
+            return self.err(
+                span,
+                format!(
+                    "method `{}` takes {} argument(s), but {} were given",
+                    name.name,
+                    ps.len(),
+                    args.len()
+                ),
+            );
+        }
+        // the receiver, evaluated once
+        let rs = recv.span;
+        let rty = recv.ty.clone();
+        let tmp = self.synthetic("dyn", rty.clone(), rs);
+        let use_r = x(K::Use(Place::Local(tmp), UseKind::Copy), rty.clone(), rs);
+        let use_r = if is_mut {
+            // reborrow, so the `&mut dyn` local is not moved
+            let Ty::Ref(inner, _) = rty.clone() else {
+                unreachable!()
+            };
+            x(
+                K::Borrow(Place::Deref(Box::new(use_r)), want_mut),
+                Ty::reference(*inner, want_mut),
+                rs,
+            )
+        } else {
+            use_r
+        };
+        let self_ptr = Ty::reference(Ty::unit(), want_mut);
+        let data = x(
+            K::Intrinsic(xir::Intrinsic::DataPtr, vec![use_r.clone()]),
+            self_ptr.clone(),
+            rs,
+        );
+        let mut fps = vec![self_ptr];
+        fps.extend(ps.iter().cloned());
+        let fty = Ty::FnPtr(fps, Box::new(ret.clone()));
+        let f = x(
+            K::Intrinsic(xir::Intrinsic::DynMethod(slot as u32), vec![use_r]),
+            fty,
+            rs,
+        );
+        let mut xs = vec![data];
+        for (a, t) in args.iter().zip(&ps) {
+            xs.push(self.expr_as(a, t)?);
+        }
+        let call = x(K::CallPtr(Box::new(f), xs), ret.clone(), span);
+        Ok(x(
+            K::Block(xir::Block {
+                stmts: vec![xir::Stmt::Let(tmp, recv)],
+                tail: Some(Box::new(call)),
+                scope: vec![tmp],
+            }),
+            ret,
+            span,
+        ))
     }
 
     /// `&mut T` -> `&T` (a shared reborrow).
@@ -2044,7 +2212,11 @@ impl<'a> FnCx<'a> {
         if let Some(exp) = expected {
             if ret_tpl.has_params() && *ret_tpl != OPAQUE_RET {
                 let mut trial = slots.clone();
-                if match_template(ret_tpl, exp, &mut trial) {
+                // `Box.new(c)` where `Box<dyn T>` is expected: `T` is still the
+                // argument's type (the result coerces afterwards)
+                if match_template(ret_tpl, exp, &mut trial)
+                    && !trial.iter().flatten().any(|t| matches!(t, Ty::Dyn(_)))
+                {
                     slots = trial;
                 }
             }
@@ -2638,8 +2810,8 @@ impl<'a> FnCx<'a> {
                     let m = self.ck.fns[fid as usize].decl.self_param.map(|s| s.0)
                         == Some(SelfKind::RefMut);
                     let (mut p, mut t) = self.recv_place(recv, span);
-                    while let Ty::Ref(inner, _) = t.clone() {
-                        let (np, nt) = self.deref_place(p, &Ty::Ref(inner, false), span);
+                    while let Ty::Ref(..) = t.clone() {
+                        let (np, nt) = self.deref_place(p, &t, span);
                         p = np;
                         t = nt;
                     }
@@ -2656,6 +2828,56 @@ impl<'a> FnCx<'a> {
                     recv_ty = sref.ty.clone();
                     recv = Recv::Value(sref);
                 }
+            }
+        }
+        // trait objects: `shape.area()` on `&dyn Shape`, `Box<dyn Shape>`
+        {
+            let mut dyn_tid = None;
+            let mut boxed = false;
+            match recv_ty.deref_all() {
+                Ty::Dyn(tid) => dyn_tid = Some(*tid),
+                Ty::Adt(aid, targs) if self.ck.adts[*aid as usize].name == "Box" => {
+                    if let Some(Ty::Dyn(tid)) = targs.first() {
+                        boxed = true;
+                        dyn_tid = Some(*tid);
+                    }
+                }
+                _ => {}
+            }
+            if let Some(tid) = dyn_tid {
+                let (mut p, mut pt) = self.recv_place(recv, span);
+                // down to the `dyn` place itself
+                loop {
+                    match pt.clone() {
+                        Ty::Ref(..) => {
+                            let (np, nt) = self.deref_place(p, &pt, span);
+                            p = np;
+                            pt = nt;
+                        }
+                        Ty::Adt(..) if boxed => {
+                            // the box's contents: `*box.ptr`
+                            let ptr_ty = Ty::Ptr(Box::new(Ty::Dyn(tid)));
+                            let field = Place::Field(Box::new(p), 0);
+                            let f = x(K::Use(field, UseKind::Copy), ptr_ty, span);
+                            p = Place::Deref(Box::new(f));
+                            pt = Ty::Dyn(tid);
+                        }
+                        _ => break,
+                    }
+                }
+                let wants_mut = self.ck.dyn_methods(tid).iter().any(|(_, m)| {
+                    m.name.name == name.name && m.self_param.map(|s| s.0) == Some(SelfKind::RefMut)
+                });
+                if wants_mut {
+                    p = self.mut_place(p)?;
+                    self.note_mut(&p);
+                }
+                let r = x(
+                    K::Borrow(p, wants_mut),
+                    Ty::reference(pt, wants_mut),
+                    base.span,
+                );
+                return self.dyn_call(r, tid, name, args, span);
             }
         }
         // autoderef search
@@ -2881,7 +3103,10 @@ impl<'a> FnCx<'a> {
                 let Ty::Ptr(elem) = p.ty.clone() else {
                     return self.err(args[0].span, "expected a raw pointer");
                 };
-                self.check_sized(&elem, span)?;
+                // a trait object is dropped through its vtable
+                if !(i == IntrinsicFn::DropInPlace && matches!(*elem, Ty::Dyn(_))) {
+                    self.check_sized(&elem, span)?;
+                }
                 if i == IntrinsicFn::VolatileLoad {
                     if !self.ck.is_copy(&elem) {
                         return self.err(span, "`volatile_load` requires a copyable type");

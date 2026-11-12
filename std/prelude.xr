@@ -1190,18 +1190,18 @@ impl<T> Iterator for SliceIter<T> {
 
 /// Iterates a slice by mutable reference: `slice.iter_mut()`, `for x in &mut v`.
 pub struct SliceIterMut<T> {
-    p: *T
-    end: *T
     s: &mut [T]
+    i: usize
 }
 
 impl<T> Iterator for SliceIterMut<T> {
     type Item = &mut T
     fn next(&mut self) -> Option<&mut T> {
-        let p = self.p
-        if (p as usize) < (self.end as usize) {
-            self.p = p + 1
-            Some(unsafe { &mut *p })
+        let i = self.i
+        if i < self.s.len() {
+            self.i = i + 1
+            let p = (&mut *self.s) as *T
+            Some(unsafe { &mut *(p + i) })
         } else {
             None
         }
@@ -1214,8 +1214,6 @@ impl<T> [T] {
     }
 
     pub fn iter_mut(&mut self) -> SliceIterMut<T> {
-        let n = self.len()
-        let p = (&*self) as *T
-        SliceIterMut { p: p, end: p + n, s: self }
+        SliceIterMut { s: self, i: 0 }
     }
 }

@@ -277,6 +277,34 @@ impl<'a> Codegen<'a> {
         for f in &prog.funcs {
             self.function(f);
         }
+        // vtables: drop glue (or a no-op), then the methods
+        let mut need_nop = false;
+        for vt in &self.ck.vtables {
+            let drop = if self.needs_drop(&vt.ty) {
+                self.require_glue(&vt.ty);
+                self.glue_name(&vt.ty)
+            } else {
+                need_nop = true;
+                "@xero.drop.nop".to_string()
+            };
+            let mut entries = vec![format!("ptr {drop}")];
+            for m in &vt.methods {
+                entries.push(format!("ptr {}", quote(m)));
+            }
+            let _ = writeln!(
+                self.globals,
+                "{} = internal constant [{} x ptr] [{}]",
+                quote(&vt.name),
+                entries.len(),
+                entries.join(", ")
+            );
+        }
+        if need_nop {
+            let _ = writeln!(
+                self.out,
+                "define internal void @xero.drop.nop(ptr %p) {{\n  ret void\n}}"
+            );
+        }
         while let Some(t) = self.glue_queue.pop() {
             self.drop_glue(&t);
         }
@@ -331,7 +359,7 @@ impl<'a> Codegen<'a> {
             Ty::Float(FloatTy::F64) => "double".into(),
             Ty::Bool => "i1".into(),
             Ty::Never => "{}".into(),
-            Ty::Str | Ty::Slice(_) => "i8".into(),
+            Ty::Str | Ty::Slice(_) | Ty::Dyn(_) => "i8".into(),
             Ty::Ref(inner, _) | Ty::Ptr(inner) => {
                 if inner.is_unsized() {
                     format!("{{ ptr, {} }}", self.usize_ty())
@@ -394,7 +422,7 @@ impl<'a> Codegen<'a> {
             Ty::Float(FloatTy::F64) => (8, 8),
             Ty::Bool => (1, 1),
             Ty::Never | Ty::Param(_) | Ty::Assoc(_) => (0, 1),
-            Ty::Str | Ty::Slice(_) => (0, 1),
+            Ty::Str | Ty::Slice(_) | Ty::Dyn(_) => (0, 1),
             Ty::Ref(inner, _) | Ty::Ptr(inner) => {
                 if inner.is_unsized() {
                     (2 * p, p)
@@ -697,6 +725,21 @@ impl<'a> Codegen<'a> {
 
     /// Destroy the value at `ptr` of type `t`.
     fn drop_at(&mut self, ptr: &str, t: &Ty) {
+        if let Ty::Dyn(_) = t {
+            // `ptr` is the fat pointer: call the vtable's drop entry
+            let us = self.usize_ty();
+            let fty = format!("{{ ptr, {us} }}");
+            let data = self.fresh();
+            self.ins(&format!("{data} = extractvalue {fty} {ptr}, 0"));
+            let vi = self.fresh();
+            self.ins(&format!("{vi} = extractvalue {fty} {ptr}, 1"));
+            let vt = self.fresh();
+            self.ins(&format!("{vt} = inttoptr {us} {vi} to ptr"));
+            let f = self.fresh();
+            self.ins(&format!("{f} = load ptr, ptr {vt}"));
+            self.ins(&format!("call void {f}(ptr {data})"));
+            return;
+        }
         if !self.needs_drop(t) {
             return;
         }
@@ -1869,7 +1912,17 @@ impl<'a> Codegen<'a> {
             (Ty::Float(FloatTy::F64), Ty::Float(FloatTy::F32)) => {
                 self.ins(&format!("{r} = fptrunc double {v} to float"))
             }
-            (Ty::Ptr(_) | Ty::Ref(..), Ty::Ptr(_)) => return v,
+            (Ty::Ptr(_) | Ty::Ref(..), Ty::Ptr(inner)) => {
+                // a fat pointer cast to a thin one keeps its address
+                if from.is_fat_ref() || matches!(&from, Ty::Ptr(i) if i.is_unsized()) {
+                    if !inner.is_unsized() {
+                        let r = self.fresh();
+                        self.ins(&format!("{r} = extractvalue {ft} {v}, 0"));
+                        return r;
+                    }
+                }
+                return v;
+            }
             (Ty::Ptr(_), Ty::Int(_)) => self.ins(&format!("{r} = ptrtoint ptr {v} to {tt}")),
             (Ty::Int(_), Ty::Ptr(_)) => self.ins(&format!("{r} = inttoptr {ft} {v} to ptr")),
             (Ty::Adt(..), Ty::Int(ti)) => {
@@ -2063,6 +2116,49 @@ impl<'a> Codegen<'a> {
             Intrinsic::Forget => {
                 self.expr(&args[0]);
                 self.unit()
+            }
+            Intrinsic::Vtable(name) => {
+                let us = self.usize_ty();
+                format!("ptrtoint (ptr {} to {us})", quote(name))
+            }
+            Intrinsic::DynMethod(slot) => {
+                let v = self.expr(&args[0]);
+                let lt = self.llty(&args[0].ty);
+                let us = self.usize_ty();
+                let vi = self.fresh();
+                self.ins(&format!("{vi} = extractvalue {lt} {v}, 1"));
+                let vt = self.fresh();
+                self.ins(&format!("{vt} = inttoptr {us} {vi} to ptr"));
+                let sp = self.fresh();
+                self.ins(&format!(
+                    "{sp} = getelementptr inbounds ptr, ptr {vt}, i32 {}",
+                    slot + 1
+                ));
+                let f = self.fresh();
+                self.ins(&format!("{f} = load ptr, ptr {sp}"));
+                f
+            }
+            Intrinsic::UnsizeBox(name) => {
+                let v = self.expr(&args[0]);
+                let st = self.llty(&args[0].ty);
+                let dt = self.llty(ty);
+                let us = self.usize_ty();
+                let p = self.fresh();
+                self.ins(&format!("{p} = extractvalue {st} {v}, 0"));
+                let f1 = self.fresh();
+                self.ins(&format!(
+                    "{f1} = insertvalue {{ ptr, {us} }} poison, ptr {p}, 0"
+                ));
+                let f2 = self.fresh();
+                self.ins(&format!(
+                    "{f2} = insertvalue {{ ptr, {us} }} {f1}, {us} ptrtoint (ptr {} to {us}), 1",
+                    quote(name)
+                ));
+                let r = self.fresh();
+                self.ins(&format!(
+                    "{r} = insertvalue {dt} poison, {{ ptr, {us} }} {f2}, 0"
+                ));
+                r
             }
             Intrinsic::DataPtr => {
                 let v = self.expr(&args[0]);
