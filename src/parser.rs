@@ -734,6 +734,14 @@ impl Parser {
                 let (params, ret) = self.fn_type_sig()?;
                 TypeKind::FnPtr(params, ret)
             }
+            Tok::Kw(Kw::Impl) => {
+                self.bump();
+                let mut bounds = vec![self.ty()?];
+                while self.eat(&Tok::Plus) {
+                    bounds.push(self.ty()?);
+                }
+                TypeKind::Impl(bounds)
+            }
             Tok::Ident(name)
                 if (name == "Fn" || name == "FnMut" || name == "FnOnce")
                     && matches!(self.peek_at(1), Tok::LParen) =>

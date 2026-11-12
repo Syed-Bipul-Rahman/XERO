@@ -277,6 +277,11 @@ pub struct Checker {
     pub drop_fns: HashMap<Ty, String>,
     alias_depth: u32,
     assoc_depth: u32,
+    /// Return types of `-> impl Trait` instances, found by checking them early.
+    pub opaque: HashMap<FnKey, Ty>,
+    opaque_busy: HashSet<FnKey>,
+    /// Instances checked early (for `impl Trait`); `None` if checking failed.
+    prechecked: HashMap<FnKey, Option<(xir::Func, Vec<xir::Func>)>>,
     /// Closure types, indexed by `Ty::Closure(id)`.
     pub closures: Vec<ClosureDef>,
     /// Stable ids: (enclosing function symbol, closure span) -> closure id,
@@ -333,6 +338,9 @@ impl Checker {
             drop_fns: HashMap::new(),
             alias_depth: 0,
             assoc_depth: 0,
+            opaque: HashMap::new(),
+            opaque_busy: HashSet::new(),
+            prechecked: HashMap::new(),
             closures: Vec::new(),
             closure_ids: HashMap::new(),
             summaries: HashMap::new(),
@@ -1355,6 +1363,12 @@ impl Checker {
                     None => Ty::unit(),
                 }),
             ),
+            TypeKind::Impl(_) => {
+                return Err(Diagnostic::new(
+                    t.span,
+                    "`impl Trait` is only allowed as the return type of a function",
+                ))
+            }
             TypeKind::FnTrait(..) => {
                 return Err(Diagnostic::new(
                     t.span,
@@ -2169,7 +2183,13 @@ impl Checker {
                 ));
                 return;
             }
-            match expr::check_fn(self, &key, name) {
+            let checked = match self.prechecked.remove(&key) {
+                Some(Some(r)) => Ok(r),
+                // checked early and failed; the error was reported then
+                Some(None) => continue,
+                None => expr::check_fn(self, &key, name),
+            };
+            match checked {
                 Ok((f, closures)) => {
                     // a function and the closures defined in it
                     for f in std::iter::once(f).chain(closures) {
@@ -2194,6 +2214,34 @@ impl Checker {
         for i in 0..self.out_funcs.len() {
             if let Err(ds) = crate::borrowck::check(self, &self.out_funcs[i]) {
                 self.diags.extend(ds);
+            }
+        }
+    }
+
+    /// The concrete return type of an `-> impl Trait` instance: its body is
+    /// checked now (once) to find it.
+    pub fn opaque_ty(&mut self, key: &FnKey, name: &str, span: Span) -> Result<Ty> {
+        if let Some(t) = self.opaque.get(key) {
+            return Ok(t.clone());
+        }
+        if !self.opaque_busy.insert(key.clone()) {
+            return Err(Diagnostic::new(
+                span,
+                "a function returning `impl Trait` cannot call itself before its type is known",
+            ));
+        }
+        let r = expr::check_fn(self, key, name.to_string());
+        self.opaque_busy.remove(key);
+        match r {
+            Ok((f, closures)) => {
+                let t = f.ret.clone();
+                self.opaque.insert(key.clone(), t.clone());
+                self.prechecked.insert(key.clone(), Some((f, closures)));
+                Ok(t)
+            }
+            Err(d) => {
+                self.prechecked.insert(key.clone(), None);
+                Err(d)
             }
         }
     }

@@ -180,6 +180,9 @@ pub enum TypeKind {
     Array(Box<TypeExpr>, Box<Expr>),
     Slice(Box<TypeExpr>),
     Tuple(Vec<TypeExpr>),
+    /// `impl Fn(i32) -> i32`, `impl Iterator`: a return type known only by
+    /// its bounds.
+    Impl(Vec<TypeExpr>),
     Never,
     Infer,
     /// `fn(i32, i32) -> i32`: a plain function pointer.

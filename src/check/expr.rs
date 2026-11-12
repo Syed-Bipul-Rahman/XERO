@@ -10,6 +10,9 @@ use crate::xir::{self, BindMode, ExprKind as K, LocalId, Pat, Place, UseKind};
 
 pub type X = xir::Expr;
 
+/// Placeholder return type of an `-> impl Trait` function in signatures.
+pub const OPAQUE_RET: Ty = Ty::Param(u32::MAX - 1);
+
 pub struct LoopCx {
     pub id: u32,
     pub break_ty: Option<Ty>,
@@ -168,7 +171,15 @@ fn check_fn_inner(
     for (g, t) in decl.generics.params.iter().zip(fn_targs) {
         env.names.insert(g.name.name.clone(), t.clone());
     }
+    let opaque_bounds = match &decl.ret {
+        Some(ast::TypeExpr {
+            kind: ast::TypeKind::Impl(bs),
+            ..
+        }) => Some(bs.clone()),
+        _ => None,
+    };
     let ret_ty = match &decl.ret {
+        _ if opaque_bounds.is_some() => super::closure::UNKNOWN_RET,
         Some(t) => ck.resolve_type(t, module, &env)?,
         None => Ty::unit(),
     };
@@ -232,10 +243,48 @@ fn check_fn_inner(
         }
     }
     let body_ast = decl.body.as_ref().unwrap();
-    let body = cx.block(body_ast, Some(&ret_ty));
-    let body = body.and_then(|b| cx.coerce(b, &ret_ty, body_ast.span));
-    *pending_out = cx.pending.take();
-    let body = body?;
+    let (body, ret_ty) = if let Some(bounds) = &opaque_bounds {
+        // `-> impl Trait`: the body's type is the return type. An `Fn(A) -> R`
+        // bound types a returned closure's parameters.
+        let mut hint = None;
+        for b in bounds {
+            if let ast::TypeKind::FnTrait(_, ps, r) = &b.kind {
+                let env = cx.env.clone();
+                let ps: Vec<Ty> = ps
+                    .iter()
+                    .map(|t| cx.ck.resolve_type(t, module, &env))
+                    .collect::<Result<_>>()?;
+                let r = match r {
+                    Some(r) => cx.ck.resolve_type(r, module, &env)?,
+                    None => Ty::unit(),
+                };
+                hint = Some(Ty::FnPtr(ps, Box::new(r)));
+            }
+        }
+        let body = cx.block(body_ast, hint.as_ref());
+        *pending_out = cx.pending.take();
+        let body = body?;
+        let t = body.ty.clone();
+        for b in bounds {
+            let env = cx.env.clone();
+            if !cx.ck.bound_holds(b, module, &env, &t)? {
+                let span = decl.ret.as_ref().unwrap().span;
+                return Err(Diagnostic::new(
+                    span,
+                    format!(
+                        "the returned value has type `{}`, which does not satisfy this bound",
+                        cx.ck.ty_str(&t)
+                    ),
+                ));
+            }
+        }
+        (body, t)
+    } else {
+        let body = cx.block(body_ast, Some(&ret_ty));
+        let body = body.and_then(|b| cx.coerce(b, &ret_ty, body_ast.span));
+        *pending_out = cx.pending.take();
+        (body?, ret_ty)
+    };
     let closures = std::mem::take(&mut cx.pending_funcs);
     Ok((
         xir::Func {
@@ -1051,6 +1100,9 @@ impl<'a> FnCx<'a> {
             E::Return(v) => {
                 let rt = self.ret_ty.clone();
                 if rt == super::closure::UNKNOWN_RET {
+                    if self.captures.is_none() {
+                        return self.err(span, "`return` is not allowed in a function returning `impl Trait`; make the value the block's final expression");
+                    }
                     return self.err(span, "to use `return` in a closure, give it a return type: `|x: i32| -> i32 { ... }`");
                 }
                 let val = match v {
@@ -1990,7 +2042,7 @@ impl<'a> FnCx<'a> {
             }
         };
         if let Some(exp) = expected {
-            if ret_tpl.has_params() {
+            if ret_tpl.has_params() && *ret_tpl != OPAQUE_RET {
                 let mut trial = slots.clone();
                 if match_template(ret_tpl, exp, &mut trial) {
                     slots = trial;
@@ -2191,6 +2243,10 @@ impl<'a> FnCx<'a> {
             params.push(self.ck.resolve_type(&p.ty, module, &env)?);
         }
         let ret = match &decl.ret {
+            Some(ast::TypeExpr {
+                kind: ast::TypeKind::Impl(_),
+                ..
+            }) => OPAQUE_RET,
             Some(t) => self.ck.resolve_type(t, module, &env)?,
             None => Ty::unit(),
         };
@@ -2327,7 +2383,12 @@ impl<'a> FnCx<'a> {
             };
             xs.push(v);
         }
-        let ret = self.ck.normalize(&ret.subst(&slots), span)?;
+        let opaque = ret == OPAQUE_RET;
+        let ret = if opaque {
+            ret
+        } else {
+            self.ck.normalize(&ret.subst(&slots), span)?
+        };
         if is_extern {
             let sym = self.ck.declare_extern(fid)?;
             return Ok(x(K::Call(sym, xs), ret, span));
@@ -2354,11 +2415,17 @@ impl<'a> FnCx<'a> {
             FnOwner::Trait(_) => trait_self,
             _ => None,
         };
-        let name = self.ck.instance(FnKey {
+        let key = FnKey {
             fid,
             targs: slots,
             self_ty,
-        });
+        };
+        let name = self.ck.instance(key.clone());
+        let ret = if opaque {
+            self.ck.opaque_ty(&key, &name, span)?
+        } else {
+            ret
+        };
         Ok(x(K::Call(name, xs), ret, span))
     }
 
