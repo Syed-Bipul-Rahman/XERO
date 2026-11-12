@@ -71,7 +71,6 @@ fn link_llvm() {
         "lto",
         "objcopy",
         "windowsdriver",
-        "windowsmanifest",
         "libdriver",
         "dlltooldriver",
     ];
@@ -89,16 +88,24 @@ fn link_llvm() {
         println!("cargo:rustc-link-lib=static={name}");
     }
     for lib in run(&["--link-static", "--system-libs"]).split_whitespace() {
-        let name = lib
+        let base = lib
             .trim_start_matches("-l")
-            .trim_end_matches(".lib")
             .rsplit(['/', '\\'])
             .next()
-            .unwrap()
-            .trim_start_matches("lib")
-            .trim_end_matches(".a")
-            .trim_end_matches(".so")
-            .trim_end_matches(".tbd");
+            .unwrap();
+        let name = if base.ends_with(".lib") {
+            base.trim_end_matches(".lib")
+        } else {
+            base.trim_start_matches("lib")
+                .trim_end_matches(".a")
+                .trim_end_matches(".so")
+                .trim_end_matches(".tbd")
+        };
+        // libxml2 is only used by the Windows manifest merger, which the
+        // shim replaces
+        if name.contains("xml2") {
+            continue;
+        }
         // system libraries to link statically, e.g. Homebrew's zstd on macOS
         let static_sys = std::env::var("XERO_LLVM_STATIC_SYSLIBS").unwrap_or_default();
         if static_sys.split_whitespace().any(|s| s == name) {

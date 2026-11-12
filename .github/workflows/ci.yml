@@ -110,7 +110,7 @@ jobs:
         run: |
           docker run --rm -v "$PWD:/src" -w /src alpine:3.21 sh -c '
             set -e
-            apk add --no-cache bash git build-base cmake ninja python3 curl xz rust cargo llvm18-dev llvm18-static zlib-static zstd-static libxml2-dev libxml2-static xz-static ncurses-static linux-headers > /tmp/apk.log 2>&1 || { tail -5 /tmp/apk.log; exit 1; }
+            apk add --no-cache bash git build-base cmake ninja python3 curl xz rust cargo llvm18-dev llvm18-static zlib-static zstd-static ncurses-static linux-headers > /tmp/apk.log 2>&1 || { tail -5 /tmp/apk.log; exit 1; }
             # static lld libraries matching LLVM 18 (Alpine ships lld 19 as shared libraries)
             V=18.1.8
             mkdir -p /tmp/llvm-src && cd /tmp/llvm-src
@@ -131,7 +131,7 @@ jobs:
             echo "::warning title=alpine lld::built $(ls /usr/lib/llvm18/lib/liblld*.a | tr "\n" " ")"
             export XERO_LLVM_CONFIG=/usr/lib/llvm18/bin/llvm-config
             export RUSTFLAGS="-C target-feature=+crt-static"
-            export XERO_LLVM_EXTRA_LIBS="lzma gcc"
+            export XERO_LLVM_EXTRA_LIBS="gcc"
             if ! cargo build --release --features llvm > /tmp/build.log 2>&1; then
               echo "::error title=alpine build::$(grep -E "error|undefined|cannot find" /tmp/build.log | sort -u | head -30 | tr "\n" "|")"
               exit 1
@@ -187,7 +187,7 @@ jobs:
           if [ "$RUNNER_OS" = "Windows" ]; then export RUSTFLAGS="-C target-feature=+crt-static"; fi
           # the runner's own LLVM must not be used
           export PATH="$(echo "$PATH" | tr ':' '\n' | grep -viE "llvm" | paste -sd: -)"
-          ./target/release/xeroc run examples/hello.xr
+          ./target/release/xeroc run examples/hello.xr > hello.log 2>&1 || { echo "::error title=hello::$(tail -30 hello.log | tr '\n' '|')"; exit 1; }
           cargo test --release --features llvm > test.log 2>&1 || { echo "::error title=test::$(tail -40 test.log | tr '\n' '|')"; exit 1; }
           tail -5 test.log
 

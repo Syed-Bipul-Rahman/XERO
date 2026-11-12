@@ -120,7 +120,11 @@ fn run_programs() {
 /// Run `cmd`, killing it after `secs` seconds (then `None`).
 fn run_with_timeout(cmd: &mut Command, secs: u64) -> Option<std::process::Output> {
     use std::process::Stdio;
-    let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
     let mut out = child.stdout.take().unwrap();
     let mut err = child.stderr.take().unwrap();
     let o = std::thread::spawn(move || {
