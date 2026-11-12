@@ -1,0 +1,13 @@
+trait T { fn f(&self) -> i32 }
+struct H { r: &i32 }
+impl T for H { fn f(&self) -> i32 { *self.r } }
+fn main() {
+    let y = 1
+    let mut b: Box<dyn T> = Box.new(H { r: &y })
+    {
+        let x = 5
+        b = Box.new(H { r: &x })
+    }
+    println(b.f())
+}
+// error: `x` does not live long enough: it is still borrowed by `b` after its scope ends

@@ -1,0 +1,41 @@
+// Static functions in traits: T.zero(), Self.type_name().
+
+trait Zero {
+    fn zero() -> Self
+    fn is_zero(&self) -> bool
+}
+impl Zero for i64 {
+    fn zero() -> i64 { 0 }
+    fn is_zero(&self) -> bool { *self == 0 }
+}
+copy struct V { x: i64 }
+impl Zero for V {
+    fn zero() -> V { V { x: 0 } }
+    fn is_zero(&self) -> bool { self.x == 0 }
+}
+impl Add for V { fn add(self, o: V) -> V { V { x: self.x + o.x } } }
+
+trait Named {
+    fn type_name() -> &str
+    fn greet() { print("I am "); println(Self.type_name()) }
+}
+impl Named for V { fn type_name() -> &str { "V" } }
+
+fn sum_all<T: Zero + Add>(xs: &[T]) -> T {
+    let mut t = T.zero()
+    for x in xs { t = t + *x }
+    t
+}
+
+fn main() {
+    println(sum_all(&[1i64, 2, 3]))
+    println(sum_all(&[V { x: 4 }, V { x: 5 }]).x)
+    println(V.zero().is_zero())
+    V.greet()
+}
+
+// output:
+// 6
+// 9
+// true
+// I am V

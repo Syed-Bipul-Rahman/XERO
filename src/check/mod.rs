@@ -626,9 +626,6 @@ impl Checker {
                         });
                         defaults.insert(m.name.name.clone(), fid);
                     }
-                    if m.self_param.is_none() {
-                        self.error(Diagnostic::new(m.name.span, "trait methods must take `self`, `&self` or `&mut self` (static trait functions are not supported yet)"));
-                    }
                 }
                 self.traits.push(TraitDef {
                     name: t.name.name.clone(),
@@ -2330,7 +2327,8 @@ impl Checker {
             let n = &m.name.name;
             match m.self_param {
                 Some((SelfKind::Ref | SelfKind::RefMut, _, _)) => {}
-                _ => return why(&format!("method `{n}` takes `self` by value")),
+                Some(_) => return why(&format!("method `{n}` takes `self` by value")),
+                None => return why(&format!("`{n}` is a static function (it takes no `self`)")),
             }
             if !m.generics.params.is_empty() {
                 return why(&format!("method `{n}` is generic"));

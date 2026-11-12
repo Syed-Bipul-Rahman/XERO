@@ -1,0 +1,79 @@
+// Generic traits, associated types, operator traits picked by the right operand.
+
+copy struct V2 {
+    x: f64
+    y: f64
+}
+
+impl Add for V2 {
+    fn add(self, o: V2) -> V2 { V2 { x: self.x + o.x, y: self.y + o.y } }
+}
+
+impl Mul<f64> for V2 {
+    fn mul(self, k: f64) -> V2 { V2 { x: self.x * k, y: self.y * k } }
+}
+
+impl Mul for V2 {
+    type Output = f64
+    fn mul(self, o: V2) -> f64 { self.x * o.x + self.y * o.y }
+}
+
+trait Shape {
+    type Unit
+    fn area(&self) -> Self.Unit
+    fn describe(&self) -> Self.Unit { self.area() }
+}
+
+struct Sq { s: i64 }
+impl Shape for Sq {
+    type Unit = i64
+    fn area(&self) -> i64 { self.s * self.s }
+}
+
+trait Convert<T> {
+    fn convert(&self) -> T
+}
+impl Convert<f64> for i64 {
+    fn convert(&self) -> f64 { *self as f64 }
+}
+impl Convert<bool> for i64 {
+    fn convert(&self) -> bool { *self != 0 }
+}
+
+fn total<S: Shape>(a: &S, b: &S) -> S.Unit {
+    a.area() + b.area()
+}
+
+fn to<T, U: Convert<T>>(u: &U) -> T {
+    u.convert()
+}
+
+fn main() {
+    let a = V2 { x: 1.0, y: 2.0 }
+    let b = V2 { x: 3.0, y: 4.0 }
+    let c = a + b
+    println(c.x)
+    let d = a * 2.0
+    println(d.y)
+    let dot: f64 = a * b
+    println(dot)
+    let s = Sq { s: 3 }
+    println(s.area())
+    println(s.describe())
+    println(total(&s, &Sq { s: 4 }))
+    let n: i64 = 5
+    let f: f64 = to(&n)
+    let t: bool = to(&n)
+    println(f)
+    println(t)
+}
+
+// output:
+// 4.0
+// 4.0
+// 11.0
+// 9
+// 9
+// 25
+// 5.0
+// true

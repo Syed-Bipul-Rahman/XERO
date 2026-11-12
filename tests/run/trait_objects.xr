@@ -1,0 +1,74 @@
+// Trait objects: &dyn, &mut dyn, Box<dyn>, vtables and destructors.
+
+trait Shape {
+    fn area(&self) -> f64
+    fn name(&self) -> &str
+    fn scale(&mut self, k: f64)
+    fn describe(&self) {
+        print(self.name())
+        print(": ")
+        println(self.area())
+    }
+}
+
+struct Circle { r: f64 }
+struct Rect { w: f64
+    h: f64
+    label: String }
+
+impl Shape for Circle {
+    fn area(&self) -> f64 { 3.0 * self.r * self.r }
+    fn name(&self) -> &str { "circle" }
+    fn scale(&mut self, k: f64) { self.r *= k }
+}
+
+impl Shape for Rect {
+    fn area(&self) -> f64 { self.w * self.h }
+    fn name(&self) -> &str { self.label.as_str() }
+    fn scale(&mut self, k: f64) {
+        self.w *= k
+        self.h *= k
+    }
+}
+
+impl Rect {
+    drop { println("rect dropped") }
+}
+
+fn total(shapes: &Vec<Box<dyn Shape>>) -> f64 {
+    let mut t = 0.0
+    for s in shapes { t += s.area() }
+    t
+}
+
+fn show(s: &dyn Shape) { s.describe() }
+
+fn main() {
+    let c = Circle { r: 1.0 }
+    let d: &dyn Shape = &c
+    println(d.area())
+    show(&c)
+    let mut r = Rect { w: 2.0, h: 3.0, label: String.from("rect") }
+    {
+        let m: &mut dyn Shape = &mut r
+        m.scale(2.0)
+        m.describe()
+    }
+    let mut shapes: Vec<Box<dyn Shape>> = Vec.new()
+    shapes.push(Box.new(Circle { r: 2.0 }))
+    shapes.push(Box.new(Rect { w: 1.0, h: 1.0, label: String.from("square") }))
+    println(total(&shapes))
+    for s in &mut shapes { s.scale(10.0) }
+    shapes[1].describe()
+    println(shapes.len())
+}
+
+// output:
+// 3.0
+// circle: 3.0
+// rect: 24.0
+// 13.0
+// square: 100.0
+// 2
+// rect dropped
+// rect dropped
