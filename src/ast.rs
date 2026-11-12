@@ -73,6 +73,16 @@ pub struct Generics {
 pub struct GenericParam {
     pub name: Ident,
     pub bounds: Vec<TypeExpr>,
+    /// `Rhs = Self` (generic traits only).
+    pub default: Option<TypeExpr>,
+}
+
+/// `type Item` / `type Output = Self` in a trait.
+#[derive(Clone, Debug)]
+pub struct AssocTypeDecl {
+    pub name: Ident,
+    pub bounds: Vec<TypeExpr>,
+    pub default: Option<TypeExpr>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -139,6 +149,7 @@ pub struct TraitDecl {
     pub generics: Generics,
     pub supertraits: Vec<TypeExpr>,
     pub methods: Vec<FnDecl>,
+    pub assoc_types: Vec<AssocTypeDecl>,
 }
 
 #[derive(Clone, Debug)]
@@ -147,6 +158,8 @@ pub struct ImplDecl {
     pub trait_ref: Option<TypeExpr>,
     pub self_ty: TypeExpr,
     pub methods: Vec<(Vis, FnDecl)>,
+    /// `type Item = T`
+    pub assoc_types: Vec<(Ident, TypeExpr)>,
     pub drop: Option<Block>,
     pub span: Span,
 }

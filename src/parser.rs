@@ -341,7 +341,12 @@ impl Parser {
                         bounds.push(p.ty()?);
                     }
                 }
-                g.params.push(GenericParam { name, bounds });
+                let default = if p.eat(&Tok::Eq) { Some(p.ty()?) } else { None };
+                g.params.push(GenericParam {
+                    name,
+                    bounds,
+                    default,
+                });
                 if !p.eat(&Tok::Comma) {
                     break;
                 }
@@ -568,7 +573,25 @@ impl Parser {
         }
         self.where_clause(&mut generics)?;
         let mut methods = Vec::new();
+        let mut assoc_types = Vec::new();
         self.brace_list(|p| {
+            if p.eat_kw(Kw::Type) {
+                let name = p.ident()?;
+                let mut bounds = Vec::new();
+                if p.eat(&Tok::Colon) {
+                    bounds.push(p.ty()?);
+                    while p.eat(&Tok::Plus) {
+                        bounds.push(p.ty()?);
+                    }
+                }
+                let default = if p.eat(&Tok::Eq) { Some(p.ty()?) } else { None };
+                assoc_types.push(AssocTypeDecl {
+                    name,
+                    bounds,
+                    default,
+                });
+                return Ok(());
+            }
             methods.push(p.fn_decl()?);
             Ok(())
         })?;
@@ -577,6 +600,7 @@ impl Parser {
             generics,
             supertraits,
             methods,
+            assoc_types,
         })
     }
 
@@ -591,8 +615,15 @@ impl Parser {
         };
         self.where_clause(&mut generics)?;
         let mut methods = Vec::new();
+        let mut assoc_types = Vec::new();
         let mut drop = None;
         self.brace_list(|p| {
+            if p.eat_kw(Kw::Type) {
+                let name = p.ident()?;
+                p.expect(&Tok::Eq)?;
+                assoc_types.push((name, p.ty()?));
+                return Ok(());
+            }
             if p.at_kw(Kw::Drop) {
                 let sp = p.bump().span;
                 if drop.is_some() {
@@ -614,6 +645,7 @@ impl Parser {
             trait_ref,
             self_ty,
             methods,
+            assoc_types,
             drop,
             span: start.to(self.prev_span()),
         })
@@ -678,8 +710,24 @@ impl Parser {
                 TypeKind::Infer
             }
             Tok::Kw(Kw::SelfType) => {
-                self.bump();
-                TypeKind::SelfType
+                let sp = self.bump().span;
+                if self.at(&Tok::Dot) && matches!(self.peek_at(1), Tok::Ident(_)) {
+                    // `Self.Item`: an associated type
+                    self.bump();
+                    let item = self.ident()?;
+                    TypeKind::Path(
+                        vec![
+                            Ident {
+                                name: "Self".into(),
+                                span: sp,
+                            },
+                            item,
+                        ],
+                        Vec::new(),
+                    )
+                } else {
+                    TypeKind::SelfType
+                }
             }
             Tok::Kw(Kw::Fn) => {
                 self.bump();

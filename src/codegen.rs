@@ -355,7 +355,7 @@ impl<'a> Codegen<'a> {
                     self.struct_llty(&self.ck.struct_fields(*id, args))
                 }
             }
-            Ty::Param(_) => "{}".into(),
+            Ty::Param(_) | Ty::Assoc(_) => "{}".into(),
         }
     }
 
@@ -393,7 +393,7 @@ impl<'a> Codegen<'a> {
             Ty::Float(FloatTy::F32) => (4, 4),
             Ty::Float(FloatTy::F64) => (8, 8),
             Ty::Bool => (1, 1),
-            Ty::Never | Ty::Param(_) => (0, 1),
+            Ty::Never | Ty::Param(_) | Ty::Assoc(_) => (0, 1),
             Ty::Str | Ty::Slice(_) => (0, 1),
             Ty::Ref(inner, _) | Ty::Ptr(inner) => {
                 if inner.is_unsized() {

@@ -286,3 +286,16 @@ impl<T> Vec<T> {
         }
     }
 }
+
+impl<T> Index<usize> for Vec<T> {
+    type Output = T
+    fn index(&self, i: usize) -> &T {
+        self.at(i)
+    }
+}
+
+impl<T> IndexMut<usize> for Vec<T> {
+    fn index_mut(&mut self, i: usize) -> &mut T {
+        self.at_mut(i)
+    }
+}

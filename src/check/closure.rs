@@ -427,6 +427,8 @@ impl FnCx<'_> {
             mut_captures: BTreeSet::new(),
             pending_funcs: Vec::new(),
             arg_hints: Vec::new(),
+            method_expected: None,
+            index_calls: HashMap::new(),
         };
         let mut params = Vec::new();
         if has_env {

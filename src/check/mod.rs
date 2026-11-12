@@ -197,6 +197,11 @@ pub struct ImplDef {
     /// Template over the impl's generic params.
     pub self_ty: Ty,
     pub trait_id: Option<TraitId>,
+    /// Arguments of a generic trait (`impl Mul<f64> for V`), as templates
+    /// over the impl's generic params; defaults filled in.
+    pub trait_args: Vec<Ty>,
+    /// `type Item = T` declarations.
+    pub assoc: Vec<(Ident, TypeExpr)>,
     pub methods: HashMap<String, FnId>,
     pub drop_fn: Option<FnId>,
     pub span: Span,
@@ -242,6 +247,9 @@ pub struct FnKey {
 pub struct Env {
     pub names: HashMap<String, Ty>,
     pub self_ty: Option<Ty>,
+    /// The trait (with its arguments) whose items are being checked, so
+    /// that `Self.Output` means that trait's associated type.
+    pub cur_trait: Option<(TraitId, Vec<Ty>)>,
 }
 
 pub struct Target {
@@ -268,6 +276,7 @@ pub struct Checker {
     used_statics: HashSet<u32>,
     pub drop_fns: HashMap<Ty, String>,
     alias_depth: u32,
+    assoc_depth: u32,
     /// Closure types, indexed by `Ty::Closure(id)`.
     pub closures: Vec<ClosureDef>,
     /// Stable ids: (enclosing function symbol, closure span) -> closure id,
@@ -323,6 +332,7 @@ impl Checker {
             used_statics: HashSet::new(),
             drop_fns: HashMap::new(),
             alias_depth: 0,
+            assoc_depth: 0,
             closures: Vec::new(),
             closure_ids: HashMap::new(),
             summaries: HashMap::new(),
@@ -583,12 +593,6 @@ impl Checker {
             ItemKind::Trait(t) => {
                 let id = self.traits.len() as TraitId;
                 let name = t.name.clone();
-                if !t.generics.params.is_empty() {
-                    self.error(Diagnostic::new(
-                        t.name.span,
-                        "generic traits are not supported yet",
-                    ));
-                }
                 let mut defaults = HashMap::new();
                 for m in &t.methods {
                     if m.body.is_some() {
@@ -928,21 +932,79 @@ impl Checker {
     }
 
     pub fn resolve_trait_ref(&self, t: &TypeExpr, module: ModId) -> Result<TraitId> {
-        let TypeKind::Path(path, args) = &t.kind else {
+        let TypeKind::Path(path, _) = &t.kind else {
             return Err(Diagnostic::new(t.span, "expected a trait name"));
         };
-        if !args.is_empty() {
-            return Err(Diagnostic::new(
-                t.span,
-                "generic traits are not supported yet",
-            ));
-        }
         match self.resolve_path_def(path, module)? {
             Def::Trait(id) => Ok(id),
             _ => Err(Diagnostic::new(
                 t.span,
                 format!("`{}` is not a trait", path.last().unwrap().name),
             )),
+        }
+    }
+
+    /// Resolve a trait reference with its generic arguments (`Mul<f64>`),
+    /// filling in defaults (`Rhs = Self`, where `Self` is `self_ty`).
+    pub fn resolve_trait_with_args(
+        &mut self,
+        t: &TypeExpr,
+        module: ModId,
+        env: &Env,
+        self_ty: Option<Ty>,
+    ) -> Result<(TraitId, Vec<Ty>)> {
+        let tid = self.resolve_trait_ref(t, module)?;
+        let TypeKind::Path(_, args) = &t.kind else {
+            unreachable!()
+        };
+        let generics = self.traits[tid as usize].decl.generics.params.clone();
+        let tmodule = self.traits[tid as usize].module;
+        let tname = self.traits[tid as usize].name.clone();
+        if args.len() > generics.len() {
+            return Err(Diagnostic::new(
+                t.span,
+                format!(
+                    "trait `{tname}` expects {} generic argument(s), found {}",
+                    generics.len(),
+                    args.len()
+                ),
+            ));
+        }
+        let mut out = Vec::new();
+        for a in args {
+            out.push(self.resolve_type(a, module, env)?);
+        }
+        for g in &generics[args.len()..] {
+            let Some(d) = &g.default else {
+                return Err(Diagnostic::new(
+                    t.span,
+                    format!(
+                        "trait `{tname}` expects {} generic argument(s), found {}",
+                        generics.len(),
+                        args.len()
+                    ),
+                ));
+            };
+            let mut denv = Env {
+                self_ty: self_ty.clone(),
+                ..Env::default()
+            };
+            for (gp, a) in generics.iter().zip(&out) {
+                denv.names.insert(gp.name.name.clone(), a.clone());
+            }
+            out.push(self.resolve_type(d, tmodule, &denv)?);
+        }
+        Ok((tid, out))
+    }
+
+    /// `Trait<A, B>` for messages.
+    pub fn trait_str(&self, tid: TraitId, args: &[Ty]) -> String {
+        let name = self.traits[tid as usize].name.clone();
+        if args.is_empty() {
+            name
+        } else {
+            let a: Vec<String> = args.iter().map(|t| self.ty_str(t)).collect();
+            format!("{name}<{}>", a.join(", "))
         }
     }
 
@@ -986,16 +1048,23 @@ impl Checker {
                 // Inherent impls on foreign types act like extension functions; allowed.
             }
         }
-        let trait_id = match &decl.trait_ref {
-            Some(t) => match self.resolve_trait_ref(t, mid) {
-                Ok(id) => Some(id),
+        env.self_ty = Some(self_ty.clone());
+        let (trait_id, trait_args) = match &decl.trait_ref {
+            Some(t) => match self.resolve_trait_with_args(t, mid, &env, Some(self_ty.clone())) {
+                Ok((id, args)) => (Some(id), args),
                 Err(d) => {
                     self.error(d);
                     return;
                 }
             },
-            None => None,
+            None => (None, Vec::new()),
         };
+        if trait_id.is_none() && !decl.assoc_types.is_empty() {
+            self.error(Diagnostic::new(
+                decl.assoc_types[0].0.span,
+                "associated types belong in trait implementations (`impl Trait for Type`)",
+            ));
+        }
         let mut methods = HashMap::new();
         for (vis, m) in decl.methods {
             if m.body.is_none() {
@@ -1095,6 +1164,8 @@ impl Checker {
             trait_ast: decl.trait_ref,
             self_ty,
             trait_id,
+            trait_args,
+            assoc: decl.assoc_types,
             methods,
             drop_fn,
             span: decl.span,
@@ -1153,9 +1224,51 @@ impl Checker {
                     ));
                 }
             }
+            // associated types: every one the trait declares, and no others
+            let declared: Vec<(String, bool)> = self.traits[tid as usize]
+                .decl
+                .assoc_types
+                .iter()
+                .map(|a| (a.name.name.clone(), a.default.is_some()))
+                .collect();
+            for (name, has_default) in &declared {
+                if !has_default && !self.impls[iid].assoc.iter().any(|(n, _)| &n.name == name) {
+                    self.error(Diagnostic::new(
+                        span,
+                        format!("missing associated type `{name}` in implementation of trait `{tname}` (add `type {name} = ...`)"),
+                    ));
+                }
+            }
+            let given: Vec<Ident> = self.impls[iid]
+                .assoc
+                .iter()
+                .map(|(n, _)| n.clone())
+                .collect();
+            for (i, n) in given.iter().enumerate() {
+                if !declared.iter().any(|(d, _)| *d == n.name) {
+                    self.error(Diagnostic::new(
+                        n.span,
+                        format!(
+                            "associated type `{}` is not a member of trait `{tname}`",
+                            n.name
+                        ),
+                    ));
+                } else if given[..i].iter().any(|p| p.name == n.name) {
+                    self.error(Diagnostic::new(
+                        n.span,
+                        format!("duplicate associated type `{}`", n.name),
+                    ));
+                }
+            }
             // overlapping impls of the same trait for the same type
             for other in 0..iid {
+                let args_overlap = self.impls[other]
+                    .trait_args
+                    .iter()
+                    .zip(&self.impls[iid].trait_args)
+                    .all(|(a, b)| templates_overlap(a, b));
                 if self.impls[other].trait_id == Some(tid)
+                    && args_overlap
                     && templates_overlap(&self.impls[other].self_ty, &self.impls[iid].self_ty)
                 {
                     let ty = self.ty_str(&self.impls[iid].self_ty);
@@ -1284,6 +1397,36 @@ impl Checker {
                         }
                     }
                 }
+                if path.len() == 2 && args.is_empty() {
+                    let first = path[0].name.as_str();
+                    let base = if first == "Self" {
+                        Some(env.self_ty.clone().ok_or_else(|| {
+                            Diagnostic::new(
+                                t.span,
+                                "`Self` is only available inside `impl` and `trait` blocks",
+                            )
+                        })?)
+                    } else {
+                        env.names.get(first).cloned()
+                    };
+                    if let Some(base) = base {
+                        // an associated type: `Self.Item`, `T.Output`
+                        let name = path[1].name.clone();
+                        let tr = if first == "Self" {
+                            env.cur_trait.clone().filter(|(tid, _)| {
+                                self.traits[*tid as usize]
+                                    .decl
+                                    .assoc_types
+                                    .iter()
+                                    .any(|a| a.name.name == name)
+                            })
+                        } else {
+                            None
+                        };
+                        let ty = Ty::Assoc(Box::new(crate::types::AssocTy { base, tr, name }));
+                        return self.normalize(&ty, t.span);
+                    }
+                }
                 let def = self.resolve_path_def(path, module)?;
                 let args: Vec<Ty> = args
                     .iter()
@@ -1363,7 +1506,7 @@ impl Checker {
                         .chain(a.variants.iter().flatten())
                         .all(|f| self.is_copy(&f.subst(args)))
             }
-            Ty::Param(_) => false,
+            Ty::Param(_) | Ty::Assoc(_) => false,
             Ty::FnPtr(..) => true,
             Ty::Closure(id) => self.closures[*id as usize]
                 .fields
@@ -1564,23 +1707,68 @@ impl Checker {
 
     /// Find the impl of `tid` for `t`, returning impl id and its generic args.
     pub fn find_trait_impl(&mut self, t: &Ty, tid: TraitId) -> Option<(ImplId, Vec<Ty>)> {
+        self.find_trait_impl_args(t, tid, None)
+    }
+
+    /// Find the impl of `tid` (with trait arguments `targs`, or any) for `t`.
+    pub fn find_trait_impl_args(
+        &mut self,
+        t: &Ty,
+        tid: TraitId,
+        targs: Option<&[Ty]>,
+    ) -> Option<(ImplId, Vec<Ty>)> {
         for iid in 0..self.impls.len() {
             if self.impls[iid].trait_id != Some(tid) {
                 continue;
             }
-            if let Some(args) = self.match_impl(iid as ImplId, t) {
+            if let Some(args) = self.match_impl_with(iid as ImplId, t, targs) {
                 return Some((iid as ImplId, args));
             }
         }
         None
     }
 
+    /// Every impl of `tid` for `t`, whatever the trait's arguments.
+    pub fn trait_impls_for(&mut self, t: &Ty, tid: TraitId) -> Vec<(ImplId, Vec<Ty>)> {
+        let mut out = Vec::new();
+        for iid in 0..self.impls.len() {
+            if self.impls[iid].trait_id != Some(tid) {
+                continue;
+            }
+            if let Some(args) = self.match_impl_with(iid as ImplId, t, None) {
+                out.push((iid as ImplId, args));
+            }
+        }
+        out
+    }
+
     /// Match an impl's self type against `t`; checks the impl's bounds.
     pub fn match_impl(&mut self, iid: ImplId, t: &Ty) -> Option<Vec<Ty>> {
+        self.match_impl_with(iid, t, None)
+    }
+
+    /// `match_impl`, also matching the trait's arguments when given.
+    pub fn match_impl_with(
+        &mut self,
+        iid: ImplId,
+        t: &Ty,
+        targs: Option<&[Ty]>,
+    ) -> Option<Vec<Ty>> {
         let n = self.impls[iid as usize].generics.len();
         let mut slots = vec![None; n];
         if !match_template(&self.impls[iid as usize].self_ty, t, &mut slots) {
             return None;
+        }
+        if let Some(targs) = targs {
+            let tpl = self.impls[iid as usize].trait_args.clone();
+            if tpl.len() != targs.len() {
+                return None;
+            }
+            for (p, a) in tpl.iter().zip(targs) {
+                if !match_template(p, a, &mut slots) {
+                    return None;
+                }
+            }
         }
         let args: Vec<Ty> = slots.into_iter().map(|s| s.unwrap_or(Ty::unit())).collect();
         // check bounds
@@ -1655,10 +1843,11 @@ impl Checker {
                     }
                     continue;
                 }
-                let tid = self.resolve_trait_ref(b, module)?;
-                if !self.implements(a, tid) {
+                let (tid, targs) =
+                    self.resolve_trait_with_args(b, module, &env, Some(a.clone()))?;
+                if self.find_trait_impl_args(a, tid, Some(&targs)).is_none() {
                     let tys = self.ty_str(a);
-                    let tname = self.traits[tid as usize].name.clone();
+                    let tname = self.trait_str(tid, &targs);
                     return Err(Diagnostic::new(span, format!("the trait `{tname}` is not implemented for `{tys}` (required by `{}: {tname}`)", g.name.name)));
                 }
             }
@@ -1688,8 +1877,186 @@ impl Checker {
             };
             return Ok(ps == aps && r == ar && akind <= *bound_kind);
         }
-        let tid = self.resolve_trait_ref(b, module)?;
-        Ok(self.implements(arg, tid))
+        let (tid, targs) = self.resolve_trait_with_args(b, module, env, Some(arg.clone()))?;
+        Ok(self.find_trait_impl_args(arg, tid, Some(&targs)).is_some())
+    }
+
+    // ------------------------------------------------------ associated types
+
+    /// Resolve associated types (`T.Item`) whose base type is now known.
+    pub fn normalize(&mut self, t: &Ty, span: Span) -> Result<Ty> {
+        if !t.has_assoc() {
+            return Ok(t.clone());
+        }
+        Ok(match t {
+            Ty::Assoc(a) => {
+                let base = self.normalize(&a.base, span)?;
+                let tr = match &a.tr {
+                    Some((id, ts)) => Some((
+                        *id,
+                        ts.iter()
+                            .map(|t| self.normalize(t, span))
+                            .collect::<Result<Vec<_>>>()?,
+                    )),
+                    None => None,
+                };
+                let open = base.has_params()
+                    || tr
+                        .as_ref()
+                        .is_some_and(|(_, ts)| ts.iter().any(|t| t.has_params()));
+                if open {
+                    return Ok(Ty::Assoc(Box::new(crate::types::AssocTy {
+                        base,
+                        tr,
+                        name: a.name.clone(),
+                    })));
+                }
+                self.project(&base, tr, &a.name, span)?
+            }
+            Ty::Ref(t, m) => Ty::Ref(Box::new(self.normalize(t, span)?), *m),
+            Ty::Ptr(t) => Ty::Ptr(Box::new(self.normalize(t, span)?)),
+            Ty::Array(t, n) => Ty::Array(Box::new(self.normalize(t, span)?), *n),
+            Ty::Slice(t) => Ty::Slice(Box::new(self.normalize(t, span)?)),
+            Ty::Tuple(ts) => Ty::Tuple(
+                ts.iter()
+                    .map(|t| self.normalize(t, span))
+                    .collect::<Result<_>>()?,
+            ),
+            Ty::Adt(id, ts) => Ty::Adt(
+                *id,
+                ts.iter()
+                    .map(|t| self.normalize(t, span))
+                    .collect::<Result<_>>()?,
+            ),
+            Ty::FnPtr(ps, r) => Ty::FnPtr(
+                ps.iter()
+                    .map(|t| self.normalize(t, span))
+                    .collect::<Result<_>>()?,
+                Box::new(self.normalize(r, span)?),
+            ),
+            _ => t.clone(),
+        })
+    }
+
+    /// The associated type `name` of the concrete type `base` (in trait
+    /// `tr`, when given).
+    pub fn project(
+        &mut self,
+        base: &Ty,
+        tr: Option<(TraitId, Vec<Ty>)>,
+        name: &str,
+        span: Span,
+    ) -> Result<Ty> {
+        let mut found: Vec<(ImplId, Vec<Ty>)> = Vec::new();
+        for iid in 0..self.impls.len() {
+            let Some(tid) = self.impls[iid].trait_id else {
+                continue;
+            };
+            if let Some((want, _)) = &tr {
+                if *want != tid {
+                    continue;
+                }
+            }
+            let declares = self.traits[tid as usize]
+                .decl
+                .assoc_types
+                .iter()
+                .any(|a| a.name.name == name);
+            if !declares {
+                continue;
+            }
+            let targs = tr.as_ref().map(|(_, a)| a.clone());
+            if let Some(args) = self.match_impl_with(iid as ImplId, base, targs.as_deref()) {
+                found.push((iid as ImplId, args));
+            }
+        }
+        let bs = self.ty_str(base);
+        if found.is_empty() {
+            return Err(Diagnostic::new(
+                span,
+                match &tr {
+                    Some((tid, ts)) => format!(
+                        "`{bs}` does not implement `{}`, so it has no associated type `{name}`",
+                        self.trait_str(*tid, ts)
+                    ),
+                    None => format!("`{bs}` has no associated type `{name}`"),
+                },
+            ));
+        }
+        if found.len() > 1 {
+            let tids: Vec<TraitId> = found
+                .iter()
+                .filter_map(|(i, _)| self.impls[*i as usize].trait_id)
+                .collect();
+            if tids.iter().any(|t| *t != tids[0]) {
+                return Err(Diagnostic::new(span, format!("`{bs}.{name}` is ambiguous: more than one trait implemented by `{bs}` has an associated type `{name}`")));
+            }
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "`{bs}.{name}` is ambiguous: `{bs}` implements `{}` more than once",
+                    self.traits[tids[0] as usize].name
+                ),
+            ));
+        }
+        let (iid, args) = found.remove(0);
+        self.assoc_depth += 1;
+        if self.assoc_depth > 64 {
+            self.assoc_depth = 0;
+            return Err(Diagnostic::new(
+                span,
+                format!("`{bs}.{name}` refers to itself"),
+            ));
+        }
+        let r = self.impl_assoc(iid, &args, base, name, span);
+        self.assoc_depth -= 1;
+        r
+    }
+
+    /// Associated type `name` from impl `iid` (or its trait's default).
+    fn impl_assoc(
+        &mut self,
+        iid: ImplId,
+        args: &[Ty],
+        base: &Ty,
+        name: &str,
+        span: Span,
+    ) -> Result<Ty> {
+        let im = &self.impls[iid as usize];
+        let tid = im.trait_id.unwrap();
+        let trait_args: Vec<Ty> = im.trait_args.iter().map(|t| t.subst(args)).collect();
+        let module = im.module;
+        let given = im
+            .assoc
+            .iter()
+            .find(|(n, _)| n.name == name)
+            .map(|(_, t)| t.clone());
+        let generics = im.generics.clone();
+        if let Some(te) = given {
+            let mut env = generic_env(&generics, args);
+            env.self_ty = Some(base.clone());
+            env.cur_trait = Some((tid, trait_args));
+            let t = self.resolve_type(&te, module, &env)?;
+            return self.normalize(&t, span);
+        }
+        let tdecl = self.traits[tid as usize].decl.clone();
+        let tmodule = self.traits[tid as usize].module;
+        let Some(d) = tdecl
+            .assoc_types
+            .iter()
+            .find(|a| a.name.name == name)
+            .and_then(|a| a.default.clone())
+        else {
+            return Err(Diagnostic::new(
+                span,
+                format!("missing associated type `{name}`"),
+            ));
+        };
+        let mut env = generic_env(&tdecl.generics.params, &trait_args);
+        env.self_ty = Some(base.clone());
+        env.cur_trait = Some((tid, trait_args));
+        let t = self.resolve_type(&d, tmodule, &env)?;
+        self.normalize(&t, span)
     }
 
     fn fn_bound_str(&mut self, b: &TypeExpr, module: ModId, env: &Env) -> Result<String> {
@@ -1732,10 +2099,23 @@ impl Checker {
                     let im = &self.impls[iid as usize];
                     let n = im.generics.len();
                     let self_ty = im.self_ty.subst(&key.targs[..n.min(key.targs.len())]);
-                    let tr = im
-                        .trait_id
-                        .map(|t| format!(" as {}", self.traits[t as usize].name))
-                        .unwrap_or_default();
+                    let tr = match im.trait_id {
+                        Some(t) => {
+                            let targs: Vec<String> = im
+                                .trait_args
+                                .iter()
+                                .map(|a| {
+                                    self.ty_mangle(&a.subst(&key.targs[..n.min(key.targs.len())]))
+                                })
+                                .collect();
+                            if targs.is_empty() {
+                                format!(" as {}", self.traits[t as usize].name)
+                            } else {
+                                format!(" as {}<{}>", self.traits[t as usize].name, targs.join(","))
+                            }
+                        }
+                        None => String::new(),
+                    };
                     format!("<{}{}>.", self.ty_mangle(&self_ty), tr)
                 }
                 FnOwner::Trait(tid) => {

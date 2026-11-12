@@ -172,28 +172,45 @@ pub trait Ord extends Eq {
     }
 }
 
-pub trait Add {
-    fn add(self, other: Self) -> Self
+pub trait Add<Rhs = Self> {
+    type Output = Self
+    fn add(self, other: Rhs) -> Self.Output
 }
 
-pub trait Sub {
-    fn sub(self, other: Self) -> Self
+pub trait Sub<Rhs = Self> {
+    type Output = Self
+    fn sub(self, other: Rhs) -> Self.Output
 }
 
-pub trait Mul {
-    fn mul(self, other: Self) -> Self
+pub trait Mul<Rhs = Self> {
+    type Output = Self
+    fn mul(self, other: Rhs) -> Self.Output
 }
 
-pub trait Div {
-    fn div(self, other: Self) -> Self
+pub trait Div<Rhs = Self> {
+    type Output = Self
+    fn div(self, other: Rhs) -> Self.Output
 }
 
-pub trait Rem {
-    fn rem(self, other: Self) -> Self
+pub trait Rem<Rhs = Self> {
+    type Output = Self
+    fn rem(self, other: Rhs) -> Self.Output
+}
+
+/// `a[i]`: reading through an index.
+pub trait Index<Idx> {
+    type Output
+    fn index(&self, i: Idx) -> &Self.Output
+}
+
+/// `a[i] = v`, `a[i] += v`, `&mut a[i]`: writing through an index.
+pub trait IndexMut<Idx> extends Index<Idx> {
+    fn index_mut(&mut self, i: Idx) -> &mut Self.Output
 }
 
 pub trait Neg {
-    fn neg(self) -> Self
+    type Output = Self
+    fn neg(self) -> Self.Output
 }
 
 /// Three-way comparison of anything with `<` and `>`: numbers or `Ord` types.
