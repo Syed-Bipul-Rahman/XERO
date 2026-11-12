@@ -136,7 +136,10 @@ fn static_lib_dir(libdir: &str) -> String {
         std::fs::create_dir_all(&out).unwrap();
         for e in std::fs::read_dir(libdir).unwrap().flatten() {
             let p = e.path();
-            if p.extension().is_some_and(|x| x == "a") {
+            let name = e.file_name().to_string_lossy().into_owned();
+            // the system's C++ runtime is used, not the package's
+            let runtime = name.starts_with("libc++") || name.starts_with("libunwind");
+            if p.extension().is_some_and(|x| x == "a") && !runtime {
                 std::os::unix::fs::symlink(&p, out.join(e.file_name())).unwrap();
             }
         }
