@@ -104,27 +104,26 @@ jobs:
           - arch: aarch64
             os: ubuntu-24.04-arm
     runs-on: ${{ matrix.os }}
-    container: alpine:3.21
     steps:
-      - name: Install toolchain
-        run: |
-          apk add --no-cache bash git build-base rust cargo llvm18-dev llvm18-static lld-dev zlib-static zstd-static libxml2-static xz-static ncurses-static linux-headers
-          apk info -L lld-dev | grep -E "\.a$" | head -20 || true
-          ls /usr/lib/llvm18/lib/*.a | wc -l
-          /usr/lib/llvm18/bin/llvm-config --system-libs --link-static
       - uses: actions/checkout@v4
-      - name: Build (static)
+      - name: Build and test in Alpine
         run: |
-          export XERO_LLVM_CONFIG=/usr/lib/llvm18/bin/llvm-config
-          RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --features llvm
-          ls -l target/release/xeroc
-          file target/release/xeroc || true
-          ldd target/release/xeroc || true
-      - name: Test
-        run: |
-          ./target/release/xeroc run examples/hello.xr
-          ./target/release/xeroc run examples/concurrency.xr
-          RUSTFLAGS="-C target-feature=+crt-static" cargo test --release --features llvm
+          docker run --rm -v "$PWD:/src" -w /src alpine:3.21 sh -c '
+            set -e
+            apk add --no-cache bash git build-base rust cargo llvm18-dev llvm18-static lld-dev zlib-static zstd-static libxml2-static xz-static ncurses-static linux-headers > /tmp/apk.log 2>&1 || { tail -5 /tmp/apk.log; exit 1; }
+            echo "::warning title=alpine::lld libs: $(ls /usr/lib/liblld*.a 2>/dev/null | tr "\n" " ") llvm: $(/usr/lib/llvm18/bin/llvm-config --version) syslibs: $(/usr/lib/llvm18/bin/llvm-config --system-libs --link-static)"
+            export XERO_LLVM_CONFIG=/usr/lib/llvm18/bin/llvm-config
+            export RUSTFLAGS="-C target-feature=+crt-static"
+            if ! cargo build --release --features llvm > /tmp/build.log 2>&1; then
+              echo "::error title=alpine build::$(grep -E "error|undefined|cannot find" /tmp/build.log | sort -u | head -30 | tr "\n" "|")"
+              exit 1
+            fi
+            echo "::warning title=alpine binary::$(ls -l target/release/xeroc) $(file target/release/xeroc 2>/dev/null)"
+            ./target/release/xeroc run examples/hello.xr
+            ./target/release/xeroc run examples/concurrency.xr
+            cargo test --release --features llvm > /tmp/test.log 2>&1 || { echo "::error title=alpine test::$(tail -40 /tmp/test.log | tr "\n" "|")"; exit 1; }
+            tail -3 /tmp/test.log
+          '
 
   installers:
     # Builds a release-style archive and installs it with the real install scripts.
