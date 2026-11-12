@@ -1556,6 +1556,7 @@ impl Parser {
             match &p.kind {
                 PatKind::Wild | PatKind::Bind(..) => Ok(()),
                 PatKind::Tuple(ps) => ps.iter().try_for_each(check),
+                PatKind::Struct(_, fs, _) => fs.iter().try_for_each(|(_, p)| check(p)),
                 _ => Err(Diagnostic::new(
                     p.span,
                     "refutable pattern not allowed here; use `match` or `if ... is ...`",
@@ -1599,7 +1600,7 @@ impl Parser {
                 let elems = self.with_nl(false, |p| {
                     let mut elems = Vec::new();
                     while !p.at(&Tok::RParen) {
-                        elems.push(p.pattern()?);
+                        elems.push(p.with_no_struct(false, |p| p.pattern())?);
                         if !p.eat(&Tok::Comma) {
                             break;
                         }
@@ -1655,6 +1656,37 @@ impl Parser {
                         Ok(args)
                     })?;
                     PatKind::Variant(path, Some(args))
+                } else if self.at(&Tok::LBrace) && !self.no_struct {
+                    // `Point { x, y: py, .. }`
+                    self.bump();
+                    let (fields, rest) = self.with_nl(false, |p| {
+                        let mut fields = Vec::new();
+                        let mut rest = false;
+                        while !p.at(&Tok::RBrace) {
+                            if p.eat(&Tok::DotDot) {
+                                rest = true;
+                                break;
+                            }
+                            let fstart = p.span();
+                            let mutable = p.eat_kw(Kw::Mut);
+                            let name = p.ident()?;
+                            let pat = if !mutable && p.eat(&Tok::Colon) {
+                                p.with_no_struct(false, |p| p.pattern())?
+                            } else {
+                                Pattern {
+                                    kind: PatKind::Bind(name.clone(), mutable),
+                                    span: fstart.to(p.prev_span()),
+                                }
+                            };
+                            fields.push((name, pat));
+                            if !p.eat(&Tok::Comma) {
+                                break;
+                            }
+                        }
+                        p.expect(&Tok::RBrace)?;
+                        Ok((fields, rest))
+                    })?;
+                    PatKind::Struct(path, fields, rest)
                 } else if path.len() == 1 {
                     PatKind::Bind(path.pop().unwrap(), false)
                 } else {

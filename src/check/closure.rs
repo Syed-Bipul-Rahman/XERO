@@ -429,6 +429,7 @@ impl FnCx<'_> {
             arg_hints: Vec::new(),
             method_expected: None,
             index_calls: HashMap::new(),
+            or_reuse: None,
         };
         let mut params = Vec::new();
         if has_env {
@@ -716,6 +717,7 @@ fn pat_names(p: &ast::Pattern, out: &mut Vec<String>) {
         PatKind::Bind(id, _) => out.push(id.name.clone()),
         PatKind::Tuple(ps) | PatKind::Or(ps) => ps.iter().for_each(|p| pat_names(p, out)),
         PatKind::Variant(_, Some(ps)) => ps.iter().for_each(|p| pat_names(p, out)),
+        PatKind::Struct(_, fs, _) => fs.iter().for_each(|(_, p)| pat_names(p, out)),
         _ => {}
     }
 }

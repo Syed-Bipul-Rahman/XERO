@@ -363,5 +363,7 @@ pub enum PatKind {
     Tuple(Vec<Pattern>),
     /// `Some(x)`, `Shape.Circle(r)`, `Color.Red`
     Variant(Vec<Ident>, Option<Vec<Pattern>>),
+    /// `Point { x, y: py, .. }`: fields by name; `true` if it ends in `..`.
+    Struct(Vec<Ident>, Vec<(Ident, Pattern)>, bool),
     Or(Vec<Pattern>),
 }

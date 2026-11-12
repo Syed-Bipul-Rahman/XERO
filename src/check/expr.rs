@@ -63,6 +63,8 @@ pub struct FnCx<'a> {
     /// `Vec`/`String` (`as_slice`), by span: switched to `index_mut` /
     /// `as_mut_slice` when the place is used mutably.
     pub index_calls: HashMap<Span, IndexCall>,
+    /// Variables bound by the first alternative of the `|` pattern being lowered.
+    pub or_reuse: Option<Vec<(String, LocalId)>>,
 }
 
 /// What a path-like expression (`a`, `a.b`, `Type.member`) refers to.
@@ -190,6 +192,7 @@ fn check_fn_inner(
         arg_hints: Vec::new(),
         method_expected: None,
         index_calls: HashMap::new(),
+        or_reuse: None,
     };
     if decl.is_unsafe {
         cx.unsafe_depth = 1;
@@ -4629,6 +4632,7 @@ pub fn pattern_binds(p: &ast::Pattern) -> bool {
         ast::PatKind::Bind(..) => true,
         ast::PatKind::Tuple(ps) | ast::PatKind::Or(ps) => ps.iter().any(pattern_binds),
         ast::PatKind::Variant(_, Some(ps)) => ps.iter().any(pattern_binds),
+        ast::PatKind::Struct(_, fs, _) => fs.iter().any(|(_, p)| pattern_binds(p)),
         _ => false,
     }
 }

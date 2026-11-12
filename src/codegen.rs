@@ -2343,8 +2343,37 @@ impl<'a> Codegen<'a> {
                 self.ins(&format!("{p2} = load ptr, ptr {ptr}"));
                 self.pat_bind(inner, &p2, t);
             }
+            Pat::Or(alts) => {
+                if alts.iter().any(pat_has_binds) {
+                    self.or_dispatch(alts, ptr, ty, |cg, alt| cg.pat_bind(alt, ptr, ty));
+                }
+            }
             _ => {}
         }
+    }
+
+    /// Run `f` for whichever alternative of an `|` pattern matches.
+    fn or_dispatch(
+        &mut self,
+        alts: &[Pat],
+        ptr: &str,
+        ty: &Ty,
+        mut f: impl FnMut(&mut Self, &Pat),
+    ) {
+        let done = self.new_label("or_done");
+        for (i, alt) in alts.iter().enumerate() {
+            if i + 1 < alts.len() {
+                let next = self.new_label("or_alt");
+                self.pat_test(alt, ptr, ty, &next);
+                f(self, alt);
+                self.br(&done);
+                self.start(&next);
+            } else {
+                f(self, alt);
+                self.br(&done);
+            }
+        }
+        self.start(&done);
     }
 
     /// After a moving match/destructure, destroy the parts not bound by value.
@@ -2395,6 +2424,13 @@ impl<'a> Codegen<'a> {
                         "{fp} = getelementptr inbounds {sty}, ptr {base}, i32 0, i32 {i}"
                     ));
                     self.drop_unbound(p, &fp, t);
+                }
+            }
+            Pat::Or(alts) => {
+                if alts.iter().any(|a| self.pat_moves(a)) {
+                    self.or_dispatch(alts, ptr, ty, |cg, alt| cg.drop_unbound(alt, ptr, ty));
+                } else {
+                    self.drop_at(ptr, ty);
                 }
             }
             _ => {}
