@@ -578,7 +578,13 @@ impl FnCx<'_> {
 
     /// `fn(...)` hints for parameters bounded by `Fn(...)`, so a closure
     /// argument can infer its parameter types.
-    pub fn fn_bound_hints(&mut self, fid: FnId, params: &[Ty], n_impl: usize) -> Vec<Option<Ty>> {
+    pub fn fn_bound_hints(
+        &mut self,
+        fid: FnId,
+        params: &[Ty],
+        n_impl: usize,
+        trait_self: Option<Ty>,
+    ) -> Vec<Option<Ty>> {
         let f = &self.ck.fns[fid as usize];
         let generics = f.decl.generics.params.clone();
         let module = f.module;
@@ -590,6 +596,17 @@ impl FnCx<'_> {
                 env.names.insert(g.name.name.clone(), Ty::Param(i as u32));
             }
             env.self_ty = Some(im.self_ty.clone());
+            env.cur_trait = im.trait_id.map(|t| (t, im.trait_args.clone()));
+        }
+        if let FnOwner::Trait(tid) = owner {
+            // a default method: `Self` is known, so `Self.Item` resolves now
+            let tg = self.ck.traits[tid as usize].decl.generics.params.clone();
+            let targs: Vec<Ty> = (0..tg.len() as u32).map(Ty::Param).collect();
+            for (g, t) in tg.iter().zip(&targs) {
+                env.names.insert(g.name.name.clone(), t.clone());
+            }
+            env.self_ty = trait_self;
+            env.cur_trait = Some((tid, targs));
         }
         for (j, g) in generics.iter().enumerate() {
             env.names

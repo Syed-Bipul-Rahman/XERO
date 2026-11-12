@@ -939,7 +939,40 @@ impl<'a> FnCx<'a> {
                 let ty = Ty::Array(Box::new(v.ty.clone()), count as u64);
                 Ok(x(K::ArrayRepeat(Box::new(v), count as u64), ty, span))
             }
-            E::Range(..) => self.err(span, "ranges can only be used in `for` loops"),
+            E::Range(lo, hi, inclusive) => {
+                // `a..b` as a value is a `Range` (an iterator)
+                let (Some(lo), Some(hi)) = (lo, hi) else {
+                    return self.err(span, "a range used as a value needs both ends: `a..b`");
+                };
+                let id = |n: &str| Ident {
+                    name: n.into(),
+                    span,
+                };
+                let mut fields = vec![(id("start"), (**lo).clone()), (id("end"), (**hi).clone())];
+                let ty = if *inclusive {
+                    fields.push((
+                        id("done"),
+                        ast::Expr {
+                            kind: E::Bool(false),
+                            span,
+                        },
+                    ));
+                    "RangeInclusive"
+                } else {
+                    "Range"
+                };
+                let lit = ast::Expr {
+                    kind: E::StructLit(
+                        Box::new(ast::Expr {
+                            kind: E::Name(id(ty), Vec::new()),
+                            span,
+                        }),
+                        fields,
+                    ),
+                    span,
+                };
+                self.expr(&lit, expected)
+            }
             E::Block(b) => self.block(b, expected),
             E::Unsafe(b) => {
                 self.unsafe_depth += 1;
@@ -2247,7 +2280,7 @@ impl<'a> FnCx<'a> {
         } else {
             (args, &[][..])
         };
-        self.arg_hints = self.fn_bound_hints(fid, &params, n_impl);
+        self.arg_hints = self.fn_bound_hints(fid, &params, n_impl, trait_self.clone());
         let (mut xs, slots) = self.infer_args(
             n_impl + n_fn,
             slots,
@@ -2524,6 +2557,36 @@ impl<'a> FnCx<'a> {
                 Ty::Int(IntTy::Usize),
                 span,
             ));
+        }
+        // arrays get the methods of slices: `arr.iter()`
+        let mut recv = recv;
+        let mut recv_ty = recv_ty;
+        if let Ty::Array(elem, _) = recv_ty.deref_all().clone() {
+            let st = Ty::Slice(elem.clone());
+            if !self.method_exists(recv_ty.deref_all(), &name.name) {
+                if let Some((fid, _, _)) = self.find_method(&st, &name.name) {
+                    let m = self.ck.fns[fid as usize].decl.self_param.map(|s| s.0)
+                        == Some(SelfKind::RefMut);
+                    let (mut p, mut t) = self.recv_place(recv, span);
+                    while let Ty::Ref(inner, _) = t.clone() {
+                        let (np, nt) = self.deref_place(p, &Ty::Ref(inner, false), span);
+                        p = np;
+                        t = nt;
+                    }
+                    if m {
+                        p = self.mut_place(p)?;
+                        self.note_mut(&p);
+                    }
+                    let aref = x(K::Borrow(p, m), Ty::reference(t, m), base.span);
+                    let sref = x(
+                        K::ArrayToSlice(Box::new(aref)),
+                        Ty::reference(st.clone(), m),
+                        base.span,
+                    );
+                    recv_ty = sref.ty.clone();
+                    recv = Recv::Value(sref);
+                }
+            }
         }
         // autoderef search
         let mut cand = recv_ty.clone();
@@ -3056,6 +3119,62 @@ impl<'a> FnCx<'a> {
                     return self.overloaded_compare(op, lref, b, span);
                 }
                 return self.overloaded_arith(op, l, b, span);
+            }
+            // comparing two references compares what they refer to: `&x < &y`
+            if let Ty::Ref(inner, _) = l.ty.clone() {
+                let comparable =
+                    inner.is_numeric() || *inner == Ty::Bool || self.overloadable(op, &inner);
+                if op.is_comparison() && comparable {
+                    let r = self.expr(b, Some(&l.ty))?;
+                    if let Ty::Ref(rinner, _) = r.ty.clone() {
+                        if rinner == inner {
+                            if self.overloadable(op, &inner) {
+                                let (tr, m) = match op {
+                                    BinOp::Eq => ("Eq", "eq"),
+                                    BinOp::Ne => ("Eq", "ne"),
+                                    BinOp::Lt => ("Ord", "lt"),
+                                    BinOp::Le => ("Ord", "le"),
+                                    BinOp::Gt => ("Ord", "gt"),
+                                    _ => ("Ord", "ge"),
+                                };
+                                let lr = x(l.kind, Ty::reference(*inner.clone(), false), l.span);
+                                let rr = x(r.kind, Ty::reference(*inner.clone(), false), r.span);
+                                return self.call_operator(
+                                    tr,
+                                    m,
+                                    op.symbol(),
+                                    &inner,
+                                    vec![lr, rr],
+                                    span,
+                                );
+                            }
+                            let (ls, rs) = (l.span, r.span);
+                            let lv = x(
+                                K::Use(Place::Deref(Box::new(l)), UseKind::Copy),
+                                *inner.clone(),
+                                ls,
+                            );
+                            let rv = x(
+                                K::Use(Place::Deref(Box::new(r)), UseKind::Copy),
+                                *inner.clone(),
+                                rs,
+                            );
+                            return Ok(x(
+                                K::Binary(op, Box::new(lv), Box::new(rv)),
+                                Ty::Bool,
+                                span,
+                            ));
+                        }
+                    }
+                    return self.err(
+                        span,
+                        format!(
+                            "cannot compare `{}` with `{}`",
+                            self.ts(&l.ty),
+                            self.ts(&r.ty)
+                        ),
+                    );
+                }
             }
             let lt = l.ty.clone();
             let r = match &lt {
@@ -3836,6 +3955,9 @@ impl<'a> FnCx<'a> {
                 if literal_array {
                     range_key = Some(iter.span);
                 }
+                if let Some(it) = self.iterator_of(v.clone(), iter.span)? {
+                    return self.iterator_loop(it, pat, body, span);
+                }
                 let (seq, by_ref, mutable, elem_ty) = match v.ty.clone() {
                     Ty::Ref(inner, m) => match *inner {
                         Ty::Array(e, _) => {
@@ -4027,6 +4149,96 @@ impl<'a> FnCx<'a> {
             Ty::unit(),
             span,
         ))
+    }
+
+    /// The iterator a `for` loop walks for value `v`: `v` itself if it is an
+    /// `Iterator`, else `v.iter()` for `&v`, `v.iter_mut()` for `&mut v` and
+    /// `v.into_iter()` for `v`. `None` if none applies.
+    fn iterator_of(&mut self, v: X, span: Span) -> Result<Option<X>> {
+        let iter_tid = self.prelude_trait("Iterator");
+        let is_iter = |cx: &mut Self, t: &Ty| iter_tid.is_some_and(|tid| cx.ck.implements(t, tid));
+        match v.ty.clone() {
+            Ty::Ref(inner, m) if matches!(*inner, Ty::Adt(..) | Ty::Slice(_) | Ty::Array(..)) => {
+                let name = if m { "iter_mut" } else { "iter" };
+                if matches!(*inner, Ty::Adt(..)) && self.method_exists(&inner, name) {
+                    let p = Place::Deref(Box::new(v));
+                    return Ok(Some(self.call_method_on_place(p, &inner, name, m, span)?));
+                }
+                Ok(None)
+            }
+            t @ Ty::Adt(..) => {
+                if is_iter(self, &t) {
+                    return Ok(Some(v));
+                }
+                if let Some((fid, ia, ts)) = self.find_method(&t, "into_iter") {
+                    if self.ck.fns[fid as usize].decl.self_param.map(|s| s.0)
+                        == Some(SelfKind::Value)
+                    {
+                        return Ok(Some(self.invoke(
+                            fid,
+                            Vec::new(),
+                            ia,
+                            ts,
+                            vec![v],
+                            &[],
+                            None,
+                            span,
+                            span,
+                        )?));
+                    }
+                }
+                Ok(None)
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// `for pat in it { body }` over an iterator:
+    /// `{ let mut it = it; while it.next() is Some(pat) { body } }`.
+    fn iterator_loop(
+        &mut self,
+        it: X,
+        pat: &ast::Pattern,
+        body: &ast::Block,
+        span: Span,
+    ) -> Result<(Vec<xir::Stmt>, X)> {
+        let name = "for#iter";
+        let ity = it.ty.clone();
+        let lid = self.new_local(name, ity, true, it.span, false);
+        let pre = vec![xir::Stmt::Let(lid, it)];
+        self.declare(name, lid);
+        let ps = pat.span;
+        let mk = |kind| ast::Expr { kind, span: ps };
+        let call = mk(E::Call(
+            Box::new(mk(E::Field(
+                Box::new(mk(E::Name(
+                    Ident {
+                        name: name.into(),
+                        span: ps,
+                    },
+                    Vec::new(),
+                ))),
+                Ident {
+                    name: "next".into(),
+                    span: ps,
+                },
+                Vec::new(),
+            ))),
+            Vec::new(),
+        ));
+        let some = ast::Pattern {
+            kind: ast::PatKind::Variant(
+                vec![Ident {
+                    name: "Some".into(),
+                    span: ps,
+                }],
+                Some(vec![pat.clone()]),
+            ),
+            span: ps,
+        };
+        let cond = mk(E::Is(Box::new(call), some));
+        let lp = self.while_loop(&cond, body, span)?;
+        Ok((pre, lp))
     }
 
     fn match_expr(
