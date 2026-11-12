@@ -110,9 +110,21 @@ jobs:
         run: |
           docker run --rm -v "$PWD:/src" -w /src alpine:3.21 sh -c '
             set -e
-            apk add --no-cache bash git build-base rust cargo llvm18-dev llvm18-static lld-dev zlib-static zstd-static libxml2-static xz-static ncurses-static linux-headers > /tmp/apk.log 2>&1 || { tail -5 /tmp/apk.log; exit 1; }
-            echo "::warning title=alpine::lld libs: $(ls /usr/lib/liblld*.a 2>/dev/null | tr "\n" " ") llvm: $(/usr/lib/llvm18/bin/llvm-config --version) syslibs: $(/usr/lib/llvm18/bin/llvm-config --system-libs --link-static)"
-            echo "::warning title=alpine lld::search: $(apk search lld | tr "\n" " ") files: $(find / -name "liblld*" 2>/dev/null | head -20 | tr "\n" " ") llvm static: $(apk search llvm | grep -E "static|dev" | tr "\n" " ")"
+            apk add --no-cache bash git build-base cmake ninja python3 curl xz rust cargo llvm18-dev llvm18-static zlib-static zstd-static libxml2-static xz-static ncurses-static linux-headers > /tmp/apk.log 2>&1 || { tail -5 /tmp/apk.log; exit 1; }
+            # static lld libraries matching LLVM 18 (Alpine ships lld 19 as shared libraries)
+            V=18.1.8
+            mkdir -p /tmp/llvm-src && cd /tmp/llvm-src
+            for p in lld libunwind cmake; do
+              curl -fsSL "https://github.com/llvm/llvm-project/releases/download/llvmorg-$V/$p-$V.src.tar.xz" | tar xJ
+              mv "$p-$V.src" "$p"
+            done
+            mkdir -p llvm
+            cmake -G Ninja -S lld -B lld-build -DCMAKE_BUILD_TYPE=Release -DLLVM_DIR=/usr/lib/llvm18/lib/cmake/llvm -DLLVM_MAIN_SRC_DIR=/tmp/llvm-src/llvm -DLLVM_INCLUDE_TESTS=OFF -DBUILD_SHARED_LIBS=OFF -DCMAKE_INSTALL_PREFIX=/opt/lld > /tmp/lld-cmake.log 2>&1 || { echo "::error title=lld cmake::$(tail -30 /tmp/lld-cmake.log | tr "\n" "|")"; exit 1; }
+            ninja -C lld-build lldCOFF lldELF lldMachO lldWasm lldCommon > /tmp/lld-build.log 2>&1 || { echo "::error title=lld build::$(grep -E "error" /tmp/lld-build.log | head -20 | tr "\n" "|")"; exit 1; }
+            cp lld-build/lib/liblld*.a /usr/lib/llvm18/lib/
+            mkdir -p /usr/lib/llvm18/include/lld && cp -r lld/include/lld/Common /usr/lib/llvm18/include/lld/
+            cd /src
+            echo "::warning title=alpine lld::built $(ls /usr/lib/llvm18/lib/liblld*.a | tr "\n" " ")"
             export XERO_LLVM_CONFIG=/usr/lib/llvm18/bin/llvm-config
             export RUSTFLAGS="-C target-feature=+crt-static"
             if ! cargo build --release --features llvm > /tmp/build.log 2>&1; then
