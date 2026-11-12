@@ -13,7 +13,14 @@ path = "src/main.rs"
 name = "xeroc"
 path = "src/lib.rs"
 
+[features]
+# Link LLVM and lld into xeroc, so no clang is needed (see build.rs).
+llvm = ["dep:cc"]
+
 [dependencies]
+
+[build-dependencies]
+cc = { version = "1", optional = true }
 
 [profile.release]
 opt-level = 3

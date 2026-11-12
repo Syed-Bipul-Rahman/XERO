@@ -486,6 +486,10 @@ pub fn build(opts: &Options) -> Result<PathBuf, String> {
         }
         _ => {}
     }
+    #[cfg(feature = "llvm")]
+    if std::env::var_os("XERO_CLANG").is_none() {
+        return build_builtin(opts, &ll, &out, &stem, libc);
+    }
     let tmpdir = std::env::temp_dir().join(format!("xeroc-{}-{}", std::process::id(), stem));
     std::fs::create_dir_all(&tmpdir).map_err(|e| format!("error: {e}\n"))?;
     let ll_path = tmpdir.join(format!("{stem}.ll"));
@@ -576,4 +580,150 @@ pub fn build(opts: &Options) -> Result<PathBuf, String> {
         ));
     }
     Ok(out)
+}
+
+/// Build with the LLVM inside xeroc: code generation in-process, linking
+/// with the built-in lld where no C library is involved, and with the
+/// system's C toolchain (`cc`) where one is.
+#[cfg(feature = "llvm")]
+fn build_builtin(
+    opts: &Options,
+    ll: &str,
+    out: &Path,
+    stem: &str,
+    libc: bool,
+) -> Result<PathBuf, String> {
+    use crate::llvm::{compile, lld, write, Output};
+    let t = &opts.target;
+    let triple = t.triple;
+    let linux = triple.contains("linux");
+    let wasm = triple.starts_with("wasm");
+    // position-independent code where a system linker makes a PIE
+    let pic = !wasm && t.hosted && (libc || !linux);
+    let fail = |e: String| format!("error: {e}\n");
+    match opts.emit {
+        Emit::Llvm => {
+            let ir = compile(ll, triple, opts.opt_level, pic, Output::Ir, false).map_err(fail)?;
+            write(out, &ir).map_err(fail)?;
+            return Ok(out.to_path_buf());
+        }
+        Emit::Asm => {
+            let intel = opts.intel_syntax && triple.starts_with("x86_64");
+            let asm =
+                compile(ll, triple, opts.opt_level, pic, Output::Assembly, intel).map_err(fail)?;
+            write(out, &asm).map_err(fail)?;
+            return Ok(out.to_path_buf());
+        }
+        Emit::Obj => {
+            let obj =
+                compile(ll, triple, opts.opt_level, pic, Output::Object, false).map_err(fail)?;
+            write(out, &obj).map_err(fail)?;
+            return Ok(out.to_path_buf());
+        }
+        _ => {}
+    }
+    if !wasm && !t.hosted {
+        return Err(format!("error: target `{}` has no operating system; use `--emit obj` and link with your own startup code\n", t.name));
+    }
+    if opts.lib && !wasm {
+        return Err("error: `--lib` produces an object; use `--emit obj`\n".into());
+    }
+    let obj = compile(ll, triple, opts.opt_level, pic, Output::Object, false).map_err(fail)?;
+    let tmpdir = std::env::temp_dir().join(format!("xeroc-{}-{}", std::process::id(), stem));
+    std::fs::create_dir_all(&tmpdir).map_err(|e| format!("error: {e}\n"))?;
+    let objext = if triple.contains("windows") {
+        "obj"
+    } else {
+        "o"
+    };
+    let obj_path = tmpdir.join(format!("{stem}.{objext}"));
+    write(&obj_path, &obj).map_err(fail)?;
+    let o = obj_path.display().to_string();
+    let outs = out.display().to_string();
+    let r = if wasm {
+        lld(
+            "wasm-ld",
+            &[
+                o,
+                "--no-entry".into(),
+                "--export-dynamic".into(),
+                "-o".into(),
+                outs,
+            ],
+        )
+    } else if linux && !libc {
+        // Xero's own runtime: a static executable, nothing else to link
+        lld(
+            "ld.lld",
+            &[
+                "-static".into(),
+                "--gc-sections".into(),
+                "-z".into(),
+                "noexecstack".into(),
+                o,
+                "-o".into(),
+                outs,
+            ],
+        )
+    } else {
+        link_with_system(opts, &obj_path, out, libc)
+    };
+    let _ = std::fs::remove_dir_all(&tmpdir);
+    r.map_err(|e| format!("error: {e}\n"))?;
+    Ok(out.to_path_buf())
+}
+
+/// Link an object against the C library with the system's toolchain.
+#[cfg(feature = "llvm")]
+fn link_with_system(opts: &Options, obj: &Path, out: &Path, libc: bool) -> Result<(), String> {
+    let t = &opts.target;
+    let host_native =
+        |os: &str| std::env::consts::OS == os && target_arch(t) == std::env::consts::ARCH;
+    let os = target_os(t);
+    if !host_native(os) {
+        return Err(format!(
+            "linking for `{}` with its C library needs that system's toolchain; build on that system, or use `--emit obj`",
+            t.name
+        ));
+    }
+    let mut candidates: Vec<String> = Vec::new();
+    if let Ok(c) = find_clang() {
+        candidates.push(c);
+    }
+    if os == "windows" {
+        candidates.push("link.exe".into());
+    } else {
+        candidates.push("cc".into());
+    }
+    for c in &candidates {
+        let mut cmd = Command::new(c);
+        if c.ends_with("link.exe") {
+            cmd.arg("/nologo")
+                .arg(format!("/out:{}", out.display()))
+                .arg(obj)
+                .arg("/defaultlib:libcmt")
+                .arg("/defaultlib:oldnames");
+        } else {
+            cmd.arg(obj).arg("-o").arg(out);
+            if os == "linux" && libc {
+                cmd.arg("-pthread").arg("-lm");
+            }
+        }
+        match cmd.output() {
+            Ok(o) if o.status.success() => return Ok(()),
+            Ok(o) => {
+                return Err(format!(
+                    "linking failed\n{}{}",
+                    String::from_utf8_lossy(&o.stdout),
+                    String::from_utf8_lossy(&o.stderr)
+                ))
+            }
+            Err(_) => continue,
+        }
+    }
+    Err(match os {
+        "macos" => "linking needs the Xcode Command Line Tools (`xcode-select --install`)".into(),
+        "windows" => "linking needs the Visual Studio C++ Build Tools; run xeroc from a Developer Command Prompt, or install clang".into(),
+        _ => "linking against the C library needs a C toolchain (`cc`); install gcc or clang, or drop `--libc`".into(),
+    })
 }

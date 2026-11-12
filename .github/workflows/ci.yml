@@ -64,6 +64,68 @@ jobs:
           XERO_TEST_RUNNER="qemu-${{ matrix.target }}" \
           cargo test --release --test harness run_programs
 
+  builtin-llvm:
+    # xeroc with LLVM and lld linked in (`--features llvm`): every test must
+    # pass with no clang installed.
+    name: built-in LLVM (ubuntu-24.04)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install LLVM libraries and qemu
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm-18-dev liblld-18-dev libpolly-18-dev qemu-user
+          echo "XERO_LLVM_CONFIG=/usr/lib/llvm-18/bin/llvm-config" >> "$GITHUB_ENV"
+      - name: Build
+        run: cargo build --release --features llvm
+      - name: Hide clang
+        run: |
+          mkdir -p "$RUNNER_TEMP/noclang"
+          for c in clang $(seq -f 'clang-%g' 14 24); do printf '#!/bin/sh\nexit 127\n' > "$RUNNER_TEMP/noclang/$c"; chmod +x "$RUNNER_TEMP/noclang/$c"; done
+          echo "$RUNNER_TEMP/noclang" >> "$GITHUB_PATH"
+      - name: Test without clang
+        run: cargo test --release --features llvm
+      - name: Test ARM64 and RISC-V without clang
+        run: |
+          for t in aarch64 riscv64; do
+            XERO_TEST_FLAGS="--target $t-linux" XERO_TEST_RUNNER="qemu-$t" cargo test --release --features llvm --test harness run_programs
+          done
+
+  static-llvm-linux:
+    # The release build for Linux: a static musl binary with LLVM inside,
+    # built on Alpine (whose LLVM and lld are musl static libraries).
+    name: static built-in LLVM (alpine, ${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            os: ubuntu-24.04
+          - arch: aarch64
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    container: alpine:3.21
+    steps:
+      - name: Install toolchain
+        run: |
+          apk add --no-cache bash git build-base rust cargo llvm18-dev llvm18-static lld-dev zlib-static zstd-static libxml2-static xz-static ncurses-static linux-headers
+          apk info -L lld-dev | grep -E "\.a$" | head -20 || true
+          ls /usr/lib/llvm18/lib/*.a | wc -l
+          /usr/lib/llvm18/bin/llvm-config --system-libs --link-static
+      - uses: actions/checkout@v4
+      - name: Build (static)
+        run: |
+          export XERO_LLVM_CONFIG=/usr/lib/llvm18/bin/llvm-config
+          RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --features llvm
+          ls -l target/release/xeroc
+          file target/release/xeroc || true
+          ldd target/release/xeroc || true
+      - name: Test
+        run: |
+          ./target/release/xeroc run examples/hello.xr
+          ./target/release/xeroc run examples/concurrency.xr
+          RUSTFLAGS="-C target-feature=+crt-static" cargo test --release --features llvm
+
   installers:
     # Builds a release-style archive and installs it with the real install scripts.
     name: installer (${{ matrix.os }})
