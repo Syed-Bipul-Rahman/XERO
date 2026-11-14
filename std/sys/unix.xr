@@ -34,6 +34,25 @@ unsafe fn pthread_cond_signal(c: *u8) -> i32
 unsafe fn pthread_cond_broadcast(c: *u8) -> i32
 unsafe fn pthread_cond_destroy(c: *u8) -> i32
 unsafe fn nanosleep(req: *i64, rem: *i64) -> i32
+unsafe fn clock_gettime(clock: i32, ts: *i64) -> i32
+unsafe fn getcwd(buf: *u8, size: usize) -> *u8
+unsafe fn chdir(path: *u8) -> i32
+unsafe fn mkdir(path: *u8, mode: u32) -> i32
+unsafe fn rmdir(path: *u8) -> i32
+unsafe fn rename(from: *u8, to: *u8) -> i32
+unsafe fn access(path: *u8, mode: i32) -> i32
+unsafe fn lseek(fd: i32, offset: i64, whence: i32) -> i64
+unsafe fn opendir(path: *u8) -> *u8
+unsafe fn readdir(dir: *u8) -> *u8
+unsafe fn closedir(dir: *u8) -> i32
+unsafe fn pipe(fds: *i32) -> i32
+unsafe fn fcntl(fd: i32, cmd: i32, ...) -> i32
+unsafe fn poll(fds: *i32, n: u64, timeout: i32) -> i32
+unsafe fn waitpid(pid: i32, status: *i32, options: i32) -> i32
+unsafe fn posix_spawnp(pid: *i32, file: *u8, actions: *u8, attrs: *u8, argv: **u8, envp: **u8) -> i32
+unsafe fn posix_spawn_file_actions_init(actions: *u8) -> i32
+unsafe fn posix_spawn_file_actions_adddup2(actions: *u8, fd: i32, to: i32) -> i32
+unsafe fn posix_spawn_file_actions_destroy(actions: *u8) -> i32
 unsafe fn sched_yield() -> i32
 
 pub const THREADS: bool = true
@@ -178,4 +197,231 @@ pub unsafe fn heap_free(ptr: *u8) {
 /// Copy `count` bytes; the regions may overlap.
 pub unsafe fn mem_move(dst: *u8, src: *u8, count: usize) {
     memmove(dst, src, count)
+}
+
+// ------------------------------------------------------------------ time
+
+/// Nanoseconds on a clock that never goes back.
+pub fn clock_monotonic() -> u64 {
+    clock_ns(target.CLOCK_MONOTONIC)
+}
+
+/// Nanoseconds since 1970-01-01 00:00 UTC.
+pub fn clock_realtime() -> u64 {
+    clock_ns(0)
+}
+
+fn clock_ns(id: i32) -> u64 {
+    let mut ts = [0i64; 2]
+    unsafe {
+        clock_gettime(id, &mut ts as *i64)
+    }
+    (ts[0] as u64) * 1000000000 + (ts[1] as u64)
+}
+
+pub fn sleep_ns(ns: u64) {
+    let ts = [(ns / 1000000000) as i64, (ns % 1000000000) as i64]
+    unsafe {
+        nanosleep(&ts as *i64, 0 as *i64)
+    }
+}
+
+// ----------------------------------------------- environment and directories
+// These return `-errno` on failure.
+
+/// The environment: a null-terminated array of `NAME=value` C strings
+/// (it follows the arguments that `main` gets).
+pub unsafe fn env_block() -> **u8 {
+    os_argv() + os_argc() + 1
+}
+
+fn fail() -> i32 {
+    0 - unsafe { target.errno() }
+}
+
+/// Write the current directory into `buf`; returns its length.
+pub unsafe fn cwd(buf: *u8, len: usize) -> isize {
+    if getcwd(buf, len) as usize == 0 {
+        return fail() as isize
+    }
+    let mut n: usize = 0
+    while *(buf + n) != 0 {
+        n += 1
+    }
+    n as isize
+}
+
+pub unsafe fn chdir_path(path: *u8) -> i32 {
+    if chdir(path) < 0 { fail() } else { 0 }
+}
+
+pub unsafe fn dir_create(path: *u8) -> i32 {
+    if mkdir(path, 511) < 0 { fail() } else { 0 }
+}
+
+pub unsafe fn dir_remove(path: *u8) -> i32 {
+    if rmdir(path) < 0 { fail() } else { 0 }
+}
+
+pub unsafe fn path_rename(from: *u8, to: *u8) -> i32 {
+    if rename(from, to) < 0 { fail() } else { 0 }
+}
+
+/// What is at `path`: `out[0]` is 1 for a file, 2 for a directory and 3
+/// for anything else; `out[1]` is the size in bytes.
+pub unsafe fn path_stat(path: *u8, out: *u64) -> i32 {
+    // `stat` has a different layout (and symbol) on each system, so ask
+    // `access`, `opendir` and `lseek` instead
+    if access(path, 0) < 0 {
+        return fail()
+    }
+    let d = opendir(path)
+    if d as usize != 0 {
+        closedir(d)
+        *out = 2
+        *(out + 1) = 0
+        return 0
+    }
+    let fd = open(path, target.O_RDONLY | target.O_NONBLOCK | target.O_CLOEXEC)
+    if fd < 0 {
+        // there, but not readable: report it as a file of unknown size
+        *out = 1
+        *(out + 1) = 0
+        return 0
+    }
+    let len = lseek(fd, 0, 2)
+    close(fd)
+    *out = if len < 0 { 3 } else { 1 }
+    *(out + 1) = if len < 0 { 0 } else { len as u64 }
+    0
+}
+
+pub unsafe fn dir_open(path: *u8) -> isize {
+    let d = opendir(path)
+    if d as usize == 0 { fail() as isize } else { d as isize }
+}
+
+/// The next entry's name, copied into `name` (1024 bytes); returns its
+/// length, or 0 when there are no more.
+pub unsafe fn dir_next(h: isize, name: *u8) -> isize {
+    let e = readdir(h as *u8)
+    if e as usize == 0 {
+        return 0
+    }
+    let s = e + target.DIRENT_NAME
+    let mut len: usize = 0
+    while *(s + len) != 0 && len < 1023 {
+        *(name + len) = *(s + len)
+        len += 1
+    }
+    len as isize
+}
+
+pub unsafe fn dir_close(h: isize) {
+    closedir(h as *u8)
+}
+
+// --------------------------------------------------------------- processes
+
+/// Start the program `argv[0]` (searched for in `PATH`) with the
+/// null-terminated `argv`. With `capture`, its output and error output go
+/// to pipes whose read ends are stored in `pipes[0]` and `pipes[1]`.
+/// Returns a process handle, or `-errno` if it could not start.
+pub unsafe fn proc_spawn(argv: **u8, capture: bool, pipes: *isize) -> isize {
+    let mut outp = [-1i32; 2]
+    let mut errp = [-1i32; 2]
+    // posix_spawn_file_actions_t: 80 bytes with glibc, a pointer on macOS
+    let mut actions = [0u64; 32]
+    let fa = &mut actions as *u64 as *u8
+    posix_spawn_file_actions_init(fa)
+    if capture {
+        if pipe(&mut outp as *i32) < 0 {
+            let e = fail()
+            posix_spawn_file_actions_destroy(fa)
+            return e as isize
+        }
+        if pipe(&mut errp as *i32) < 0 {
+            let e = fail()
+            close(outp[0])
+            close(outp[1])
+            posix_spawn_file_actions_destroy(fa)
+            return e as isize
+        }
+        for fd in [outp[0], outp[1], errp[0], errp[1]] {
+            fcntl(fd, 2, 1)
+        }
+        posix_spawn_file_actions_adddup2(fa, outp[1], 1)
+        posix_spawn_file_actions_adddup2(fa, errp[1], 2)
+    }
+    let mut pid: i32 = 0
+    let r = posix_spawnp(&mut pid as *i32, *argv, fa, 0 as *u8, argv, env_block())
+    posix_spawn_file_actions_destroy(fa)
+    if capture {
+        close(outp[1])
+        close(errp[1])
+    }
+    if r != 0 {
+        if capture {
+            close(outp[0])
+            close(errp[0])
+        }
+        return 0 - r as isize
+    }
+    *pipes = outp[0] as isize
+    *(pipes + 1) = errp[0] as isize
+    pid as isize
+}
+
+/// Wait until pipe `a` or `b` (-1 for none) has data or has closed;
+/// returns bit 1 for `a` and bit 2 for `b`.
+pub unsafe fn pipe_wait(a: isize, b: isize) -> i32 {
+    // struct pollfd { i32 fd; i16 events; i16 revents }, POLLIN = 1
+    let mut fds = [0u64; 2]
+    let p = &mut fds as *u64 as *i32
+    *p = a as i32
+    *(p + 1) = 1
+    *(p + 2) = b as i32
+    *(p + 3) = 1
+    loop {
+        let r = poll(p, 2, -1)
+        if r > 0 {
+            let mut bits: i32 = 0
+            if (*(p + 1) >> 16) != 0 {
+                bits |= 1
+            }
+            if (*(p + 3) >> 16) != 0 {
+                bits |= 2
+            }
+            return bits
+        }
+        if r == 0 || target.errno() != 4 {
+            return 3
+        }
+    }
+}
+
+/// Read from a pipe; 0 at its end.
+pub unsafe fn pipe_read(h: isize, buf: *u8, n: usize) -> isize {
+    loop {
+        let r = read(h as i32, buf, n)
+        if r >= 0 || target.errno() != 4 {
+            return r
+        }
+    }
+}
+
+pub unsafe fn pipe_close(h: isize) {
+    close(h as i32)
+}
+
+/// Wait for the process to end; its exit code (128 + the signal if a
+/// signal ended it).
+pub unsafe fn proc_wait(p: isize) -> i32 {
+    let mut status: i32 = 0
+    while waitpid(p as i32, &mut status as *i32, 0) < 0 {
+        if target.errno() != 4 {
+            return -1
+        }
+    }
+    if (status & 0x7f) == 0 { (status >> 8) & 0xff } else { 128 + (status & 0x7f) }
 }

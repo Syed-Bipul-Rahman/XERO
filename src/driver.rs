@@ -63,6 +63,8 @@ pub const STD_MODULES: &[(&str, &str)] = &[
     ("std.fs", include_str!("../std/fs.xr")),
     ("std.task", include_str!("../std/task.xr")),
     ("std.collections", include_str!("../std/collections.xr")),
+    ("std.time", include_str!("../std/time.xr")),
+    ("std.process", include_str!("../std/process.xr")),
 ];
 
 /// The OS layer `std.sys`, chosen per target.
@@ -156,6 +158,19 @@ fn sys_target_module(target: &TargetInfo) -> String {
     ] {
         s.push_str(&format!("pub const {n}: i32 = {v}\n"));
     }
+    let arch = target_arch(target);
+    // ENOTEMPTY, O_NONBLOCK, CLOCK_MONOTONIC, and where `readdir` puts the name
+    let (enotempty, nonblock, monotonic, dirent_name) = match os {
+        "linux" => (39, 0x800, 1, 19),
+        "macos" if arch == "x86_64" => (66, 0x4, 6, 8),
+        "macos" => (66, 0x4, 6, 21),
+        "windows" => (41, 0, 0, 0),
+        _ => (39, 0, 0, 0),
+    };
+    s.push_str(&format!(
+        "pub const ENOTEMPTY: i32 = {enotempty}\npub const O_NONBLOCK: i32 = {nonblock}\n\
+         pub const CLOCK_MONOTONIC: i32 = {monotonic}\npub const DIRENT_NAME: usize = {dirent_name}\n"
+    ));
     if !errno.is_empty() {
         s.push_str(&format!(
             "\nunsafe fn {errno}() -> *i32\n\npub unsafe fn errno() -> i32 {{\n    *{errno}()\n}}\n"
@@ -184,6 +199,17 @@ fn sys_target_module(target: &TargetInfo) -> String {
             ("NANOSLEEP", 35, 101),
             ("CLONE", 56, 220),
             ("CLOCK_GETTIME", 228, 113),
+            ("GETCWD", 79, 17),
+            ("CHDIR", 80, 49),
+            ("MKDIRAT", 258, 34),
+            ("RENAMEAT2", 316, 276),
+            ("STATX", 332, 291),
+            ("GETDENTS64", 217, 61),
+            ("PIPE2", 293, 59),
+            ("DUP3", 292, 24),
+            ("EXECVE", 59, 221),
+            ("WAIT4", 61, 260),
+            ("PPOLL", 271, 73),
         ];
         s.push('\n');
         for (n, a, b) in nrs {

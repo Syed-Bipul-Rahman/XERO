@@ -728,6 +728,21 @@ impl Eq for str {
     fn eq(&self, other: &str) -> bool { str_eq(self, other) }
 }
 
+/// Byte by byte, which for UTF-8 is the order of the code points.
+impl Ord for str {
+    fn cmp(&self, other: &str) -> Ordering {
+        let a = self.as_bytes()
+        let b = other.as_bytes()
+        let n = if a.len() < b.len() { a.len() } else { b.len() }
+        for i in 0..n {
+            if a[i] != b[i] {
+                return if a[i] < b[i] { Ordering.Less } else { Ordering.Greater }
+            }
+        }
+        a.len().cmp(&b.len())
+    }
+}
+
 // ------------------------------------------------------------ output
 
 /// Types that can be printed with `print`/`println`.

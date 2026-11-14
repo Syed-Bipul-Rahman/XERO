@@ -155,19 +155,6 @@ jobs:
           cargo test --release --features llvm > test.log 2>&1 || { echo "::error title=test::$(tail -40 test.log | tr '\n' '|')"; exit 1; }
           tail -5 test.log
 
-  macos-stress:
-    # temporary: hunting an intermittent hang on macOS
-    name: macOS stress
-    runs-on: macos-15
-    steps:
-      - uses: actions/checkout@v4
-      - run: cargo build --release
-      - name: Run the programs 10 times
-        run: |
-          for i in $(seq 10); do
-            cargo test --release --test harness run_programs > run.log 2>&1 || { echo "::error title=stress run $i::$(grep -E "timed out|failed|mismatch" run.log | head -10 | tr '\n' '|')"; exit 1; }
-          done
-
   installers:
     # Builds a release-style archive and installs it with the real install scripts.
     name: installer (${{ matrix.os }})

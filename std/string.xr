@@ -188,6 +188,12 @@ impl Eq for String {
     }
 }
 
+impl Ord for String {
+    fn cmp(&self, other: &String) -> Ordering {
+        self.as_str().cmp(other.as_str())
+    }
+}
+
 impl Borrow<str> for String {
     fn view(&self) -> &str {
         self.as_str()

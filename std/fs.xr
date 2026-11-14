@@ -3,6 +3,8 @@
 module std.fs
 
 import std.sys
+import std.sys.target
+import std.os
 
 /// An error from the operating system, such as a missing file.
 pub copy struct Error {
@@ -40,9 +42,26 @@ impl Error {
             "too many open files"
         } else if c == 28 {
             "no space left on device"
+        } else if c == target.ENOTEMPTY {
+            "directory not empty"
+        } else if c == 8 {
+            "not an executable program"
+        } else if c == 38 {
+            "not supported on this system"
         } else {
             "I/O error"
         }
+    }
+}
+
+/// An error from an OS error number.
+pub fn error_from(code: i32) -> Error {
+    Error { code: code }
+}
+
+impl Display for Error {
+    fn fmt(&self, out: &mut String) {
+        out.push_str(self.message())
     }
 }
 
@@ -53,7 +72,7 @@ impl Print for Error {
 }
 
 /// Copy `path` into `buf` with a terminating NUL, as the OS wants it.
-fn c_path(path: &str, buf: &mut [u8; 4096]) -> Result<(), Error> {
+pub fn c_path(path: &str, buf: &mut [u8; 4096]) -> Result<(), Error> {
     let bytes = path.as_bytes()
     if bytes.len() >= 4096 {
         throw Error { code: PATH_TOO_LONG }
@@ -189,4 +208,202 @@ pub fn remove(path: &str) -> Result<(), Error> {
         throw Error { code: 0 - r }
     }
     Ok(())
+}
+
+/// Run `f` on the NUL-terminated `path`; an error for a negative result.
+fn path_call(path: &str, f: fn(*u8) -> i32) -> Result<(), Error> {
+    let mut buf = [0u8; 4096]
+    try c_path(path, &mut buf)
+    let r = f(&buf as *u8)
+    if r < 0 {
+        throw Error { code: 0 - r }
+    }
+    Ok(())
+}
+
+fn sys_dir_create(p: *u8) -> i32 {
+    unsafe { sys.dir_create(p) }
+}
+
+fn sys_dir_remove(p: *u8) -> i32 {
+    unsafe { sys.dir_remove(p) }
+}
+
+/// Create the directory `path` (its parent must exist).
+pub fn create_dir(path: &str) -> Result<(), Error> {
+    path_call(path, sys_dir_create)
+}
+
+/// Create the directory `path` and any missing parents; fine if it exists.
+pub fn create_dir_all(path: &str) -> Result<(), Error> {
+    if is_dir(path) {
+        return Ok(())
+    }
+    if parent(path) is Some(p) {
+        try create_dir_all(p)
+    }
+    match create_dir(path) {
+        Ok(()) => Ok(())
+        // another thread or process may have made it meanwhile
+        Err(e) => if is_dir(path) { Ok(()) } else { Err(e) }
+    }
+}
+
+/// `path` without its last component: `"a/b/c"` gives `"a/b"`; `None`
+/// for a path with only one component.
+pub fn parent(path: &str) -> Option<&str> {
+    let b = path.as_bytes()
+    let mut end = b.len()
+    while end > 1 && is_sep(b[end - 1]) {
+        end -= 1
+    }
+    let mut i = end
+    while i > 0 && !is_sep(b[i - 1]) {
+        i -= 1
+    }
+    if i == 0 {
+        return None
+    }
+    // drop the separators, but keep a root `/`
+    while i > 1 && is_sep(b[i - 1]) {
+        i -= 1
+    }
+    Some(&path[..i])
+}
+
+fn is_sep(c: u8) -> bool {
+    c == '/' || (c == '\\' && os.NAME == "windows")
+}
+
+/// `dir` and `name` joined with a separator.
+pub fn join(dir: &str, name: &str) -> String {
+    let mut s = String.from(dir)
+    if !dir.is_empty() && !is_sep(dir.as_bytes()[dir.len() - 1]) {
+        s.push_byte('/')
+    }
+    s.push_str(name)
+    s
+}
+
+/// Remove the empty directory `path`.
+pub fn remove_dir(path: &str) -> Result<(), Error> {
+    path_call(path, sys_dir_remove)
+}
+
+/// Remove `path` and everything in it (or the file `path`).
+pub fn remove_dir_all(path: &str) -> Result<(), Error> {
+    let m = try metadata(path)
+    if !m.is_dir() {
+        return remove(path)
+    }
+    for name in try read_dir(path) {
+        let child = join(path, name.as_str())
+        try remove_dir_all(child.as_str())
+    }
+    remove_dir(path)
+}
+
+/// Rename (move) `from` to `to`, replacing a file at `to`.
+pub fn rename(from: &str, to: &str) -> Result<(), Error> {
+    let mut a = [0u8; 4096]
+    let mut b = [0u8; 4096]
+    try c_path(from, &mut a)
+    try c_path(to, &mut b)
+    let r = unsafe { sys.path_rename(&a as *u8, &b as *u8) }
+    if r < 0 {
+        throw Error { code: 0 - r }
+    }
+    Ok(())
+}
+
+/// What `metadata` reports about a path.
+pub copy struct Metadata {
+    kind: u64
+    len: u64
+}
+
+impl Metadata {
+    pub fn is_file(&self) -> bool {
+        self.kind == 1
+    }
+
+    pub fn is_dir(&self) -> bool {
+        self.kind == 2
+    }
+
+    /// The size in bytes (of a file).
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+}
+
+/// Whether `path` is a file, a directory or something else, and its size.
+pub fn metadata(path: &str) -> Result<Metadata, Error> {
+    let mut buf = [0u8; 4096]
+    try c_path(path, &mut buf)
+    let mut out = [0u64; 2]
+    let r = unsafe { sys.path_stat(&buf as *u8, &mut out as *u64) }
+    if r < 0 {
+        throw Error { code: 0 - r }
+    }
+    Ok(Metadata { kind: out[0], len: out[1] })
+}
+
+/// Whether anything exists at `path`.
+pub fn exists(path: &str) -> bool {
+    metadata(path).is_ok()
+}
+
+pub fn is_file(path: &str) -> bool {
+    match metadata(path) {
+        Ok(m) => m.is_file()
+        Err(_) => false
+    }
+}
+
+pub fn is_dir(path: &str) -> bool {
+    match metadata(path) {
+        Ok(m) => m.is_dir()
+        Err(_) => false
+    }
+}
+
+/// The names in the directory `path` (without `.` and `..`), in no
+/// particular order.
+pub fn read_dir(path: &str) -> Result<Vec<String>, Error> {
+    let mut buf = [0u8; 4096]
+    try c_path(path, &mut buf)
+    let h = unsafe { sys.dir_open(&buf as *u8) }
+    if h < 0 {
+        throw Error { code: 0 - h as i32 }
+    }
+    let mut names: Vec<String> = Vec.new()
+    let mut name = [0u8; 1024]
+    loop {
+        let n = unsafe { sys.dir_next(h, &mut name as *u8) }
+        if n < 0 {
+            unsafe { sys.dir_close(h) }
+            throw Error { code: 0 - n as i32 }
+        }
+        if n == 0 {
+            break
+        }
+        let s = unsafe { str_from_raw(&name as *u8, n as usize) }
+        if s != "." && s != ".." {
+            // names that are not UTF-8 are skipped
+            if String.from_utf8(copy_bytes(s.as_bytes())) is Some(t) {
+                names.push(t)
+            }
+        }
+    }
+    unsafe { sys.dir_close(h) }
+    Ok(names)
+}
+
+fn copy_bytes(b: &[u8]) -> Vec<u8> {
+    let mut v: Vec<u8> = Vec.with_capacity(b.len())
+    for c in b {
+        v.push(*c)
+    }
+    v
 }

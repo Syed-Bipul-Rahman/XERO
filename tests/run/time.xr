@@ -1,0 +1,85 @@
+// std.time: Duration, Instant, sleep, the wall clock, and async sleep
+
+import std.task
+import std.time
+import std.time.{Duration, Instant}
+
+async fn after(id: i32, ms: u64) -> i32 {
+    time.sleep_async(Duration.from_millis(ms)).await
+    println("woke {}", id)
+    id
+}
+
+fn main() {
+    let d = Duration.from_millis(1500)
+    println(d)
+    println(d.as_secs())
+    println(d.as_millis())
+    println(d.subsec_nanos())
+    println(d.as_secs_f64())
+    println(Duration.from_secs(2) + Duration.from_millis(250))
+    println(Duration.from_secs(1) - Duration.from_millis(1))
+    println(Duration.from_micros(12500))
+    println(Duration.from_nanos(80))
+    println(Duration.from_millis(10) * 3)
+    println(Duration.from_secs(1) / 4)
+    println(Duration.from_secs_f64(0.25))
+    println(Duration.from_millis(5).saturating_sub(Duration.from_millis(9)).is_zero())
+    println(Duration.from_millis(5) < Duration.from_millis(9))
+    let mut total = Duration.zero()
+    for _ in 0..4 {
+        total += Duration.from_millis(250)
+    }
+    println(total == Duration.from_secs(1))
+    println("{:>8}|", Duration.from_millis(42))
+
+    let start = Instant.now()
+    time.sleep(Duration.from_millis(30))
+    let later = Instant.now()
+    println(later >= start)
+    println(later - start >= Duration.from_millis(30))
+    println(start.elapsed() >= Duration.from_millis(30))
+    println(start.duration_since(later).is_zero())
+
+    // some time after 2023
+    println(time.since_epoch().as_secs() > 1700000000)
+
+    // timers wake their tasks in order of their deadlines
+    let mut ex = task.Executor.new()
+    ex.start(after(1, 90))
+    ex.start(after(2, 10))
+    ex.start(after(3, 50))
+    let t = Instant.now()
+    ex.run()
+    println(t.elapsed() >= Duration.from_millis(90))
+    println(task.block_on(after(4, 1)))
+}
+
+// output:
+// 1.5s
+// 1
+// 1500
+// 500000000
+// 1.5
+// 2.25s
+// 999ms
+// 12.5ms
+// 80ns
+// 30ms
+// 250ms
+// 250ms
+// true
+// true
+// true
+//     42ms|
+// true
+// true
+// true
+// true
+// true
+// woke 2
+// woke 3
+// woke 1
+// true
+// woke 4
+// 4

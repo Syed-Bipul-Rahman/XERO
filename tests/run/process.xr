@@ -1,0 +1,88 @@
+// std.process: running programs; std.env: environment variables
+// test: native-only (it runs itself, which qemu cannot do)
+
+import std.env
+import std.os
+import std.process
+
+fn main() {
+    // as the child: write to both outputs and exit with a code
+    if env.arg(1) is Some(mode) {
+        if mode == "child" {
+            println("to stdout")
+            eprintln("to stderr")
+            process.exit(3)
+        }
+        if mode == "args" {
+            let mut i: usize = 2
+            while env.arg(i) is Some(a) {
+                print("[{}]", a)
+                i += 1
+            }
+            process.exit(0)
+        }
+        if mode == "big" {
+            // more than a pipe holds, on both outputs at once
+            for i in 0..20000 {
+                println("line {} of the output", i)
+                eprintln("line {} of the errors", i)
+            }
+            process.exit(0)
+        }
+    }
+    let me = env.arg(0).unwrap()
+
+    let o = process.run(me, &["child"]).unwrap()
+    print(o.stdout.as_str().replace("\r\n", "\n"))
+    print(o.stderr.as_str().replace("\r\n", "\n"))
+    println(o.status)
+    println(o.success())
+
+    let big = process.run(me, &["big"]).unwrap()
+    println(big.stdout.as_str().lines().count())
+    println(big.stderr.as_str().lines().count())
+    println(big.success())
+
+    // arguments arrive as they were given, spaces and quotes included
+    let o = process.run(me, &["args", "a b", "", "say \"hi\"", "back\\slash", "end\\", "tab\there"]).unwrap()
+    println(o.stdout)
+    println(process.status(me, &["child"]).unwrap())
+    if os.NAME != "windows" {
+        println(process.status("sh", &["-c", "exit 7"]).unwrap())
+    } else {
+        println(7)
+    }
+
+    match process.run("xero-no-such-program", &[]) {
+        Ok(_) => println("??")
+        Err(e) => println(e)
+    }
+
+    // the environment
+    println(env.var("PATH").is_some())
+    println(env.var("XERO_SURELY_NOT_SET_42").is_none())
+    let mut found = false
+    for (k, v) in env.vars() {
+        if k.as_str() == "PATH" || k.as_str() == "Path" {
+            found = !v.is_empty()
+        }
+    }
+    println(found)
+}
+
+// output:
+// to stdout
+// to stderr
+// 3
+// false
+// 20000
+// 20000
+// true
+// [a b][][say "hi"][back\slash][end\][tab	here]
+// to stdout
+// 3
+// 7
+// no such file or directory
+// true
+// true
+// true

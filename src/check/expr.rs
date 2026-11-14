@@ -1529,6 +1529,8 @@ impl<'a> FnCx<'a> {
             E::Array(items) => {
                 let mut et = match expected {
                     Some(Ty::Array(t, _)) => Some((**t).clone()),
+                    // `&[...]` passed as a slice
+                    Some(Ty::Slice(t)) => Some((**t).clone()),
                     _ => None,
                 };
                 let mut out = Vec::new();

@@ -1,0 +1,113 @@
+// std.fs directories and paths, std.env's current directory
+
+import std.env
+import std.fs
+
+fn show(r: Result<(), fs.Error>) {
+    match r {
+        Ok(()) => println("ok")
+        Err(e) => println(e)
+    }
+}
+
+fn main() {
+    let base = "xero-dirs-test.tmp"
+    fs.remove_dir_all(base) catch {}
+    println(fs.exists(base))
+
+    show(fs.create_dir(base))
+    show(fs.create_dir(base))
+    show(fs.create_dir_all("xero-dirs-test.tmp/a/b/c"))
+    show(fs.create_dir_all("xero-dirs-test.tmp/a/b"))
+    show(fs.write("xero-dirs-test.tmp/a/notes.txt", "twelve bytes".as_bytes()))
+    show(fs.write("xero-dirs-test.tmp/top.txt", "x".as_bytes()))
+
+    let m = fs.metadata("xero-dirs-test.tmp/a/notes.txt").unwrap()
+    println(m.is_file())
+    println(m.is_dir())
+    println(m.len())
+    println(fs.is_dir("xero-dirs-test.tmp/a/b"))
+    println(fs.is_file("xero-dirs-test.tmp/a/b"))
+    match fs.metadata("xero-dirs-test.tmp/missing") {
+        Ok(_) => println("??")
+        Err(e) => println(e)
+    }
+
+    let mut names = fs.read_dir("xero-dirs-test.tmp/a").unwrap()
+    names.sort()
+    println(names.len())
+    for n in &names {
+        println(n)
+    }
+    match fs.read_dir("xero-dirs-test.tmp/top.txt") {
+        Ok(_) => println("??")
+        Err(e) => println(e.code() != 0)
+    }
+
+    show(fs.rename("xero-dirs-test.tmp/top.txt", "xero-dirs-test.tmp/a/moved.txt"))
+    println(fs.exists("xero-dirs-test.tmp/top.txt"))
+    println(fs.read_to_string("xero-dirs-test.tmp/a/moved.txt").unwrap())
+
+    show(fs.remove_dir("xero-dirs-test.tmp/a"))
+    show(fs.remove_dir("xero-dirs-test.tmp/a/b/c"))
+    println(fs.exists("xero-dirs-test.tmp/a/b/c"))
+
+    // paths
+    println(fs.parent("a/b/c.txt").unwrap())
+    println(fs.parent("/top").unwrap())
+    println(fs.parent("name").is_none())
+    println(fs.join("a/b", "c"))
+    println(fs.join("a/b/", "c"))
+
+    // the current directory
+    let here = env.current_dir().unwrap()
+    show(env.set_current_dir("xero-dirs-test.tmp/a"))
+    let mut inside = fs.read_dir(".").unwrap()
+    inside.sort()
+    println(inside.len())
+    println(env.current_dir().unwrap().len() > here.len())
+    show(env.set_current_dir(here.as_str()))
+    println(env.current_dir().unwrap() == here)
+    show(env.set_current_dir("xero-dirs-test.tmp/nope"))
+
+    show(fs.remove_dir_all(base))
+    println(fs.exists(base))
+}
+
+// output:
+// false
+// ok
+// file exists
+// ok
+// ok
+// ok
+// ok
+// true
+// false
+// 12
+// true
+// false
+// no such file or directory
+// 2
+// b
+// notes.txt
+// true
+// ok
+// false
+// x
+// directory not empty
+// ok
+// false
+// a/b
+// /
+// true
+// a/b/c
+// a/b/c
+// ok
+// 3
+// true
+// ok
+// true
+// no such file or directory
+// ok
+// false
