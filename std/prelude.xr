@@ -1223,7 +1223,7 @@ impl<T> Iterator for SliceIterMut<T> {
         let i = self.i
         if i < self.s.len() {
             self.i = i + 1
-            let p = (&mut *self.s) as *T
+            let p = (&*self.s) as *T
             // each item is a different element: it borrows the slice the
             // iterator borrows, not the iterator itself
             Some(unsafe { rebind(&mut *(p + i), &*self.s) })
