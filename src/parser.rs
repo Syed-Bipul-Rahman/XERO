@@ -775,7 +775,20 @@ impl Parser {
                     self.bump();
                     self.with_nl(false, |p| {
                         while !p.at(&Tok::Gt) {
-                            args.push(p.ty()?);
+                            // `Item = T`: a bound on an associated type
+                            if matches!(p.peek(), Tok::Ident(_)) && matches!(p.peek_at(1), Tok::Eq)
+                            {
+                                let start = p.span();
+                                let name = p.ident()?;
+                                p.bump();
+                                let t = p.ty()?;
+                                args.push(TypeExpr {
+                                    kind: TypeKind::AssocEq(name, Box::new(t)),
+                                    span: start.to(p.prev_span()),
+                                });
+                            } else {
+                                args.push(p.ty()?);
+                            }
                             if !p.eat(&Tok::Comma) {
                                 break;
                             }

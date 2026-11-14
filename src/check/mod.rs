@@ -989,6 +989,13 @@ impl Checker {
         let TypeKind::Path(_, args) = &t.kind else {
             unreachable!()
         };
+        // `Item = T` arguments are checked separately (`assoc_bounds_hold`)
+        let args: Vec<TypeExpr> = args
+            .iter()
+            .filter(|a| !matches!(a.kind, TypeKind::AssocEq(..)))
+            .cloned()
+            .collect();
+        let args = &args;
         let generics = self.traits[tid as usize].decl.generics.params.clone();
         let tmodule = self.traits[tid as usize].module;
         let tname = self.traits[tid as usize].name.clone();
@@ -1392,6 +1399,12 @@ impl Checker {
                     None => Ty::unit(),
                 }),
             ),
+            TypeKind::AssocEq(..) => {
+                return Err(Diagnostic::new(
+                    t.span,
+                    "`Name = Type` is only allowed in a trait bound, e.g. `I: Iterator<Item = i32>`",
+                ))
+            }
             TypeKind::Dyn(tr) => {
                 let tid = self.resolve_trait_ref(tr, module)?;
                 self.check_object_safe(tid, tr.span)?;
@@ -1911,6 +1924,12 @@ impl Checker {
                     let tname = self.trait_str(tid, &targs);
                     return Err(Diagnostic::new(span, format!("the trait `{tname}` is not implemented for `{tys}` (required by `{}: {tname}`)", g.name.name)));
                 }
+                if let Some((name, want, have)) =
+                    self.assoc_mismatch(b, tid, &targs, module, &env, a, span)?
+                {
+                    let tys = self.ty_str(a);
+                    return Err(Diagnostic::new(span, format!("`{tys}.{name}` is `{have}`, but the bound `{}: ...<{name} = {want}>` requires `{want}`", g.name.name)));
+                }
             }
         }
         Ok(())
@@ -1939,8 +1958,59 @@ impl Checker {
             return Ok(ps == aps && r == ar && akind <= *bound_kind);
         }
         let (tid, targs) = self.resolve_trait_with_args(b, module, env, Some(arg.clone()))?;
-        Ok(self.is_future_frame(arg, tid)
-            || self.find_trait_impl_args(arg, tid, Some(&targs)).is_some())
+        let implemented = self.is_future_frame(arg, tid)
+            || self.find_trait_impl_args(arg, tid, Some(&targs)).is_some();
+        if !implemented {
+            return Ok(false);
+        }
+        Ok(self
+            .assoc_mismatch(b, tid, &targs, module, env, arg, b.span)?
+            .is_none())
+    }
+
+    /// The first `Name = T` in bound `b` that `arg` does not satisfy, as
+    /// (name, wanted type, actual type).
+    #[allow(clippy::too_many_arguments)]
+    fn assoc_mismatch(
+        &mut self,
+        b: &TypeExpr,
+        tid: TraitId,
+        targs: &[Ty],
+        module: ModId,
+        env: &Env,
+        arg: &Ty,
+        span: Span,
+    ) -> Result<Option<(String, String, String)>> {
+        let TypeKind::Path(_, args) = &b.kind else {
+            return Ok(None);
+        };
+        for a in args {
+            let TypeKind::AssocEq(name, want) = &a.kind else {
+                continue;
+            };
+            let declared = self.traits[tid as usize]
+                .decl
+                .assoc_types
+                .iter()
+                .any(|x| x.name.name == name.name);
+            if !declared && !(self.is_future_frame(arg, tid) && name.name == "Output") {
+                let tn = self.traits[tid as usize].name.clone();
+                return Err(Diagnostic::new(
+                    name.span,
+                    format!("trait `{tn}` has no associated type `{}`", name.name),
+                ));
+            }
+            let want = self.resolve_type(want, module, env)?;
+            let have = self.project(arg, Some((tid, targs.to_vec())), &name.name, span)?;
+            if want != have {
+                return Ok(Some((
+                    name.name.clone(),
+                    self.ty_str(&want),
+                    self.ty_str(&have),
+                )));
+            }
+        }
+        Ok(None)
     }
 
     // ------------------------------------------------------ associated types

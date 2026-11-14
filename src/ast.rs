@@ -187,6 +187,8 @@ pub enum TypeKind {
     Impl(Vec<TypeExpr>),
     /// `dyn Trait`: a trait object.
     Dyn(Box<TypeExpr>),
+    /// `Item = i32` among a trait bound's arguments: `Iterator<Item = i32>`.
+    AssocEq(Ident, Box<TypeExpr>),
     Never,
     Infer,
     /// `fn(i32, i32) -> i32`: a plain function pointer.
