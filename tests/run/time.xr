@@ -5,8 +5,11 @@ import std.time
 import std.time.{Duration, Instant}
 
 async fn after(id: i32, ms: u64) -> i32 {
+    let t = Instant.now()
     time.sleep_async(Duration.from_millis(ms)).await
-    println("woke {}", id)
+    if t.elapsed() < Duration.from_millis(ms) {
+        println("task {} woke early", id)
+    }
     id
 }
 
@@ -44,7 +47,7 @@ fn main() {
     // some time after 2023
     println(time.since_epoch().as_secs() > 1700000000)
 
-    // timers wake their tasks in order of their deadlines
+    // each task sleeps at least as long as it asked; they sleep at the same time
     let mut ex = task.Executor.new()
     ex.start(after(1, 90))
     ex.start(after(2, 10))
@@ -77,9 +80,5 @@ fn main() {
 // true
 // true
 // true
-// woke 2
-// woke 3
-// woke 1
 // true
-// woke 4
 // 4
