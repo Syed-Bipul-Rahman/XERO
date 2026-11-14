@@ -85,6 +85,13 @@ impl String {
         unsafe { str_from_raw(s as *u8, s.len()) }
     }
 
+    /// Keep only the first `len` bytes.
+    pub fn truncate(&mut self, len: usize) {
+        while self.bytes.len() > len {
+            self.bytes.pop()
+        }
+    }
+
     pub fn clear(&mut self) {
         self.bytes.clear()
     }

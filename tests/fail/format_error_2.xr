@@ -1,0 +1,4 @@
+fn main() {
+    println("{}", 1, 2)
+}
+// error: this argument is not used by the format string

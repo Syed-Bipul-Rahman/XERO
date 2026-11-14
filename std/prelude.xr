@@ -1775,3 +1775,209 @@ pub trait Future {
     type Output
     unsafe fn poll(&mut self, cx: &mut Context) -> Poll<Self.Output>
 }
+
+// ------------------------------------------------------------ formatting
+
+/// Types that `format`, and `print`/`println` with arguments, can show:
+/// `format("{} items", n)`. Implement `fmt` to append yourself to `out`.
+pub trait Display {
+    fn fmt(&self, out: &mut String)
+
+    /// Is the value right-aligned when padded (`{:8}`)? Numbers are.
+    fn right_aligned(&self) -> bool {
+        false
+    }
+}
+
+impl Display for str {
+    fn fmt(&self, out: &mut String) { out.push_str(self) }
+}
+
+impl Display for String {
+    fn fmt(&self, out: &mut String) { out.push_str(self.as_str()) }
+}
+
+impl<T: Display> Display for &T {
+    fn fmt(&self, out: &mut String) { (**self).fmt(out) }
+    fn right_aligned(&self) -> bool { (**self).right_aligned() }
+}
+
+impl Display for bool {
+    fn fmt(&self, out: &mut String) { out.push_str(if *self { "true" } else { "false" }) }
+}
+
+impl Display for i8 { fn fmt(&self, out: &mut String) { out.push_int(*self as i64) }; fn right_aligned(&self) -> bool { true } }
+impl Display for i16 { fn fmt(&self, out: &mut String) { out.push_int(*self as i64) }; fn right_aligned(&self) -> bool { true } }
+impl Display for i32 { fn fmt(&self, out: &mut String) { out.push_int(*self as i64) }; fn right_aligned(&self) -> bool { true } }
+impl Display for i64 { fn fmt(&self, out: &mut String) { out.push_int(*self) }; fn right_aligned(&self) -> bool { true } }
+impl Display for isize { fn fmt(&self, out: &mut String) { out.push_int(*self as i64) }; fn right_aligned(&self) -> bool { true } }
+impl Display for u8 { fn fmt(&self, out: &mut String) { push_uint(out, *self as u64, 10, false) }; fn right_aligned(&self) -> bool { true } }
+impl Display for u16 { fn fmt(&self, out: &mut String) { push_uint(out, *self as u64, 10, false) }; fn right_aligned(&self) -> bool { true } }
+impl Display for u32 { fn fmt(&self, out: &mut String) { push_uint(out, *self as u64, 10, false) }; fn right_aligned(&self) -> bool { true } }
+impl Display for u64 { fn fmt(&self, out: &mut String) { push_uint(out, *self, 10, false) }; fn right_aligned(&self) -> bool { true } }
+impl Display for usize { fn fmt(&self, out: &mut String) { push_uint(out, *self as u64, 10, false) }; fn right_aligned(&self) -> bool { true } }
+impl Display for f64 { fn fmt(&self, out: &mut String) { push_float(out, *self, -1) }; fn right_aligned(&self) -> bool { true } }
+impl Display for f32 { fn fmt(&self, out: &mut String) { push_float(out, *self as f64, -1) }; fn right_aligned(&self) -> bool { true } }
+
+impl<T: Display> Display for Option<T> {
+    fn fmt(&self, out: &mut String) {
+        match self {
+            Some(v) => {
+                out.push_str("Some(")
+                v.fmt(out)
+                out.push_str(")")
+            }
+            None => out.push_str("None")
+        }
+    }
+}
+
+/// `value` in base `radix` (2 to 16).
+fn push_uint(out: &mut String, value: u64, radix: u64, upper: bool) {
+    let mut buf = [0u8; 64]
+    let mut i: usize = 64
+    let mut v = value
+    if v == 0 {
+        i -= 1
+        buf[i] = '0'
+    }
+    while v > 0 {
+        i -= 1
+        let d = (v % radix) as u8
+        buf[i] = if d < 10 { '0' + d } else if upper { 'A' + d - 10 } else { 'a' + d - 10 }
+        v /= radix
+    }
+    while i < 64 {
+        out.push_byte(buf[i])
+        i += 1
+    }
+}
+
+/// `value` with `prec` decimal places, or (`prec < 0`) up to six, trailing
+/// zeros trimmed.
+fn push_float(out: &mut String, value: f64, prec: i32) {
+    if value != value {
+        out.push_str("NaN")
+        return
+    }
+    let mut v = value
+    if v < 0.0 {
+        out.push_byte('-')
+        v = -v
+    }
+    if v > 18446744073709551615.0 {
+        out.push_str("inf")
+        return
+    }
+    let places: i32 = if prec < 0 { 6 } else if prec > 15 { 15 } else { prec }
+    let mut scale: f64 = 1.0
+    let mut k = 0
+    while k < places {
+        scale = scale * 10.0
+        k += 1
+    }
+    let scaled = v * scale + 0.5
+    let whole = (scaled / scale) as u64
+    let mut frac = (scaled - (whole as f64) * scale) as u64
+    if frac as f64 >= scale {
+        frac = scale as u64 - 1
+    }
+    push_uint(out, whole, 10, false)
+    if places == 0 {
+        return
+    }
+    let mut digits = [0u8; 15]
+    let mut i = places as usize
+    while i > 0 {
+        i -= 1
+        digits[i] = '0' + (frac % 10) as u8
+        frac /= 10
+    }
+    let mut n = places as usize
+    if prec < 0 {
+        while n > 1 && digits[n - 1] == '0' {
+            n -= 1
+        }
+    }
+    out.push_byte('.')
+    let mut j: usize = 0
+    while j < n {
+        out.push_byte(digits[j])
+        j += 1
+    }
+}
+
+/// A copy of `text`: `format` with no arguments.
+pub fn format(text: &str) -> String {
+    String.from(text)
+}
+
+// Called by the code the compiler generates for format strings.
+
+pub fn fmt__piece(out: &mut String, text: &str) {
+    out.push_str(text)
+}
+
+pub fn fmt__display<T: Display>(value: &T, out: &mut String) {
+    value.fmt(out)
+}
+
+/// `{:.N}`: a number with `N` decimal places.
+pub fn fmt__float<T>(value: &T, places: i32, out: &mut String) {
+    push_float(out, *value as f64, places)
+}
+
+/// `{:x}`, `{:X}`, `{:b}`, `{:o}`: an integer in another base.
+pub fn fmt__radix<T>(value: &T, radix: u64, upper: bool, out: &mut String) {
+    push_uint(out, *value as u64, radix, upper)
+}
+
+/// `fmt__pad`, aligning by the value's kind when no alignment was given.
+pub fn fmt__pad_auto<T: Display>(out: &mut String, start: usize, width: usize, align: u8, fill: u8, zero: bool, value: &T, default: bool) {
+    let a = if default {
+        if value.right_aligned() { '>' } else { '<' }
+    } else {
+        align
+    }
+    fmt__pad(out, start, width, a, fill, zero)
+}
+
+/// Pad what was written since `start` to `width`: align is `<`, `>` or `^`;
+/// with `zero`, pad with zeros after any sign.
+pub fn fmt__pad(out: &mut String, start: usize, width: usize, align: u8, fill: u8, zero: bool) {
+    let len = out.len() - start
+    if len >= width {
+        return
+    }
+    let pad = width - len
+    let mut piece = String.new()
+    piece.push_str(&out.as_str()[start..])
+    out.truncate(start)
+    if zero {
+        let b = piece.as_bytes()
+        let mut i: usize = 0
+        if b.len() > 0 && (b[0] == '-' || b[0] == '+') {
+            out.push_byte(b[0])
+            i = 1
+        }
+        for _ in 0..pad {
+            out.push_byte('0')
+        }
+        out.push_str(&piece.as_str()[i..])
+        return
+    }
+    let (before, after): (usize, usize) = if align == '<' {
+        (0, pad)
+    } else if align == '^' {
+        (pad / 2, pad - pad / 2)
+    } else {
+        (pad, 0)
+    }
+    for _ in 0..before {
+        out.push_byte(fill)
+    }
+    out.push_str(piece.as_str())
+    for _ in 0..after {
+        out.push_byte(fill)
+    }
+}

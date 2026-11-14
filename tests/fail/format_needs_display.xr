@@ -1,0 +1,5 @@
+struct A {}
+fn main() {
+    println("{}", A {})
+}
+// error: the trait `Display` is not implemented for `A` (required by `T: Display`)

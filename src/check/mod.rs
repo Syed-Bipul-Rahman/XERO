@@ -9,6 +9,7 @@ mod closure;
 mod consteval;
 mod exhaust;
 mod expr;
+mod format;
 mod pat;
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};

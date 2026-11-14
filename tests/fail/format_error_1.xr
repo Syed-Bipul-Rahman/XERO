@@ -1,0 +1,4 @@
+fn main() {
+    println("{} {}", 1)
+}
+// error: the format string refers to argument 2 but there is 1

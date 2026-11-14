@@ -860,6 +860,43 @@ impl<'a> FnCx<'a> {
             }
             return Ok(v);
         }
+        // &String -> &str, &Vec<T> -> &[T], &Box<T> -> &T (through `Deref`)
+        if let (Ty::Ref(a, m1), Ty::Ref(b, m2)) = (v.ty.clone(), expected.clone()) {
+            if (m1 || !m2) && !matches!(*b, Ty::Dyn(_)) && a != b {
+                if let Some(target) = self.deref_target(&a, span) {
+                    if target == *b {
+                        let v = if m1 && !m2 { self.weaken(v) } else { v };
+                        let (tname, m) = if m2 {
+                            ("DerefMut", "deref_mut")
+                        } else {
+                            ("Deref", "deref")
+                        };
+                        if let Some(tid) = self.prelude_trait(tname) {
+                            if !m2 || !self.ck.trait_impls_for(&a, tid).is_empty() {
+                                return self.call_operator_with(
+                                    tid,
+                                    tname,
+                                    m,
+                                    "deref",
+                                    &a,
+                                    None,
+                                    vec![v],
+                                    span,
+                                );
+                            }
+                        }
+                        return self.err(
+                            span,
+                            format!(
+                                "mismatched types: expected `{}`, found `{}`",
+                                self.ts(expected),
+                                self.ts(&Ty::Ref(a, m1))
+                            ),
+                        );
+                    }
+                }
+            }
+        }
         match (&v.ty, expected) {
             // &[T; N] -> &[T]
             (Ty::Ref(a, m1), Ty::Ref(b, m2)) if (*m1 || !*m2) => {
@@ -1308,7 +1345,12 @@ impl<'a> FnCx<'a> {
                 }
                 self.path_value(e, expected)
             }
-            E::Call(callee, args) => self.call(callee, args, expected, span),
+            E::Call(callee, args) => {
+                if let Some(v) = self.format_call(callee, args, span)? {
+                    return Ok(v);
+                }
+                self.call(callee, args, expected, span)
+            }
             E::Await(inner) => self.await_expr(inner, span),
             E::Unary(op, inner) => self.unary(*op, inner, expected, span),
             E::Binary(op, a, b) => self.binary(*op, a, b, expected, span),
