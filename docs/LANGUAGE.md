@@ -1,4 +1,4 @@
-# The Xero Language Reference (v0.5)
+# The Xero Language Reference (v0.6)
 
 This document describes the language as implemented by `xeroc` 0.3. Features
 that are reserved but not implemented yet are marked **(reserved)**.
@@ -554,14 +554,18 @@ pointers and `usize`. Pointer arithmetic: `p + n` and `p - n` advance by whole e
 
 | Module | Contents |
 |---|---|
-| prelude | `Option`, `Result`, `Print`, `print`/`println`/`eprint`/`eprintln`, `panic`, `assert`, operator traits (`Eq`, `Ord`, `Add`, `Sub`, `Mul`, `Div`, `Rem`, `Neg`, `Index`, `IndexMut`), `Ordering`, `compare`, `str` methods (`as_bytes`, `is_empty`, `byte_at`), `Iterator` (`next`; `map filter enumerate take skip zip chain`; `fold for_each count last any all find position min max sum collect`), `Range`, `RangeInclusive`, slice `iter`/`iter_mut`, `Future`, `Poll`, `Context`, `Waker` |
+| prelude | `Option` and `Result` (with `map`, `and_then`, `unwrap_or`, `unwrap_or_else`, `ok_or`, `map_err`, `as_ref`, `take`, ...), `Print`, `print`/`println`/`eprint`/`eprintln`, `format`, `Display`, `panic`, `assert`, operator traits (`Eq`, `Ord`, `Add`, `Sub`, `Mul`, `Div`, `Rem`, `Neg`, `AddAssign`..., `Index`, `IndexMut`, `Deref`, `DerefMut`), `Ordering`, `compare`, `Hash`, `Hasher`, `Borrow`, `str` methods (below), `Iterator` (`next`; `map filter enumerate take skip zip chain`; `fold for_each count last any all find position min max sum collect`), `Range`, `RangeInclusive`, slice `iter`/`iter_mut`, `Future`, `Poll`, `Context`, `Waker` |
+| `str` | `len is_empty as_bytes byte_at find rfind contains starts_with ends_with trim trim_start trim_end split split_once split_whitespace lines bytes replace repeat to_upper to_lower to_string parse_int parse_float` |
 | `std.mem` | `Box<T>`, `alloc`, `realloc_array`, `dealloc`, `swap`, `replace`, `copy_values` |
 | `std.vec` | `Vec<T>`: `push pop get get_mut at at_mut set swap insert remove clear reserve as_slice as_mut_slice iter iter_mut into_iter`, `v[i]`, and with closures `map filter for_each any all count position sort_by sort` |
-| `std.string` | `String`: `from new from_utf8 push_str push_byte push_int as_str as_bytes into_bytes len equals clear`, and `is_utf8` |
+| `std.string` | `String`: `from new from_utf8 push_str push_byte push_int as_str as_bytes into_bytes len truncate equals clear`, `+` and `+=` with a `&str`, every `str` method, and `is_utf8` |
+| `std.collections` | `HashMap<K, V>` (`new with_capacity len is_empty insert get get_mut contains_key remove get_or_insert_with clear iter keys values`, `map[&key]`), `HashSet<T>` (`new len is_empty insert contains remove clear iter`) |
 | `std.math` | `min max clamp abs isqrt sqrt pow_int gcd PI E` |
 | `std.io` | `read_into write_all exit_process STDIN STDOUT STDERR` (errors are `errno` values) |
-| `std.fs` | `File` (`open`, `create`, `append`, `read`, `read_all`, `read_to_string`, `write`, `write_str`; closed when destroyed), `read_to_string`, `read`, `write`, `remove`, `Error` (`code`, `message`, printable) |
-| `std.env` | `args`, `arg`, `arg_count` |
+| `std.fs` | `File` (`open`, `create`, `append`, `read`, `read_all`, `read_to_string`, `write`, `write_str`; closed when destroyed), `read_to_string`, `read`, `write`, `remove`, `rename`, `create_dir`, `create_dir_all`, `remove_dir`, `remove_dir_all`, `read_dir`, `metadata` (`is_file`, `is_dir`, `len`), `exists`, `is_file`, `is_dir`, `parent`, `join`, `Error` (`code`, `message`, printable) |
+| `std.env` | `args`, `arg`, `arg_count`, `var`, `vars`, `current_dir`, `set_current_dir` |
+| `std.process` | `run` (collects `Output`: `status`, `stdout`, `stderr`, `success`), `status`, `exit` |
+| `std.time` | `Duration` (`from_secs from_millis from_micros from_nanos from_secs_f64 as_secs as_millis as_micros as_nanos as_secs_f64`, arithmetic, printable), `Instant` (`now elapsed duration_since`), `sleep`, `since_epoch`, `sleep_async` |
 | `std.os` | `NAME` (`"linux"`, `"macos"`, `"windows"`, `"wasm"`, `"none"`), `ARCH`, `POINTER_BITS` |
 | `std.thread` | `start` (what `spawn` calls), `Thread<T, F>` with `join`, `sleep_ms`, `yield_now` |
 | `std.task` | `block_on`, `yield_now`, `join`, `Executor` (`new`, `start`, `run`, `pending`) |
@@ -585,6 +589,80 @@ fn main() {
     }
 }
 ```
+
+### Formatting
+
+`format` builds a `String` from a format string and arguments; `print`,
+`println`, `eprint` and `eprintln` take the same arguments. The format string
+must be a literal: it is checked, and turned into code, at compile time.
+
+```xero
+let name = "Ada"
+println("{} is {} years old", name, 36)
+let s = format("{0}, {0}!", "hello")           // "hello, hello!"
+println("[{:>6}] [{:<6}] [{:^6}]", 1, 2, 3)    // [     1] [2     ] [  3   ]
+println("{:08.3} {:x}", 3.14159, 255)          // 0003.142 ff
+```
+
+| Spec | Meaning |
+|---|---|
+| `{}` `{0}` | the next argument, or argument 0 |
+| `{:5}` `{:<5}` `{:>5}` `{:^5}` | at least 5 characters; numbers align right by default, everything else left |
+| `{:*^9}` | pad with `*` instead of spaces |
+| `{:05}` | pad a number with zeros after its sign |
+| `{:.2}` | 2 digits after the point |
+| `{:x}` `{:X}` `{:b}` `{:o}` | an integer in hex, upper-case hex, binary or octal |
+| `{{` `}}` | a literal brace |
+
+Every argument must be used, and `{}` needs the `Display` trait. Implement it
+to format your own types:
+
+```xero
+impl Display for Point {
+    fn fmt(&self, out: &mut String) {
+        out.push_str(format("({}, {})", self.x, self.y).as_str())
+    }
+}
+```
+
+### Collections
+
+```xero
+import std.collections.{HashMap}
+
+let mut counts: HashMap<String, usize> = HashMap.new()
+for w in text.split_whitespace() {
+    *counts.get_or_insert_with(w.to_string(), || 0) += 1
+}
+println(counts["the"])                      // a &str finds a String key
+if counts.get("xero") is Some(n) { println(n) }
+```
+
+Keys need `Hash` and `Eq`. Implement both for your own key types (`Hash`
+feeds the fields to a `Hasher`: `self.x.hash(h)`).
+
+### Processes, time and the environment
+
+```xero
+import std.env
+import std.process
+import std.time
+import std.time.{Duration, Instant}
+
+let start = Instant.now()
+let out = try process.run("git", &["status", "--short"])
+if !out.success() {
+    eprint(out.stderr)
+}
+println("git took {}", start.elapsed())     // e.g. "git took 4.2ms"
+time.sleep(Duration.from_millis(100))
+let home = env.var("HOME").unwrap_or(String.from("/"))
+```
+
+A program is looked up in `PATH` unless its name has a path separator, and
+its arguments are passed as they are, with no shell. `process.run` collects
+standard output and standard error while the program runs; `process.status`
+lets it use this program's input and output.
 
 ### The runtime
 

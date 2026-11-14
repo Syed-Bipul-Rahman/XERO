@@ -49,25 +49,35 @@
 - [x] `async fn` and `.await` as state machines, with `std.task`
 - [x] LLVM and lld built into `xeroc`
 
+## Done in v0.6
+
+- [x] Format strings checked at compile time: `format`, and `println` with arguments; the `Display` trait
+- [x] String methods and number parsing; `Option`/`Result` helpers; `Deref`
+- [x] `std.collections`: `HashMap` and `HashSet`, with `Hash` and `Borrow`
+- [x] `std.time`, `std.process`, directories in `std.fs`, environment variables in `std.env`
+- [x] `async` blocks, `+=` on move-only types, bounds on associated types, items from `iter_mut()` that outlive the next call
+
 ## Next
 
 ### Concurrency
-- `async` blocks and closures; async I/O and timers in `std.task`.
+- Async closures; async I/O in `std.task`, and timers without a thread each.
 - Thread-safety marker traits (the role of Rust's `Send` and `Sync`) for
   user types with interior mutability built on `unsafe`.
 - Thread pools and parallel iterators in the standard library.
 
-### Standard library (v0.6)
-- Collections (`HashMap`, `HashSet`), string formatting, time, directories,
-  environment variables and processes.
+### Standard library
+- `BTreeMap`, `VecDeque`; `Clone`; iterating a directory lazily; file
+  modification times; setting environment variables; piping input to a
+  process.
 
 ### Self-contained programs
 - No C runtime on Windows: call `kernel32` directly.
 
 ### Type system
-- `+=` on move-only user types; associated constants.
-- Bounds on associated types (`I: Iterator<Item = i32>`).
-- Lending iterators: items from `iter_mut()` that outlive the next call.
+- Associated constants; `Copy` and `Clone` traits.
+- Method lookup that tries a reference receiver as `Self` first, so traits
+  can be implemented for `&T` (`Vec<&String>.sort()`).
+- Moving fields out of a struct one at a time.
 
 ### Toolchain
 - LLVM built in on Intel Macs too.

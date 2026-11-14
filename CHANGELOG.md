@@ -1,3 +1,26 @@
+## 0.6.0
+
+* Adds format strings: `format("{} of {}", a, b)` returns a `String`, and `print`, `println`, `eprint` and `eprintln` take arguments too. The string is checked at compile time: `{}`, `{0}`, width and alignment (`{:>8}`, `{:-^20}`, `{:05}`), precision (`{:.2}`) and `{:x}`, `{:X}`, `{:b}`, `{:o}`. A wrong number of arguments is a compile error.
+* Adds the `Display` trait, used by `{}`; it is implemented for numbers, `bool`, `str`, `String`, `Option` and references, and your types can implement it.
+* Adds `std.collections` with `HashMap<K, V>` (`insert`, `get`, `get_mut`, `remove`, `contains_key`, `get_or_insert_with`, `iter`, `keys`, `values`, `map[&key]`) and `HashSet<T>`. A `HashMap<String, V>` is searched with a `&str`.
+* Adds the `Hash` trait and `Hasher`, implemented for integers, `bool`, `str`, `String`, references and tuples, and `Borrow` for lookups by a borrowed form.
+* Adds `std.time`: `Duration`, `Instant` (`now`, `elapsed`), `sleep`, `since_epoch`, and `sleep_async` for async code.
+* Adds `std.process`: `run` waits for a program and collects its output and exit code, `status` runs one with this program's input and output, and `exit`.
+* Adds directories to `std.fs`: `create_dir`, `create_dir_all`, `remove_dir`, `remove_dir_all`, `read_dir`, `rename`, `metadata` (`is_file`, `is_dir`, `len`), `exists`, `is_file`, `is_dir`, `parent` and `join`.
+* Adds environment variables and the current directory to `std.env`: `var`, `vars`, `current_dir` and `set_current_dir`.
+* Adds string methods: `find`, `rfind`, `contains`, `starts_with`, `ends_with`, `trim`, `trim_start`, `trim_end`, `split`, `split_once`, `split_whitespace`, `lines`, `bytes`, `replace`, `repeat`, `to_upper`, `to_lower`, `to_string`, `parse_int` and `parse_float`, and `String` `+` and `+=` with a `&str`.
+* Adds `Option` and `Result` helpers: `map`, `and_then`, `unwrap_or_else`, `or`, `filter`, `as_ref`, `as_mut`, `take` and `map_err`.
+* Adds `Ord` for `str` and `String`, so lists of names can be sorted.
+* Adds the `Deref` and `DerefMut` traits: methods of `str` work on a `String`, of slices on a `Vec`, and of `T` on a `Box<T>`, and `&String` is accepted where a `&str` is expected.
+* Adds `async { }` and `async move { }` blocks.
+* Adds `+=` and the other compound assignments on move-only types, through the `AddAssign` family of traits or as `a = a + b`.
+* Adds bounds on associated types: `I: Iterator<Item = i32>` and `impl Iterator<Item = i32>`.
+* Adds `where` clauses that bound the enclosing impl's parameters on one method.
+* Lets items from `iter_mut()` outlive the next call, so several can be held or collected at once; adds the `rebind` intrinsic that makes this possible.
+* Infers the type of an untyped literal from a trait bound: `m.get(&10)` on a map with `i64` keys.
+* Infers the element type of `&[]` from the slice it is passed as.
+* Changes "no method found" errors to name the unmet bound when the method exists for other type arguments.
+
 ## 0.5.0
 
 * Adds generic traits with default type arguments (`trait Mul<Rhs = Self>`) and associated types (`type Item`, written `T.Item` and `Self.Item`).
