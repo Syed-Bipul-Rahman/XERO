@@ -3129,6 +3129,36 @@ impl<'a> FnCx<'a> {
         self.find_trait_method(ty, name)
     }
 
+    /// Is there a method `name` on `ty` or behind its references?
+    fn method_on_refs(&mut self, ty: &Ty, name: &str) -> bool {
+        let mut t = ty.clone();
+        loop {
+            if self.method_exists(&t, name) {
+                return true;
+            }
+            if let Ty::Array(e, _) = &t {
+                if self.method_exists(&Ty::Slice(e.clone()), name) {
+                    return true;
+                }
+            }
+            match t {
+                Ty::Ref(inner, _) => t = *inner,
+                _ => return false,
+            }
+        }
+    }
+
+    /// `T.Target` if `t` implements `Deref`.
+    fn deref_target(&mut self, t: &Ty, span: Span) -> Option<Ty> {
+        let tid = self.prelude_trait("Deref")?;
+        if !self.ck.implements(t, tid) {
+            return None;
+        }
+        self.ck
+            .project(t, Some((tid, Vec::new())), "Target", span)
+            .ok()
+    }
+
     fn method_exists(&mut self, ty: &Ty, name: &str) -> bool {
         self.find_method(ty, name).is_some()
     }
@@ -3278,6 +3308,58 @@ impl<'a> FnCx<'a> {
                 );
                 return self.dyn_call(r, tid, name, args, span);
             }
+        }
+        // methods of a `Deref` target: `string.trim()` (str), `boxed.area()`
+        for _ in 0..8 {
+            if self.method_on_refs(&recv_ty, &name.name) {
+                break;
+            }
+            let base_t = recv_ty.deref_all().clone();
+            let Some(target) = self.deref_target(&base_t, span) else {
+                break;
+            };
+            let wants_mut = match self.find_method(&target, &name.name) {
+                Some((fid, _, _)) => {
+                    self.ck.fns[fid as usize].decl.self_param.map(|s| s.0) == Some(SelfKind::RefMut)
+                }
+                None => false,
+            };
+            let (tname, m) = if wants_mut {
+                ("DerefMut", "deref_mut")
+            } else {
+                ("Deref", "deref")
+            };
+            let Some(tid) = self.prelude_trait(tname) else {
+                break;
+            };
+            if wants_mut && self.ck.trait_impls_for(&base_t, tid).is_empty() {
+                return self.err(
+                    name.span,
+                    format!(
+                        "method `{}` needs `&mut self`, but `{}` does not implement `DerefMut`",
+                        name.name,
+                        self.ts(&base_t)
+                    ),
+                );
+            }
+            let (mut p, mut t) = self.recv_place(recv, span);
+            while let Ty::Ref(..) = t.clone() {
+                let (np, nt) = self.deref_place(p, &t, span);
+                p = np;
+                t = nt;
+            }
+            if wants_mut {
+                p = self.mut_place(p)?;
+                self.note_mut(&p);
+            }
+            let r = x(
+                K::Borrow(p, wants_mut),
+                Ty::reference(t.clone(), wants_mut),
+                base.span,
+            );
+            let v = self.call_operator_with(tid, tname, m, ".", &t, None, vec![r], span)?;
+            recv_ty = v.ty.clone();
+            recv = Recv::Value(v);
         }
         // autoderef search
         let mut cand = recv_ty.clone();

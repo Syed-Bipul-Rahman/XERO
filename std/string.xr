@@ -161,3 +161,10 @@ impl AddAssign<&str> for String {
         self.push_str(other)
     }
 }
+
+impl Deref for String {
+    type Target = str
+    fn deref(&self) -> &str {
+        self.as_str()
+    }
+}

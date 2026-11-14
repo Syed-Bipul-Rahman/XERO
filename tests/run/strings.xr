@@ -1,0 +1,74 @@
+// std: strings
+
+fn main() {
+    let s = "  name = Xero, version = 0.6  "
+    let t = s.trim()
+    println(t)
+    println(t.starts_with("name"))
+    println(t.ends_with("0.6"))
+    println(t.find("=").unwrap())
+    println(t.rfind("=").unwrap())
+    for part in t.split(", ") {
+        match part.split_once(" = ") {
+            Some((k, v)) => { print(k)
+                print(" -> ")
+                println(v) }
+            None => println("?")
+        }
+    }
+    let text = "one\ntwo\r\nthree"
+    println(text.lines().count())
+    for w in "  a  bb   ccc ".split_whitespace() { print(w.len()) }
+    println("")
+    println(&"a-b-c".replace("-", "+"))
+    println(&"MiXeD".to_lower())
+    println(&"ab".repeat(3))
+    println("-42".parse_int().unwrap())
+    println("9223372036854775807".parse_int().unwrap())
+    println("9223372036854775808".parse_int().is_none())
+    println("12x".parse_int().is_none())
+    println("3.25".parse_float().unwrap())
+    println("-1.5e3".parse_float().unwrap())
+    println("1e-2".parse_float().unwrap())
+    println(".".parse_float().is_none())
+    println("hello".bytes().filter(|b| *b == 'l').count())
+    let o: Option<i32> = Some(4)
+    println(o.map(|x| x * 2).unwrap_or(0))
+    println(o.and_then(|x| if x > 5 { Some(x) } else { None }).is_none())
+    let mut q: Option<String> = Some(String.from("taken"))
+    let got = q.take()
+    println(q.is_none())
+    println(&got.unwrap())
+    let r: Result<i32, &str> = Err("bad")
+    println(r.map_err(|e| e.len()).unwrap_err())
+    println("x=1".to_string().len())
+}
+
+// output:
+// name = Xero, version = 0.6
+// true
+// true
+// 5
+// 21
+// name -> Xero
+// version -> 0.6
+// 3
+// 123
+// a+b+c
+// mixed
+// ababab
+// -42
+// 9223372036854775807
+// true
+// true
+// 3.25
+// -1500.0
+// 0.01
+// true
+// 2
+// 8
+// true
+// true
+// taken
+// 3
+// 3

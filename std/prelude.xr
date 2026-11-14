@@ -47,6 +47,66 @@ impl<T> Option<T> {
         }
     }
 
+    pub fn unwrap_or_else<F: FnOnce() -> T>(self, f: F) -> T {
+        match self {
+            Some(v) => v
+            None => f()
+        }
+    }
+
+    pub fn map<U, F: FnOnce(T) -> U>(self, f: F) -> Option<U> {
+        match self {
+            Some(v) => Some(f(v))
+            None => None
+        }
+    }
+
+    pub fn and_then<U, F: FnOnce(T) -> Option<U>>(self, f: F) -> Option<U> {
+        match self {
+            Some(v) => f(v)
+            None => None
+        }
+    }
+
+    pub fn or(self, other: Option<T>) -> Option<T> {
+        match self {
+            Some(v) => Some(v)
+            None => other
+        }
+    }
+
+    pub fn filter<F: FnOnce(&T) -> bool>(self, keep: F) -> Option<T> {
+        match self {
+            Some(v) => if keep(&v) { Some(v) } else { None }
+            None => None
+        }
+    }
+
+    /// A reference to the value, if any.
+    pub fn as_ref(&self) -> Option<&T> {
+        match self {
+            Some(v) => Some(v)
+            None => None
+        }
+    }
+
+    pub fn as_mut(&mut self) -> Option<&mut T> {
+        match self {
+            Some(v) => Some(v)
+            None => None
+        }
+    }
+
+    /// Take the value out, leaving `None`.
+    pub fn take(&mut self) -> Option<T> {
+        unsafe {
+            let p = self as *Option<T>
+            let v = ptr_read(p)
+            ptr_write(p, None)
+            v
+        }
+    }
+
     pub fn ok_or<E>(self, error: E) -> Result<T, E> {
         match self {
             Some(value) => Ok(value)
@@ -99,6 +159,41 @@ impl<T, E> Result<T, E> {
         match self {
             Ok(value) => value
             Err(_) => default
+        }
+    }
+
+    pub fn unwrap_or_else<F: FnOnce(E) -> T>(self, f: F) -> T {
+        match self {
+            Ok(v) => v
+            Err(e) => f(e)
+        }
+    }
+
+    pub fn map<U, F: FnOnce(T) -> U>(self, f: F) -> Result<U, E> {
+        match self {
+            Ok(v) => Ok(f(v))
+            Err(e) => Err(e)
+        }
+    }
+
+    pub fn map_err<G, F: FnOnce(E) -> G>(self, f: F) -> Result<T, G> {
+        match self {
+            Ok(v) => Ok(v)
+            Err(e) => Err(f(e))
+        }
+    }
+
+    pub fn and_then<U, F: FnOnce(T) -> Result<U, E>>(self, f: F) -> Result<U, E> {
+        match self {
+            Ok(v) => f(v)
+            Err(e) => Err(e)
+        }
+    }
+
+    pub fn as_ref(&self) -> Result<&T, &E> {
+        match self {
+            Ok(v) => Ok(v)
+            Err(e) => Err(e)
         }
     }
 
@@ -217,6 +312,17 @@ pub trait DivAssign<Rhs = Self> {
 
 pub trait RemAssign<Rhs = Self> {
     fn rem_assign(&mut self, other: Rhs)
+}
+
+/// Pointer-like types: `x.method()` also finds the methods of
+/// `*x.deref()` (`String` has `str`'s methods, `Box<T>` has `T`'s).
+pub trait Deref {
+    type Target
+    fn deref(&self) -> &Self.Target
+}
+
+pub trait DerefMut extends Deref {
+    fn deref_mut(&mut self) -> &mut Self.Target
 }
 
 /// `a[i]`: reading through an index.
@@ -858,6 +964,365 @@ impl str {
 
     pub fn byte_at(&self, index: usize) -> u8 {
         self.as_bytes()[index]
+    }
+
+    pub fn starts_with(&self, prefix: &str) -> bool {
+        prefix.len() <= self.len() && str_eq(&self[..prefix.len()], prefix)
+    }
+
+    pub fn ends_with(&self, suffix: &str) -> bool {
+        suffix.len() <= self.len() && str_eq(&self[self.len() - suffix.len()..], suffix)
+    }
+
+    /// The byte index of the first occurrence of `pat`.
+    pub fn find(&self, pat: &str) -> Option<usize> {
+        let (n, m) = (self.len(), pat.len())
+        if m > n {
+            return None
+        }
+        let mut i: usize = 0
+        while i + m <= n {
+            if str_eq(&self[i..i + m], pat) {
+                return Some(i)
+            }
+            i += 1
+        }
+        None
+    }
+
+    /// The byte index of the last occurrence of `pat`.
+    pub fn rfind(&self, pat: &str) -> Option<usize> {
+        let (n, m) = (self.len(), pat.len())
+        if m > n {
+            return None
+        }
+        let mut i = n - m + 1
+        while i > 0 {
+            i -= 1
+            if str_eq(&self[i..i + m], pat) {
+                return Some(i)
+            }
+        }
+        None
+    }
+
+    pub fn contains(&self, pat: &str) -> bool {
+        self.find(pat).is_some()
+    }
+
+    /// Without leading and trailing ASCII whitespace.
+    pub fn trim(&self) -> &str {
+        self.trim_start().trim_end()
+    }
+
+    pub fn trim_start(&self) -> &str {
+        let b = self.as_bytes()
+        let mut i: usize = 0
+        while i < b.len() && is_space(b[i]) {
+            i += 1
+        }
+        &self[i..]
+    }
+
+    pub fn trim_end(&self) -> &str {
+        let b = self.as_bytes()
+        let mut n = b.len()
+        while n > 0 && is_space(b[n - 1]) {
+            n -= 1
+        }
+        &self[..n]
+    }
+
+    /// The pieces between occurrences of `sep`: `"a,b".split(",")`.
+    pub fn split(&self, sep: &str) -> Split {
+        Split { rest: self, sep: sep, done: false }
+    }
+
+    /// The lines, without their `\n` or `\r\n`.
+    pub fn lines(&self) -> Lines {
+        Lines { rest: self }
+    }
+
+    /// The words separated by runs of ASCII whitespace.
+    pub fn split_whitespace(&self) -> SplitWhitespace {
+        SplitWhitespace { rest: self }
+    }
+
+    /// The bytes, one at a time.
+    pub fn bytes(&self) -> Bytes {
+        Bytes { s: self.as_bytes(), i: 0 }
+    }
+
+    /// Split at the first `sep`: `"k=v".split_once("=")` is `Some(("k", "v"))`.
+    pub fn split_once(&self, sep: &str) -> Option<(&str, &str)> {
+        match self.find(sep) {
+            Some(i) => Some((&self[..i], &self[i + sep.len()..])),
+            None => None
+        }
+    }
+
+    /// A copy with every `from` replaced by `to`.
+    pub fn replace(&self, from: &str, to: &str) -> String {
+        let mut out = String.new()
+        if from.is_empty() {
+            out.push_str(self)
+            return out
+        }
+        let mut rest = self
+        while rest.find(from) is Some(i) {
+            out.push_str(&rest[..i])
+            out.push_str(to)
+            rest = &rest[i + from.len()..]
+        }
+        out.push_str(rest)
+        out
+    }
+
+    /// An ASCII uppercase copy.
+    pub fn to_upper(&self) -> String {
+        let mut out = String.new()
+        for b in self.as_bytes() {
+            let c = *b
+            out.push_byte(if c >= 'a' && c <= 'z' { c - 32 } else { c })
+        }
+        out
+    }
+
+    /// An ASCII lowercase copy.
+    pub fn to_lower(&self) -> String {
+        let mut out = String.new()
+        for b in self.as_bytes() {
+            let c = *b
+            out.push_byte(if c >= 'A' && c <= 'Z' { c + 32 } else { c })
+        }
+        out
+    }
+
+    /// `n` copies, joined.
+    pub fn repeat(&self, n: usize) -> String {
+        let mut out = String.new()
+        for _ in 0..n {
+            out.push_str(self)
+        }
+        out
+    }
+
+    /// An owned copy: `"text".to_string()`.
+    pub fn to_string(&self) -> String {
+        String.from(self)
+    }
+
+    /// The integer this text spells (optional sign, then digits), if it
+    /// spells one that fits.
+    pub fn parse_int(&self) -> Option<i64> {
+        let b = self.as_bytes()
+        if b.len() == 0 {
+            return None
+        }
+        let neg = b[0] == '-'
+        let start: usize = if neg || b[0] == '+' { 1 } else { 0 }
+        if start == b.len() {
+            return None
+        }
+        let mut v: u64 = 0
+        let limit: u64 = if neg { 9223372036854775808 } else { 9223372036854775807 }
+        let mut i = start
+        while i < b.len() {
+            let c = b[i]
+            if c < '0' || c > '9' {
+                return None
+            }
+            let d = (c - '0') as u64
+            if v > (limit - d) / 10 {
+                return None
+            }
+            v = v * 10 + d
+            i += 1
+        }
+        if neg {
+            Some((0 - v) as i64)
+        } else {
+            Some(v as i64)
+        }
+    }
+
+    /// The number this text spells (`3`, `-0.25`, `1.5e3`), if it spells one.
+    pub fn parse_float(&self) -> Option<f64> {
+        let b = self.as_bytes()
+        let n = b.len()
+        let mut i: usize = 0
+        let neg = n > 0 && b[0] == '-'
+        if n > 0 && (b[0] == '-' || b[0] == '+') {
+            i = 1
+        }
+        let mut mant: f64 = 0.0
+        let mut digits = 0
+        while i < n && b[i] >= '0' && b[i] <= '9' {
+            mant = mant * 10.0 + (b[i] - '0') as f64
+            digits += 1
+            i += 1
+        }
+        let mut scale: i32 = 0
+        if i < n && b[i] == '.' {
+            i += 1
+            while i < n && b[i] >= '0' && b[i] <= '9' {
+                mant = mant * 10.0 + (b[i] - '0') as f64
+                scale -= 1
+                digits += 1
+                i += 1
+            }
+        }
+        if digits == 0 {
+            return None
+        }
+        if i < n && (b[i] == 'e' || b[i] == 'E') {
+            i += 1
+            let eneg = i < n && b[i] == '-'
+            if i < n && (b[i] == '-' || b[i] == '+') {
+                i += 1
+            }
+            let mut e: i32 = 0
+            let mut edigits = 0
+            while i < n && b[i] >= '0' && b[i] <= '9' {
+                if e < 10000 {
+                    e = e * 10 + (b[i] - '0') as i32
+                }
+                edigits += 1
+                i += 1
+            }
+            if edigits == 0 {
+                return None
+            }
+            scale += if eneg { 0 - e } else { e }
+        }
+        if i != n {
+            return None
+        }
+        let mut v = mant
+        // multiply by a power of ten, splitting large scales to avoid
+        // overflowing the factor
+        while scale > 0 {
+            let s = if scale > 22 { 22 } else { scale }
+            v = v * pow10(s)
+            scale -= s
+        }
+        while scale < 0 {
+            let s = if scale < -22 { 22 } else { 0 - scale }
+            v = v / pow10(s)
+            scale += s
+        }
+        Some(if neg { 0.0 - v } else { v })
+    }
+}
+
+fn pow10(n: i32) -> f64 {
+    let mut v: f64 = 1.0
+    let mut i = 0
+    while i < n {
+        v = v * 10.0
+        i += 1
+    }
+    v
+}
+
+fn is_space(c: u8) -> bool {
+    c == ' ' || (c >= 9 && c <= 13)
+}
+
+/// `str.split(sep)`
+pub struct Split {
+    rest: &str
+    sep: &str
+    done: bool
+}
+
+impl Iterator for Split {
+    type Item = &str
+    fn next(&mut self) -> Option<&str> {
+        if self.done {
+            return None
+        }
+        let rest = self.rest
+        if self.sep.is_empty() {
+            self.done = true
+            return Some(rest)
+        }
+        match rest.find(self.sep) {
+            Some(i) => {
+                self.rest = &rest[i + self.sep.len()..]
+                Some(&rest[..i])
+            }
+            None => {
+                self.done = true
+                Some(rest)
+            }
+        }
+    }
+}
+
+/// `str.lines()`
+pub struct Lines {
+    rest: &str
+}
+
+impl Iterator for Lines {
+    type Item = &str
+    fn next(&mut self) -> Option<&str> {
+        let rest = self.rest
+        if rest.is_empty() {
+            return None
+        }
+        let (line, next) = match rest.find("\n") {
+            Some(i) => (&rest[..i], &rest[i + 1..]),
+            None => (rest, &rest[rest.len()..])
+        }
+        self.rest = next
+        if line.ends_with("\r") {
+            return Some(&line[..line.len() - 1])
+        }
+        Some(line)
+    }
+}
+
+/// `str.split_whitespace()`
+pub struct SplitWhitespace {
+    rest: &str
+}
+
+impl Iterator for SplitWhitespace {
+    type Item = &str
+    fn next(&mut self) -> Option<&str> {
+        let s = self.rest.trim_start()
+        if s.is_empty() {
+            self.rest = s
+            return None
+        }
+        let b = s.as_bytes()
+        let mut i: usize = 0
+        while i < b.len() && !is_space(b[i]) {
+            i += 1
+        }
+        self.rest = &s[i..]
+        Some(&s[..i])
+    }
+}
+
+/// `str.bytes()`
+pub struct Bytes {
+    s: &[u8]
+    i: usize
+}
+
+impl Iterator for Bytes {
+    type Item = u8
+    fn next(&mut self) -> Option<u8> {
+        if self.i < self.s.len() {
+            let c = self.s[self.i]
+            self.i += 1
+            Some(c)
+        } else {
+            None
+        }
     }
 }
 
