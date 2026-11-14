@@ -3544,6 +3544,20 @@ impl<'a> FnCx<'a> {
                     span,
                 ))
             }
+            IntrinsicFn::Rebind => {
+                // `rebind(r, source)`: the reference `r`, which the borrow checker
+                // treats as pointing where `source` points (not into whatever `r`
+                // was derived from). Unsafe: the caller promises that is true.
+                want(self, 2)?;
+                self.require_unsafe(span, "`rebind`")?;
+                let r = self.expr(&args[0], expected)?;
+                let s = self.expr(&args[1], None)?;
+                if !matches!(r.ty, Ty::Ref(..)) || !matches!(s.ty, Ty::Ref(..)) {
+                    return self.err(span, "`rebind` takes two references");
+                }
+                let t = r.ty.clone();
+                Ok(x(K::Intrinsic(xir::Intrinsic::Rebind, vec![r, s]), t, span))
+            }
             IntrinsicFn::OsArgc | IntrinsicFn::OsArgv => {
                 want(self, 0)?;
                 let (k, t) = if i == IntrinsicFn::OsArgc {

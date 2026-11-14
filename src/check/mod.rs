@@ -50,6 +50,7 @@ pub enum IntrinsicFn {
     Syscall,
     OsArgc,
     OsArgv,
+    Rebind,
 }
 
 const INTRINSICS: &[(&str, IntrinsicFn)] = &[
@@ -76,6 +77,7 @@ const INTRINSICS: &[(&str, IntrinsicFn)] = &[
     ("syscall", IntrinsicFn::Syscall),
     ("os_argc", IntrinsicFn::OsArgc),
     ("os_argv", IntrinsicFn::OsArgv),
+    ("rebind", IntrinsicFn::Rebind),
 ];
 
 /// Types from other std modules that are visible everywhere, like the prelude.

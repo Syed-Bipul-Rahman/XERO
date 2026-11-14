@@ -1,0 +1,30 @@
+// Items from iter_mut() are independent: several can be held at once.
+
+fn main() {
+    let mut v: Vec<i32> = Vec.new()
+    v.push(1)
+    v.push(2)
+    v.push(3)
+    let mut it = v.iter_mut()
+    let a = it.next().unwrap()
+    let b = it.next().unwrap()
+    *a += 10
+    *b += 20
+    println(v[0] + v[1])
+    let refs: Vec<&mut i32> = v.iter_mut().collect()
+    for r in refs { *r *= 2 }
+    println(v[2])
+    let mut arr = [1, 2, 3, 4]
+    let (x, y) = {
+        let mut it = arr.iter_mut()
+        (it.next().unwrap(), it.next().unwrap())
+    }
+    *x = 100
+    *y = 200
+    println(arr[0] + arr[1])
+}
+
+// output:
+// 33
+// 6
+// 300

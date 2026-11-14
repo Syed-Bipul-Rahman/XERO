@@ -690,6 +690,10 @@ impl<'a> Ck<'a> {
                 }
                 out
             }
+            K::Intrinsic(xir::Intrinsic::Rebind, args) => {
+                self.expr(&args[0]);
+                self.expr(&args[1])
+            }
             K::Intrinsic(_, args) => {
                 let l = self.exprs_in_flight(args);
                 if self.ck.has_refs(&e.ty) {
@@ -1462,6 +1466,7 @@ impl OriginCx<'_> {
                     xir::Intrinsic::MakeFat | xir::Intrinsic::DataPtr => {
                         os.into_iter().next().unwrap_or_default()
                     }
+                    xir::Intrinsic::Rebind => os.into_iter().nth(1).unwrap_or_default(),
                     // a value read through a pointer: what that memory holds
                     xir::Intrinsic::PtrWrite | xir::Intrinsic::VolatileStore => {
                         if let Some(v) = os.get(1) {

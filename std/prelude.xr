@@ -1018,7 +1018,8 @@ pub trait Iterator {
     fn collect(mut self) -> Vec<Self.Item> {
         let mut v: Vec<Self.Item> = Vec.new()
         while self.next() is Some(x) {
-            v.push(x)
+            // moved, not reborrowed: items may be `&mut` references
+            v.push(move x)
         }
         v
     }
@@ -1223,7 +1224,9 @@ impl<T> Iterator for SliceIterMut<T> {
         if i < self.s.len() {
             self.i = i + 1
             let p = (&mut *self.s) as *T
-            Some(unsafe { &mut *(p + i) })
+            // each item is a different element: it borrows the slice the
+            // iterator borrows, not the iterator itself
+            Some(unsafe { rebind(&mut *(p + i), &*self.s) })
         } else {
             None
         }

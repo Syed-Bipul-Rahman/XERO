@@ -524,6 +524,10 @@ control flow.
   `forget(value)` (skip a destructor), `asm("...")`, and atomics on integers
   and pointers: `atomic_load`, `atomic_store`, `atomic_swap`, `atomic_add`,
   `atomic_sub`, `atomic_cas` (all sequentially consistent);
+* `rebind(r, source)`: the reference `r`, which the borrow checker then treats
+  as borrowing what `source` borrows (instead of what `r` was derived from);
+  it lets library code hand out independent `&mut` references, as
+  `iter_mut()` does;
 * `syscall(number, args...)`: a raw Linux system call with up to six integer
   or raw-pointer arguments, returning `isize` (`-errno` on failure).
 

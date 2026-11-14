@@ -2306,6 +2306,11 @@ impl<'a> Codegen<'a> {
                 ));
                 r
             }
+            Intrinsic::Rebind => {
+                let v = self.expr(&args[0]);
+                self.expr(&args[1]);
+                v
+            }
             Intrinsic::MakeFrame(id) => {
                 // state 0, the arguments in their locals, all other flags clear
                 let vals: Vec<String> = args.iter().map(|a| self.expr(a)).collect();

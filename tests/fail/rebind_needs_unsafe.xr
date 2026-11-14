@@ -1,0 +1,5 @@
+fn main() {
+    let mut v: Vec<i32> = Vec.new()
+    let a = rebind(&mut v, &v)
+}
+// error: `rebind` is unsafe and requires an `unsafe { ... }` block
