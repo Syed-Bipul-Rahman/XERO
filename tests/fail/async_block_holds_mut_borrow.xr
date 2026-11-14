@@ -1,0 +1,8 @@
+import std.task
+fn main() {
+    let mut count = 0
+    let f = async { count += 1 }
+    count += 10
+    task.block_on(f)
+}
+// error: cannot use `count` because it is mutably borrowed

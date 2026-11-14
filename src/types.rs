@@ -272,6 +272,7 @@ pub struct TyFmt<'a> {
     pub adt_name: &'a dyn Fn(AdtId) -> String,
     pub param_name: &'a dyn Fn(u32) -> String,
     pub trait_name: &'a dyn Fn(u32) -> String,
+    pub frame_name: &'a dyn Fn(u32) -> String,
 }
 
 impl fmt::Display for TyFmt<'_> {
@@ -282,6 +283,7 @@ impl fmt::Display for TyFmt<'_> {
                 adt_name: self.adt_name,
                 param_name: self.param_name,
                 trait_name: self.trait_name,
+                frame_name: self.frame_name,
             }
             .to_string()
         };
@@ -327,7 +329,7 @@ impl fmt::Display for TyFmt<'_> {
             Ty::Param(i) => write!(f, "{}", (self.param_name)(*i)),
             Ty::Assoc(a) => write!(f, "{}.{}", sub(&a.base), a.name),
             Ty::Dyn(t) => write!(f, "dyn {}", (self.trait_name)(*t)),
-            Ty::Frame(id) => write!(f, "future#{id}"),
+            Ty::Frame(id) => write!(f, "{}", (self.frame_name)(*id)),
             Ty::Closure(id) => write!(f, "closure#{id}"),
             Ty::FnPtr(ps, r) => {
                 write!(f, "fn(")?;

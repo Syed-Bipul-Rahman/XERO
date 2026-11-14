@@ -16,7 +16,7 @@ use std::collections::{BTreeSet, HashMap};
 use super::expr::{x, FnCx, Scope, X};
 use super::{ClosureDef, FnId, FnKey, FnOwner};
 use crate::ast::{self, ExprKind as E, PatKind};
-use crate::diag::{Result, Span};
+use crate::diag::{Diagnostic, Result, Span};
 use crate::types::Ty;
 use crate::xir::{self, ExprKind as K, LocalId, Place, UseKind};
 
@@ -297,7 +297,8 @@ impl FnCx<'_> {
 
         // check the body, upgrading captures to `&mut` where it mutates them
         let mut mut_set: BTreeSet<u32> = BTreeSet::new();
-        let mut once = false;
+        // an async block's future owns its environment
+        let mut once = c.is_async;
         let (body, locals, params, pending) = loop {
             let fields: Vec<Ty> = caps
                 .iter()
@@ -347,7 +348,7 @@ impl FnCx<'_> {
             if let Some(&env) = params.first().filter(|_| !caps.is_empty()) {
                 moved_captures(&body, env, self.ck, &mut moved);
             }
-            let now_once = c.is_move && !moved.is_empty();
+            let now_once = (c.is_move && !moved.is_empty()) || c.is_async;
             if used_mut.is_subset(&mut_set) && now_once == once {
                 break (body, locals, params, pending);
             }
@@ -363,6 +364,17 @@ impl FnCx<'_> {
         });
         self.ck.closures[cid as usize].ret = ret.clone();
         self.pending_funcs.extend(pending);
+        let mut async_frame = None;
+        let (body, ret, locals) = if c.is_async {
+            // the block becomes its frame's `poll`; the frame holds the environment
+            let (frame, cx_local, poll_ty, body, locals) =
+                self.async_block_fn(cid, &fn_name, &params, &locals, body, ret, span)?;
+            async_frame = Some((frame, cx_local));
+            (body, poll_ty, locals)
+        } else {
+            (body, ret, locals)
+        };
+        let n_params = params.len();
         self.pending_funcs.push(xir::Func {
             name: fn_name,
             params,
@@ -371,7 +383,7 @@ impl FnCx<'_> {
             body,
             export: false,
             span,
-            async_frame: None,
+            async_frame,
         });
 
         // the closure value: its captured references or values
@@ -387,7 +399,64 @@ impl FnCx<'_> {
                 vals.push(x(K::Borrow(p, m), Ty::reference(t, m), span));
             }
         }
-        Ok(x(K::Struct(vals), Ty::Closure(cid), span))
+        let value = x(K::Struct(vals), Ty::Closure(cid), span);
+        if let Some((frame, _)) = async_frame {
+            let args = if n_params > 0 {
+                vec![value]
+            } else {
+                Vec::new()
+            };
+            return Ok(x(
+                K::Intrinsic(xir::Intrinsic::MakeFrame(frame), args),
+                Ty::Frame(frame),
+                span,
+            ));
+        }
+        Ok(value)
+    }
+
+    /// Finish an async block's function: its result is wrapped in
+    /// `Poll.Ready`, and it is registered as a frame.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn async_block_fn(
+        &mut self,
+        cid: u32,
+        fn_name: &str,
+        params: &[LocalId],
+        locals: &[xir::Local],
+        body: X,
+        out: Ty,
+        span: Span,
+    ) -> Result<(u32, LocalId, Ty, X, Vec<xir::Local>)> {
+        let poll_id = self
+            .ck
+            .prelude_adt("Poll")
+            .ok_or_else(|| Diagnostic::new(span, "`async` needs the prelude type `Poll`"))?;
+        let ctx_id = self
+            .ck
+            .prelude_adt("Context")
+            .ok_or_else(|| Diagnostic::new(span, "`async` needs the prelude type `Context`"))?;
+        let poll_ty = Ty::Adt(poll_id, vec![out.clone()]);
+        let key = FnKey {
+            fid: u32::MAX,
+            targs: vec![Ty::Closure(cid)],
+            self_ty: None,
+        };
+        let ptys: Vec<Ty> = params
+            .iter()
+            .map(|p| locals[*p as usize].ty.clone())
+            .collect();
+        let frame = self.ck.frame_for(&key, fn_name, out, ptys);
+        let mut locals = locals.to_vec();
+        let _ = ctx_id;
+        let cx_local = self.async_block_cx.take().unwrap();
+        let ready = self.ck.adts[poll_id as usize]
+            .variant_index("Ready")
+            .unwrap();
+        let bs = body.span;
+        let body = x(K::Variant(ready, vec![body]), poll_ty.clone(), bs);
+        let body = super::expr::spill_suspends_pub(body, &mut locals);
+        Ok((frame, cx_local, poll_ty, body, locals))
     }
 
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
@@ -432,6 +501,7 @@ impl FnCx<'_> {
             index_calls: HashMap::new(),
             or_reuse: None,
             async_cx: None,
+            async_block_cx: None,
         };
         let mut params = Vec::new();
         if has_env {
@@ -450,6 +520,31 @@ impl FnCx<'_> {
                 inner.declare(&p.name.name, id);
             }
             params.push(id);
+        }
+        if c.is_async {
+            // `.await` inside the block polls with this context; the `Poll`
+            // type is completed once the block's type is known
+            let poll_id = inner
+                .ck
+                .prelude_adt("Poll")
+                .ok_or_else(|| Diagnostic::new(span, "`async` needs the prelude type `Poll`"))?;
+            let ctx_id = inner
+                .ck
+                .prelude_adt("Context")
+                .ok_or_else(|| Diagnostic::new(span, "`async` needs the prelude type `Context`"))?;
+            let cx = inner.new_local(
+                "cx#poll",
+                Ty::reference(Ty::Adt(ctx_id, Vec::new()), true),
+                false,
+                span,
+                true,
+            );
+            inner.async_cx = Some(super::expr::AsyncCx {
+                cx,
+                poll_ty: Ty::Adt(poll_id, vec![Ty::unit()]),
+                next_state: 1,
+            });
+            self.async_block_cx = Some(cx);
         }
         let body = inner.expr(&c.body, ret.as_ref());
         let body = body.and_then(|b| match &ret {

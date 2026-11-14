@@ -1,6 +1,0 @@
-fn main() {
-    async {
-        println(1)
-    }
-}
-// error: `async` is reserved

@@ -1,0 +1,58 @@
+// async { } and async move { } blocks.
+
+import std.task
+import std.task.{Executor}
+import std.sync.{Mutex}
+
+async fn double(x: i32) -> i32 {
+    task.yield_now().await
+    x * 2
+}
+
+fn main() {
+    let base = 10
+    // borrows `base`
+    let f = async {
+        let a = double(base).await
+        a + 1
+    }
+    println(task.block_on(f))
+
+    // owns its captures
+    let name = String.from("xero")
+    let g = async move {
+        task.yield_now().await
+        name.len()
+    }
+    println(task.block_on(g))
+
+    let log: Mutex<Vec<i32>> = Mutex.new(Vec.new())
+    {
+        let mut ex = Executor.new()
+        for id in 1..=3 {
+            let l = &log
+            ex.start(async move {
+                for step in 0..2 {
+                    l.with(|v| v.push(id * 10 + step))
+                    task.yield_now().await
+                }
+            })
+        }
+        ex.run()
+    }
+    log.with(|v| {
+        for x in &*v {
+            print(*x)
+            print(" ")
+        }
+    })
+    println("")
+    let nothing = async { 5 }
+    println(task.block_on(nothing))
+}
+
+// output:
+// 21
+// 4
+// 10 20 30 11 21 31 
+// 5

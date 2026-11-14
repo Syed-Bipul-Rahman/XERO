@@ -1,0 +1,5 @@
+async fn one() -> i32 { 1 }
+fn main() {
+    one()
+}
+// error: this future is dropped without running: futures do nothing until polled; `.await` it, or run it with `task.block_on`

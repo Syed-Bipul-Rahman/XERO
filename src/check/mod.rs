@@ -1344,11 +1344,20 @@ impl Checker {
         let adt_name = |id: AdtId| self.adts[id as usize].name.clone();
         let param_name = |i: u32| format!("T{i}");
         let trait_name = |i: u32| self.traits[i as usize].name.clone();
+        let frame_name = |i: u32| {
+            let k = &self.frames[i as usize].key;
+            if k.fid == u32::MAX {
+                format!("async#{i}")
+            } else {
+                format!("async fn {}#{i}", self.fns[k.fid as usize].decl.name.name)
+            }
+        };
         TyFmt {
             ty: t,
             adt_name: &adt_name,
             param_name: &param_name,
             trait_name: &trait_name,
+            frame_name: &frame_name,
         }
         .to_string()
     }
@@ -1361,11 +1370,20 @@ impl Checker {
         };
         let param_name = |i: u32| format!("T{i}");
         let trait_name = |i: u32| self.traits[i as usize].name.clone();
+        let frame_name = |i: u32| {
+            let k = &self.frames[i as usize].key;
+            if k.fid == u32::MAX {
+                format!("async#{i}")
+            } else {
+                format!("async fn {}#{i}", self.fns[k.fid as usize].decl.name.name)
+            }
+        };
         TyFmt {
             ty: t,
             adt_name: &adt_name,
             param_name: &param_name,
             trait_name: &trait_name,
+            frame_name: &frame_name,
         }
         .to_string()
     }
@@ -2346,6 +2364,18 @@ impl Checker {
             let mut seen = Vec::new();
             if self.frame_reaches(&Ty::Frame(id), id, &frame_locals, &mut seen, true) {
                 let fid = self.frames[id as usize].key.fid;
+                if fid == u32::MAX {
+                    let f = self
+                        .out_funcs
+                        .iter()
+                        .find(|f| f.async_frame.map(|a| a.0) == Some(id));
+                    let sp = f.map(|f| f.span).unwrap_or_default();
+                    self.error(Diagnostic::new(
+                        sp,
+                        "this `async` block's future would contain itself",
+                    ));
+                    return;
+                }
                 let d = &self.fns[fid as usize].decl;
                 let (n, sp) = (d.name.name.clone(), d.name.span);
                 self.error(Diagnostic::new(sp, format!("recursive `async fn` `{n}`: its future would contain itself and have no finite size; make the recursive call in a plain function, or restructure it as a loop")));

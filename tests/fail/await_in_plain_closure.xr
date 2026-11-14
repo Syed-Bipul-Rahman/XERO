@@ -1,0 +1,8 @@
+fn main() {
+    let c = || {
+        let v = async_one().await
+        v
+    }
+}
+async fn async_one() -> i32 { 1 }
+// error: `.await` is only allowed inside an `async fn` or an `async { }` block

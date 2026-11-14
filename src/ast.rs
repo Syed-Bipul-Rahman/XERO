@@ -348,6 +348,8 @@ pub struct ClosureExpr {
     pub ret: Option<TypeExpr>,
     pub body: Expr,
     pub is_move: bool,
+    /// `async { ... }` / `async move { ... }`: a future, not a function.
+    pub is_async: bool,
 }
 
 #[derive(Clone, Debug)]

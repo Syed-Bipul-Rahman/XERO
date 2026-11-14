@@ -79,6 +79,8 @@ pub struct FnCx<'a> {
     pub or_reuse: Option<Vec<(String, LocalId)>>,
     /// Inside an `async fn`: where `.await` gets its context and what `poll` returns.
     pub async_cx: Option<AsyncCx>,
+    /// The context local of the async block just checked.
+    pub async_block_cx: Option<LocalId>,
 }
 
 /// What a path-like expression (`a`, `a.b`, `Type.member`) refers to.
@@ -216,6 +218,7 @@ fn check_fn_inner(
         index_calls: HashMap::new(),
         or_reuse: None,
         async_cx: None,
+        async_block_cx: None,
     };
     if decl.is_unsafe {
         cx.unsafe_depth = 1;
@@ -382,6 +385,10 @@ fn check_async_body(
 /// Make values computed before a suspension point survive it: the operands
 /// of an operation, up to one that suspends, are stored in locals first
 /// (locals live in the frame; registers do not survive a suspension).
+pub fn spill_suspends_pub(e: X, locals: &mut Vec<xir::Local>) -> X {
+    spill_suspends(e, locals)
+}
+
 fn spill_suspends(e: X, locals: &mut Vec<xir::Local>) -> X {
     fn suspends(e: &X) -> bool {
         let mut found = matches!(e.kind, K::Suspend(..));
@@ -545,7 +552,10 @@ impl<'a> FnCx<'a> {
     /// `{ let f = fut; loop { match poll(&mut f, cx) { Ready(v) => break v, Pending => suspend } } }`
     fn await_expr(&mut self, inner: &ast::Expr, span: Span) -> Result<X> {
         let Some(actx) = self.async_cx.clone() else {
-            return self.err(span, "`.await` is only allowed inside an `async fn`");
+            return self.err(
+                span,
+                "`.await` is only allowed inside an `async fn` or an `async { }` block",
+            );
         };
         let fut = self.expr(inner, None)?;
         let fty = fut.ty.clone();
@@ -904,6 +914,9 @@ impl<'a> FnCx<'a> {
                 ));
             }
             _ => {}
+        }
+        if expected.is_unit() && matches!(v.ty, Ty::Frame(_)) {
+            return self.err(span, "this future is dropped without running: futures do nothing until polled; `.await` it, or run it with `task.block_on`");
         }
         if expected.is_unit() {
             // value in statement context: evaluate and discard
@@ -1679,6 +1692,7 @@ impl<'a> FnCx<'a> {
                             span: body.span,
                         },
                         is_move: *is_move,
+                        is_async: false,
                     })),
                     span,
                 };

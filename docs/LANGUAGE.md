@@ -729,5 +729,10 @@ fn main() {
   the executors in `std.task` never move a future after polling it.
 * The borrow checker treats a future like a struct holding the function's
   arguments: `fetch_into(&mut v)` keeps `v` borrowed until the future is gone.
+* `async { ... }` is a future made from a block: it borrows the variables it
+  uses, and `async move { ... }` takes them, like closures:
+  `ex.start(async move { worker(id).await })`.
+* A future that is created and then dropped without being awaited or run is a
+  compile error, since it would never do anything.
 * An `async fn` cannot call itself (its future would contain itself), and
-  `.await` is not allowed in closures or `async { }` blocks, which are reserved.
+  `.await` is not allowed in plain closures.

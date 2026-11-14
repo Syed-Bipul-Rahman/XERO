@@ -1629,9 +1629,17 @@ impl<'a> Codegen<'a> {
                 "poison".into()
             }
             K::Suspend(k, pending) => {
-                let v = self.expr(pending);
+                // `Pending` of this function's own `Poll<T>` (an async block's
+                // `T` is only known after its body is checked)
+                let rt = self.func.unwrap().ret.clone();
+                let pv = crate::xir::Expr {
+                    kind: pending.kind.clone(),
+                    ty: rt.clone(),
+                    span: pending.span,
+                };
+                let v = self.expr(&pv);
                 self.ins(&format!("store i32 {k}, ptr %frame.state"));
-                let lt = self.llty(&pending.ty);
+                let lt = self.llty(&rt);
                 self.term(&format!("ret {lt} {v}"));
                 self.start(&format!("resume{k}"));
                 self.unit()

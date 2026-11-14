@@ -1,0 +1,10 @@
+import std.task.{Executor}
+fn main() {
+    let mut ex = Executor.new()
+    {
+        let x = 5
+        ex.start(async { x + 1 })
+    }
+    ex.run()
+}
+// error: `x` does not live long enough: it is still borrowed by `ex` after its scope ends

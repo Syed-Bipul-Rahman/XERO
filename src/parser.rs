@@ -883,6 +883,7 @@ impl Parser {
                 ret,
                 body,
                 is_move,
+                is_async: false,
             })),
             span,
         })
@@ -985,6 +986,8 @@ impl Parser {
                 span: start.to(self.prev_span()),
             });
         }
+        let async_block = matches!(self.peek(), Tok::Kw(Kw::Async))
+            && !matches!(self.peek_at(1), Tok::Kw(Kw::Fn));
         if let Tok::Kw(
             k @ (Kw::Async
             | Kw::Await
@@ -997,8 +1000,14 @@ impl Parser {
         ) = self.peek().clone()
         {
             let what = crate::lexer::kw_name(k);
+            if async_block {
+                let e = self.expr_stmt()?;
+                let semi = self.end_stmt()?;
+                return Ok(Stmt::Expr(e, semi));
+            }
             return self.err(match k {
-                Kw::Async | Kw::Spawn | Kw::Await => format!("`{what}` is reserved for Xero's concurrency model and not yet implemented in this compiler version"),
+                Kw::Async => "`async fn` items must be declared at module level".to_string(),
+                Kw::Spawn | Kw::Await => format!("`{what}` is reserved for Xero's concurrency model and not yet implemented in this compiler version"),
                 Kw::Own => "`own` is reserved; ownership is the default for every binding".to_string(),
                 _ => format!("`{what}` items must be declared at module level"),
             });
@@ -1539,7 +1548,24 @@ impl Parser {
                 let is_move = self.eat_kw(Kw::Move);
                 ExprKind::Spawn(is_move, self.block()?)
             }
-            Tok::Kw(k @ (Kw::Async | Kw::Await)) => {
+            Tok::Kw(Kw::Async) => {
+                // `async { ... }`, `async move { ... }`: a future
+                self.bump();
+                let is_move = self.eat_kw(Kw::Move);
+                let b = self.block()?;
+                let bspan = b.span;
+                ExprKind::Closure(Box::new(ClosureExpr {
+                    params: Vec::new(),
+                    ret: None,
+                    body: Expr {
+                        kind: ExprKind::Block(b),
+                        span: bspan,
+                    },
+                    is_move,
+                    is_async: true,
+                }))
+            }
+            Tok::Kw(k @ Kw::Await) => {
                 return self.err(format!(
                     "`{}` is reserved for Xero's concurrency model and not yet implemented in this compiler version",
                     crate::lexer::kw_name(k)
