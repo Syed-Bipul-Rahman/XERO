@@ -1,0 +1,9 @@
+struct Big { d: Vec<u8> }
+impl Add for Big { fn add(self, o: Big) -> Big { self } }
+fn main() {
+    let mut x = Big { d: Vec.new() }
+    let y = Big { d: Vec.new() }
+    x += y
+    println(y.d.len())
+}
+// error: use of moved value `y`

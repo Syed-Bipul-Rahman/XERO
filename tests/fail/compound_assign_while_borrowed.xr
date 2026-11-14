@@ -1,0 +1,9 @@
+struct Big { d: Vec<u8> }
+impl Add for Big { fn add(self, o: Big) -> Big { self } }
+fn main() {
+    let mut x = Big { d: Vec.new() }
+    let r = &x
+    x += Big { d: Vec.new() }
+    println(r.d.len())
+}
+// error: cannot mutably borrow `x` because it is borrowed

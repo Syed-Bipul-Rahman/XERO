@@ -197,6 +197,28 @@ pub trait Rem<Rhs = Self> {
     fn rem(self, other: Rhs) -> Self.Output
 }
 
+/// `a += b` (and `-=`, `*=`, `/=`, `%=`) in place. Without an implementation,
+/// `a += b` means `a = a + b`.
+pub trait AddAssign<Rhs = Self> {
+    fn add_assign(&mut self, other: Rhs)
+}
+
+pub trait SubAssign<Rhs = Self> {
+    fn sub_assign(&mut self, other: Rhs)
+}
+
+pub trait MulAssign<Rhs = Self> {
+    fn mul_assign(&mut self, other: Rhs)
+}
+
+pub trait DivAssign<Rhs = Self> {
+    fn div_assign(&mut self, other: Rhs)
+}
+
+pub trait RemAssign<Rhs = Self> {
+    fn rem_assign(&mut self, other: Rhs)
+}
+
 /// `a[i]`: reading through an index.
 pub trait Index<Idx> {
     type Output

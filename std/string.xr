@@ -146,3 +146,18 @@ impl Print for String {
         write_str(fd, self.as_str())
     }
 }
+
+/// `s + "text"`: append, reusing the string's buffer.
+impl Add<&str> for String {
+    fn add(mut self, other: &str) -> String {
+        self.push_str(other)
+        self
+    }
+}
+
+/// `s += "text"`
+impl AddAssign<&str> for String {
+    fn add_assign(&mut self, other: &str) {
+        self.push_str(other)
+    }
+}

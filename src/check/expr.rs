@@ -1328,13 +1328,7 @@ impl<'a> FnCx<'a> {
                     ty.clone()
                 };
                 if self.overloadable(*op, &ty) {
-                    // `a += b` on a user type is `a = a + b`
-                    if !self.ck.is_copy(&ty) {
-                        return self.err(span, format!("`{}=` on the move-only type `{}` is not supported yet; write `x = x {} y`", op.symbol(), self.ts(&ty), op.symbol()));
-                    }
-                    let cur = x(K::Use(p.clone(), UseKind::Copy), ty.clone(), lhs.span);
-                    let v = self.overloaded_arith(*op, cur, rhs, span)?;
-                    return Ok(x(K::Assign(p, Box::new(v)), Ty::unit(), span));
+                    return self.compound_overloaded(*op, p, ty, lhs, rhs, span);
                 }
                 let ok = match op {
                     BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
@@ -4171,6 +4165,115 @@ impl<'a> FnCx<'a> {
             }
         };
         self.call_operator(tr, m, op.symbol(), &t, vec![l, r], span)
+    }
+
+    /// `a += b` on a user type: `AddAssign.add_assign(&mut a, b)` when it is
+    /// implemented, otherwise `a = a + b` (for a move-only `a`, its value is
+    /// taken out, combined and put back in place).
+    fn compound_overloaded(
+        &mut self,
+        op: BinOp,
+        p: Place,
+        ty: Ty,
+        lhs: &ast::Expr,
+        rhs: &ast::Expr,
+        span: Span,
+    ) -> Result<X> {
+        let (tname, method) = match op {
+            BinOp::Add => ("AddAssign", "add_assign"),
+            BinOp::Sub => ("SubAssign", "sub_assign"),
+            BinOp::Mul => ("MulAssign", "mul_assign"),
+            BinOp::Div => ("DivAssign", "div_assign"),
+            BinOp::Rem => ("RemAssign", "rem_assign"),
+            _ => return self.err(span, format!("`{}=` cannot be overloaded", op.symbol())),
+        };
+        if let Some(tid) = self.prelude_trait(tname) {
+            let impls = self.ck.trait_impls_for(&ty, tid);
+            if !impls.is_empty() {
+                let rhs_tys: Vec<Ty> = impls
+                    .iter()
+                    .filter_map(|(iid, args)| {
+                        self.ck.impls[*iid as usize]
+                            .trait_args
+                            .first()
+                            .map(|a| a.subst(args))
+                    })
+                    .collect();
+                let r = if rhs_tys.len() == 1 {
+                    self.expr_as(rhs, &rhs_tys[0])?
+                } else {
+                    self.expr(rhs, None)?
+                };
+                let p = self.mut_place(p)?;
+                self.note_mut(&p);
+                let recv = x(
+                    K::Borrow(p, true),
+                    Ty::reference(ty.clone(), true),
+                    lhs.span,
+                );
+                let rt = r.ty.clone();
+                let sym = format!("{}=", op.symbol());
+                let call = self.call_operator_with(
+                    tid,
+                    tname,
+                    method,
+                    &sym,
+                    &ty,
+                    Some(vec![rt]),
+                    vec![recv, r],
+                    span,
+                )?;
+                return Ok(self.coerce(call, &Ty::unit(), span)?);
+            }
+        }
+        if self.ck.is_copy(&ty) {
+            let cur = x(K::Use(p.clone(), UseKind::Copy), ty.clone(), lhs.span);
+            let v = self.overloaded_arith(op, cur, rhs, span)?;
+            return Ok(x(K::Assign(p, Box::new(v)), Ty::unit(), span));
+        }
+        // take the value out (bitwise), combine, and write the result back
+        let p = self.mut_place(p)?;
+        self.note_mut(&p);
+        let ptr_ty = Ty::Ptr(Box::new(ty.clone()));
+        let raw = |p: &Place| {
+            let b = x(
+                K::Borrow(p.clone(), true),
+                Ty::reference(ty.clone(), true),
+                lhs.span,
+            );
+            x(
+                K::Cast(Box::new(b), ptr_ty.clone()),
+                ptr_ty.clone(),
+                lhs.span,
+            )
+        };
+        let cur = x(
+            K::Intrinsic(xir::Intrinsic::PtrRead, vec![raw(&p)]),
+            ty.clone(),
+            lhs.span,
+        );
+        let tmp = self.synthetic("old", ty.clone(), lhs.span);
+        let use_tmp = x(
+            K::Use(Place::Local(tmp), UseKind::Move),
+            ty.clone(),
+            lhs.span,
+        );
+        let v = self.overloaded_arith(op, use_tmp, rhs, span)?;
+        let v = self.coerce(v, &ty, span)?;
+        let write = x(
+            K::Intrinsic(xir::Intrinsic::PtrWrite, vec![raw(&p), v]),
+            Ty::unit(),
+            span,
+        );
+        Ok(x(
+            K::Block(xir::Block {
+                stmts: vec![xir::Stmt::Let(tmp, cur), xir::Stmt::Expr(write)],
+                tail: None,
+                scope: Vec::new(),
+            }),
+            Ty::unit(),
+            span,
+        ))
     }
 
     fn is_fieldless_enum(&self, t: &Ty) -> bool {
