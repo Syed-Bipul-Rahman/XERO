@@ -1,0 +1,12 @@
+fn main() {
+    let mut r: Option<&mut i32> = None
+    {
+        let mut v: Vec<i32> = Vec.new()
+        v.push(1)
+        let mut it = v.iter_mut()
+        r = it.next()
+    }
+    match r { Some(x) => *x = 2
+        None => {} }
+}
+// error: `v` does not live long enough: it is still borrowed by `r` after its scope ends

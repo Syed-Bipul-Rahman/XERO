@@ -1,0 +1,124 @@
+// What's new in Xero 0.5: generic traits and associated types, indexing,
+// iterators, struct patterns, impl Trait, trait objects and async fns.
+//
+//   xeroc run examples/whats_new_0_5.xr
+
+import std.task
+
+// ---- operators with mixed operand types (generic traits)
+copy struct Vec2 {
+    x: f64
+    y: f64
+}
+
+impl Add for Vec2 {
+    fn add(self, o: Vec2) -> Vec2 { Vec2 { x: self.x + o.x, y: self.y + o.y } }
+}
+
+impl Mul<f64> for Vec2 {
+    fn mul(self, k: f64) -> Vec2 { Vec2 { x: self.x * k, y: self.y * k } }
+}
+
+impl Mul for Vec2 {
+    type Output = f64               // the dot product
+    fn mul(self, o: Vec2) -> f64 { self.x * o.x + self.y * o.y }
+}
+
+// ---- indexing your own types
+struct Grid {
+    w: usize
+    cells: Vec<i32>
+}
+
+impl Index<(usize, usize)> for Grid {
+    type Output = i32
+    fn index(&self, p: (usize, usize)) -> &i32 { &self.cells[p.1 * self.w + p.0] }
+}
+
+impl IndexMut<(usize, usize)> for Grid {
+    fn index_mut(&mut self, p: (usize, usize)) -> &mut i32 { &mut self.cells[p.1 * self.w + p.0] }
+}
+
+// ---- trait objects
+trait Shape {
+    fn area(&self) -> f64
+    fn name(&self) -> &str
+}
+
+struct Circle { r: f64 }
+struct Square { s: f64 }
+
+impl Shape for Circle {
+    fn area(&self) -> f64 { 3.14159 * self.r * self.r }
+    fn name(&self) -> &str { "circle" }
+}
+
+impl Shape for Square {
+    fn area(&self) -> f64 { self.s * self.s }
+    fn name(&self) -> &str { "square" }
+}
+
+// ---- returning closures and iterators
+fn scaler(k: i32) -> impl Fn(i32) -> i32 {
+    move |x| x * k
+}
+
+fn odd_squares(n: i32) -> impl Iterator {
+    (1..=n).filter(|x| *x % 2 == 1).map(|x| x * x)
+}
+
+// ---- async functions: state machines, no runtime
+async fn fetch(id: i32) -> i32 {
+    task.yield_now().await          // let other tasks run
+    id * 10
+}
+
+async fn total(ids: &Vec<i32>) -> i32 {
+    let mut sum = 0
+    for id in ids {
+        sum += fetch(*id).await
+    }
+    sum
+}
+
+fn main() {
+    let v = Vec2 { x: 1.0, y: 2.0 }
+    let w = Vec2 { x: 3.0, y: 4.0 }
+    let s = (v + w) * 2.0
+    println(s.x)                    // 8.0
+    println(v * w)                  // 11.0
+
+    let mut g = Grid { w: 3, cells: Vec.new() }
+    for i in 0..9 { g.cells.push(i) }
+    g[(1, 1)] += 100
+    println(g[(1, 1)])              // 104
+
+    // iterators: lazy adapters, compiled to plain loops
+    let lens: Vec<usize> = ["xero", "is", "zero", "cost"].iter().map(|w| w.len()).collect()
+    println(lens.iter().fold(0usize, |a, b| a + *b))   // 14
+    println(odd_squares(7).sum())   // 1 + 9 + 25 + 49 = 84
+    let triple = scaler(3)
+    println(triple(14))             // 42
+
+    // struct patterns and | bindings
+    let Vec2 { x, .. } = w
+    println(x)                      // 3.0
+    let r: Result<i32, i32> = Err(7)
+    match r {
+        Ok(n) | Err(n) => println(n)    // 7
+    }
+
+    // dynamic dispatch, opt-in
+    let mut shapes: Vec<Box<dyn Shape>> = Vec.new()
+    shapes.push(Box.new(Circle { r: 1.0 }))
+    shapes.push(Box.new(Square { s: 2.0 }))
+    for sh in &shapes {
+        print(sh.name())
+        print(" ")
+        println(sh.area())
+    }
+
+    // async
+    let ids: Vec<i32> = (1..=4).collect()
+    println(task.block_on(total(&ids)))     // 100
+}

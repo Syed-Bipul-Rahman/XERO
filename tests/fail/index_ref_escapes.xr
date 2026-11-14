@@ -1,0 +1,7 @@
+fn get() -> &i32 {
+    let mut v: Vec<i32> = Vec.new()
+    v.push(1)
+    &v[0]
+}
+fn main() { println(*get()) }
+// error: `v` does not live long enough: the borrow escapes the block that owns it

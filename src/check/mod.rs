@@ -197,6 +197,11 @@ pub struct ImplDef {
     /// Template over the impl's generic params.
     pub self_ty: Ty,
     pub trait_id: Option<TraitId>,
+    /// Arguments of a generic trait (`impl Mul<f64> for V`), as templates
+    /// over the impl's generic params; defaults filled in.
+    pub trait_args: Vec<Ty>,
+    /// `type Item = T` declarations.
+    pub assoc: Vec<(Ident, TypeExpr)>,
     pub methods: HashMap<String, FnId>,
     pub drop_fn: Option<FnId>,
     pub span: Span,
@@ -227,6 +232,23 @@ pub struct StaticDef {
     pub resolved: Option<Ty>,
 }
 
+/// The state machine of one `async fn` instance (`Ty::Frame`).
+pub struct FrameDef {
+    pub key: FnKey,
+    /// Symbol of the instance, which is the frame's `poll` function.
+    pub name: String,
+    pub output: Ty,
+    pub params: Vec<Ty>,
+}
+
+/// A vtable: drop glue, then the trait's methods, for one concrete type.
+pub struct Vtable {
+    pub name: String,
+    pub ty: Ty,
+    /// Method instance symbols, in `dyn_methods` order.
+    pub methods: Vec<String>,
+}
+
 /// A function instance to generate: definition + concrete generic arguments.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FnKey {
@@ -242,6 +264,9 @@ pub struct FnKey {
 pub struct Env {
     pub names: HashMap<String, Ty>,
     pub self_ty: Option<Ty>,
+    /// The trait (with its arguments) whose items are being checked, so
+    /// that `Self.Output` means that trait's associated type.
+    pub cur_trait: Option<(TraitId, Vec<Ty>)>,
 }
 
 pub struct Target {
@@ -268,6 +293,18 @@ pub struct Checker {
     used_statics: HashSet<u32>,
     pub drop_fns: HashMap<Ty, String>,
     alias_depth: u32,
+    assoc_depth: u32,
+    /// Vtables for `dyn Trait`: one per (concrete type, trait).
+    pub vtables: Vec<Vtable>,
+    /// `async fn` instances' futures.
+    pub frames: Vec<FrameDef>,
+    pub frame_index: HashMap<FnKey, u32>,
+    vtable_index: HashMap<(Ty, TraitId), usize>,
+    /// Return types of `-> impl Trait` instances, found by checking them early.
+    pub opaque: HashMap<FnKey, Ty>,
+    opaque_busy: HashSet<FnKey>,
+    /// Instances checked early (for `impl Trait`); `None` if checking failed.
+    prechecked: HashMap<FnKey, Option<(xir::Func, Vec<xir::Func>)>>,
     /// Closure types, indexed by `Ty::Closure(id)`.
     pub closures: Vec<ClosureDef>,
     /// Stable ids: (enclosing function symbol, closure span) -> closure id,
@@ -323,6 +360,14 @@ impl Checker {
             used_statics: HashSet::new(),
             drop_fns: HashMap::new(),
             alias_depth: 0,
+            assoc_depth: 0,
+            vtables: Vec::new(),
+            frames: Vec::new(),
+            frame_index: HashMap::new(),
+            vtable_index: HashMap::new(),
+            opaque: HashMap::new(),
+            opaque_busy: HashSet::new(),
+            prechecked: HashMap::new(),
             closures: Vec::new(),
             closure_ids: HashMap::new(),
             summaries: HashMap::new(),
@@ -583,12 +628,6 @@ impl Checker {
             ItemKind::Trait(t) => {
                 let id = self.traits.len() as TraitId;
                 let name = t.name.clone();
-                if !t.generics.params.is_empty() {
-                    self.error(Diagnostic::new(
-                        t.name.span,
-                        "generic traits are not supported yet",
-                    ));
-                }
                 let mut defaults = HashMap::new();
                 for m in &t.methods {
                     if m.body.is_some() {
@@ -600,9 +639,6 @@ impl Checker {
                             vis: Vis::Pub,
                         });
                         defaults.insert(m.name.name.clone(), fid);
-                    }
-                    if m.self_param.is_none() {
-                        self.error(Diagnostic::new(m.name.span, "trait methods must take `self`, `&self` or `&mut self` (static trait functions are not supported yet)"));
                     }
                 }
                 self.traits.push(TraitDef {
@@ -928,21 +964,79 @@ impl Checker {
     }
 
     pub fn resolve_trait_ref(&self, t: &TypeExpr, module: ModId) -> Result<TraitId> {
-        let TypeKind::Path(path, args) = &t.kind else {
+        let TypeKind::Path(path, _) = &t.kind else {
             return Err(Diagnostic::new(t.span, "expected a trait name"));
         };
-        if !args.is_empty() {
-            return Err(Diagnostic::new(
-                t.span,
-                "generic traits are not supported yet",
-            ));
-        }
         match self.resolve_path_def(path, module)? {
             Def::Trait(id) => Ok(id),
             _ => Err(Diagnostic::new(
                 t.span,
                 format!("`{}` is not a trait", path.last().unwrap().name),
             )),
+        }
+    }
+
+    /// Resolve a trait reference with its generic arguments (`Mul<f64>`),
+    /// filling in defaults (`Rhs = Self`, where `Self` is `self_ty`).
+    pub fn resolve_trait_with_args(
+        &mut self,
+        t: &TypeExpr,
+        module: ModId,
+        env: &Env,
+        self_ty: Option<Ty>,
+    ) -> Result<(TraitId, Vec<Ty>)> {
+        let tid = self.resolve_trait_ref(t, module)?;
+        let TypeKind::Path(_, args) = &t.kind else {
+            unreachable!()
+        };
+        let generics = self.traits[tid as usize].decl.generics.params.clone();
+        let tmodule = self.traits[tid as usize].module;
+        let tname = self.traits[tid as usize].name.clone();
+        if args.len() > generics.len() {
+            return Err(Diagnostic::new(
+                t.span,
+                format!(
+                    "trait `{tname}` expects {} generic argument(s), found {}",
+                    generics.len(),
+                    args.len()
+                ),
+            ));
+        }
+        let mut out = Vec::new();
+        for a in args {
+            out.push(self.resolve_type(a, module, env)?);
+        }
+        for g in &generics[args.len()..] {
+            let Some(d) = &g.default else {
+                return Err(Diagnostic::new(
+                    t.span,
+                    format!(
+                        "trait `{tname}` expects {} generic argument(s), found {}",
+                        generics.len(),
+                        args.len()
+                    ),
+                ));
+            };
+            let mut denv = Env {
+                self_ty: self_ty.clone(),
+                ..Env::default()
+            };
+            for (gp, a) in generics.iter().zip(&out) {
+                denv.names.insert(gp.name.name.clone(), a.clone());
+            }
+            out.push(self.resolve_type(d, tmodule, &denv)?);
+        }
+        Ok((tid, out))
+    }
+
+    /// `Trait<A, B>` for messages.
+    pub fn trait_str(&self, tid: TraitId, args: &[Ty]) -> String {
+        let name = self.traits[tid as usize].name.clone();
+        if args.is_empty() {
+            name
+        } else {
+            let a: Vec<String> = args.iter().map(|t| self.ty_str(t)).collect();
+            format!("{name}<{}>", a.join(", "))
         }
     }
 
@@ -986,16 +1080,23 @@ impl Checker {
                 // Inherent impls on foreign types act like extension functions; allowed.
             }
         }
-        let trait_id = match &decl.trait_ref {
-            Some(t) => match self.resolve_trait_ref(t, mid) {
-                Ok(id) => Some(id),
+        env.self_ty = Some(self_ty.clone());
+        let (trait_id, trait_args) = match &decl.trait_ref {
+            Some(t) => match self.resolve_trait_with_args(t, mid, &env, Some(self_ty.clone())) {
+                Ok((id, args)) => (Some(id), args),
                 Err(d) => {
                     self.error(d);
                     return;
                 }
             },
-            None => None,
+            None => (None, Vec::new()),
         };
+        if trait_id.is_none() && !decl.assoc_types.is_empty() {
+            self.error(Diagnostic::new(
+                decl.assoc_types[0].0.span,
+                "associated types belong in trait implementations (`impl Trait for Type`)",
+            ));
+        }
         let mut methods = HashMap::new();
         for (vis, m) in decl.methods {
             if m.body.is_none() {
@@ -1044,6 +1145,7 @@ impl Checker {
                 body: Some(body),
                 is_unsafe: false,
                 is_export: false,
+                is_async: false,
                 span,
             };
             self.fns.push(FnDef {
@@ -1095,6 +1197,8 @@ impl Checker {
             trait_ast: decl.trait_ref,
             self_ty,
             trait_id,
+            trait_args,
+            assoc: decl.assoc_types,
             methods,
             drop_fn,
             span: decl.span,
@@ -1153,9 +1257,51 @@ impl Checker {
                     ));
                 }
             }
+            // associated types: every one the trait declares, and no others
+            let declared: Vec<(String, bool)> = self.traits[tid as usize]
+                .decl
+                .assoc_types
+                .iter()
+                .map(|a| (a.name.name.clone(), a.default.is_some()))
+                .collect();
+            for (name, has_default) in &declared {
+                if !has_default && !self.impls[iid].assoc.iter().any(|(n, _)| &n.name == name) {
+                    self.error(Diagnostic::new(
+                        span,
+                        format!("missing associated type `{name}` in implementation of trait `{tname}` (add `type {name} = ...`)"),
+                    ));
+                }
+            }
+            let given: Vec<Ident> = self.impls[iid]
+                .assoc
+                .iter()
+                .map(|(n, _)| n.clone())
+                .collect();
+            for (i, n) in given.iter().enumerate() {
+                if !declared.iter().any(|(d, _)| *d == n.name) {
+                    self.error(Diagnostic::new(
+                        n.span,
+                        format!(
+                            "associated type `{}` is not a member of trait `{tname}`",
+                            n.name
+                        ),
+                    ));
+                } else if given[..i].iter().any(|p| p.name == n.name) {
+                    self.error(Diagnostic::new(
+                        n.span,
+                        format!("duplicate associated type `{}`", n.name),
+                    ));
+                }
+            }
             // overlapping impls of the same trait for the same type
             for other in 0..iid {
+                let args_overlap = self.impls[other]
+                    .trait_args
+                    .iter()
+                    .zip(&self.impls[iid].trait_args)
+                    .all(|(a, b)| templates_overlap(a, b));
                 if self.impls[other].trait_id == Some(tid)
+                    && args_overlap
                     && templates_overlap(&self.impls[other].self_ty, &self.impls[iid].self_ty)
                 {
                     let ty = self.ty_str(&self.impls[iid].self_ty);
@@ -1188,10 +1334,12 @@ impl Checker {
     pub fn ty_str(&self, t: &Ty) -> String {
         let adt_name = |id: AdtId| self.adts[id as usize].name.clone();
         let param_name = |i: u32| format!("T{i}");
+        let trait_name = |i: u32| self.traits[i as usize].name.clone();
         TyFmt {
             ty: t,
             adt_name: &adt_name,
             param_name: &param_name,
+            trait_name: &trait_name,
         }
         .to_string()
     }
@@ -1203,10 +1351,12 @@ impl Checker {
             format!("{}.{}", self.modules[a.module as usize].path, a.name)
         };
         let param_name = |i: u32| format!("T{i}");
+        let trait_name = |i: u32| self.traits[i as usize].name.clone();
         TyFmt {
             ty: t,
             adt_name: &adt_name,
             param_name: &param_name,
+            trait_name: &trait_name,
         }
         .to_string()
     }
@@ -1242,6 +1392,17 @@ impl Checker {
                     None => Ty::unit(),
                 }),
             ),
+            TypeKind::Dyn(tr) => {
+                let tid = self.resolve_trait_ref(tr, module)?;
+                self.check_object_safe(tid, tr.span)?;
+                Ty::Dyn(tid)
+            }
+            TypeKind::Impl(_) => {
+                return Err(Diagnostic::new(
+                    t.span,
+                    "`impl Trait` is only allowed as the return type of a function",
+                ))
+            }
             TypeKind::FnTrait(..) => {
                 return Err(Diagnostic::new(
                     t.span,
@@ -1284,6 +1445,36 @@ impl Checker {
                         }
                     }
                 }
+                if path.len() == 2 && args.is_empty() {
+                    let first = path[0].name.as_str();
+                    let base = if first == "Self" {
+                        Some(env.self_ty.clone().ok_or_else(|| {
+                            Diagnostic::new(
+                                t.span,
+                                "`Self` is only available inside `impl` and `trait` blocks",
+                            )
+                        })?)
+                    } else {
+                        env.names.get(first).cloned()
+                    };
+                    if let Some(base) = base {
+                        // an associated type: `Self.Item`, `T.Output`
+                        let name = path[1].name.clone();
+                        let tr = if first == "Self" {
+                            env.cur_trait.clone().filter(|(tid, _)| {
+                                self.traits[*tid as usize]
+                                    .decl
+                                    .assoc_types
+                                    .iter()
+                                    .any(|a| a.name.name == name)
+                            })
+                        } else {
+                            None
+                        };
+                        let ty = Ty::Assoc(Box::new(crate::types::AssocTy { base, tr, name }));
+                        return self.normalize(&ty, t.span);
+                    }
+                }
                 let def = self.resolve_path_def(path, module)?;
                 let args: Vec<Ty> = args
                     .iter()
@@ -1324,7 +1515,10 @@ impl Checker {
                         self.alias_depth -= 1;
                         r?
                     }
-                    Def::Trait(_) => return Err(Diagnostic::new(t.span, "trait objects (`dyn Trait`) are not supported yet; use a generic parameter `<T: Trait>`")),
+                    Def::Trait(_) => {
+                        let n = path.last().unwrap().name.clone();
+                        return Err(Diagnostic::new(t.span, format!("`{n}` is a trait, not a type; use `dyn {n}` behind a reference or `Box` (`&dyn {n}`, `Box<dyn {n}>`), or a generic parameter `<T: {n}>`")));
+                    }
                     _ => return Err(Diagnostic::new(t.span, format!("`{}` is not a type", path.last().unwrap().name))),
                 }
             }
@@ -1352,7 +1546,7 @@ impl Checker {
         match t {
             Ty::Int(_) | Ty::Float(_) | Ty::Bool | Ty::Never | Ty::Ptr(_) => true,
             Ty::Ref(_, m) => !m,
-            Ty::Str | Ty::Slice(_) => false,
+            Ty::Str | Ty::Slice(_) | Ty::Dyn(_) | Ty::Frame(_) => false,
             Ty::Array(e, _) => self.is_copy(e),
             Ty::Tuple(ts) => ts.iter().all(|t| self.is_copy(t)),
             Ty::Adt(id, args) => {
@@ -1363,7 +1557,7 @@ impl Checker {
                         .chain(a.variants.iter().flatten())
                         .all(|f| self.is_copy(&f.subst(args)))
             }
-            Ty::Param(_) => false,
+            Ty::Param(_) | Ty::Assoc(_) => false,
             Ty::FnPtr(..) => true,
             Ty::Closure(id) => self.closures[*id as usize]
                 .fields
@@ -1413,7 +1607,13 @@ impl Checker {
             return true;
         }
         match t {
-            Ty::Ref(..) => true,
+            // a trait object may hold references
+            Ty::Ref(..) | Ty::Dyn(_) => true,
+            // a future holds its arguments
+            Ty::Frame(id) => self.frames[*id as usize]
+                .params
+                .iter()
+                .any(|t| self.has_refs_in(t, depth + 1, seen)),
             // memory owned through a raw pointer (a Vec's buffer) counts too
             Ty::Array(e, _) | Ty::Slice(e) | Ty::Ptr(e) => self.has_refs_in(e, depth + 1, seen),
             Ty::Tuple(ts) => ts.iter().any(|t| self.has_refs_in(t, depth + 1, seen)),
@@ -1455,6 +1655,7 @@ impl Checker {
             return true;
         }
         match t {
+            Ty::Dyn(_) | Ty::Frame(_) => true,
             Ty::Array(e, _) | Ty::Ptr(e) => self.drop_uses_in(e, depth + 1, seen),
             Ty::Tuple(ts) => ts.iter().any(|t| self.drop_uses_in(t, depth + 1, seen)),
             Ty::Closure(id) => self.closures[*id as usize]
@@ -1493,6 +1694,7 @@ impl Checker {
             return false;
         }
         match t {
+            Ty::Dyn(_) | Ty::Frame(_) => true,
             Ty::Array(e, n) => *n > 0 && self.needs_drop_depth(e, depth + 1),
             Ty::Tuple(ts) => ts.iter().any(|t| self.needs_drop_depth(t, depth + 1)),
             Ty::Closure(id) => self.closures[*id as usize]
@@ -1559,28 +1761,73 @@ impl Checker {
 
     /// Does concrete type `t` implement trait `tid`?
     pub fn implements(&mut self, t: &Ty, tid: TraitId) -> bool {
-        self.find_trait_impl(t, tid).is_some()
+        self.is_future_frame(t, tid) || self.find_trait_impl(t, tid).is_some()
     }
 
     /// Find the impl of `tid` for `t`, returning impl id and its generic args.
     pub fn find_trait_impl(&mut self, t: &Ty, tid: TraitId) -> Option<(ImplId, Vec<Ty>)> {
+        self.find_trait_impl_args(t, tid, None)
+    }
+
+    /// Find the impl of `tid` (with trait arguments `targs`, or any) for `t`.
+    pub fn find_trait_impl_args(
+        &mut self,
+        t: &Ty,
+        tid: TraitId,
+        targs: Option<&[Ty]>,
+    ) -> Option<(ImplId, Vec<Ty>)> {
         for iid in 0..self.impls.len() {
             if self.impls[iid].trait_id != Some(tid) {
                 continue;
             }
-            if let Some(args) = self.match_impl(iid as ImplId, t) {
+            if let Some(args) = self.match_impl_with(iid as ImplId, t, targs) {
                 return Some((iid as ImplId, args));
             }
         }
         None
     }
 
+    /// Every impl of `tid` for `t`, whatever the trait's arguments.
+    pub fn trait_impls_for(&mut self, t: &Ty, tid: TraitId) -> Vec<(ImplId, Vec<Ty>)> {
+        let mut out = Vec::new();
+        for iid in 0..self.impls.len() {
+            if self.impls[iid].trait_id != Some(tid) {
+                continue;
+            }
+            if let Some(args) = self.match_impl_with(iid as ImplId, t, None) {
+                out.push((iid as ImplId, args));
+            }
+        }
+        out
+    }
+
     /// Match an impl's self type against `t`; checks the impl's bounds.
     pub fn match_impl(&mut self, iid: ImplId, t: &Ty) -> Option<Vec<Ty>> {
+        self.match_impl_with(iid, t, None)
+    }
+
+    /// `match_impl`, also matching the trait's arguments when given.
+    pub fn match_impl_with(
+        &mut self,
+        iid: ImplId,
+        t: &Ty,
+        targs: Option<&[Ty]>,
+    ) -> Option<Vec<Ty>> {
         let n = self.impls[iid as usize].generics.len();
         let mut slots = vec![None; n];
         if !match_template(&self.impls[iid as usize].self_ty, t, &mut slots) {
             return None;
+        }
+        if let Some(targs) = targs {
+            let tpl = self.impls[iid as usize].trait_args.clone();
+            if tpl.len() != targs.len() {
+                return None;
+            }
+            for (p, a) in tpl.iter().zip(targs) {
+                if !match_template(p, a, &mut slots) {
+                    return None;
+                }
+            }
         }
         let args: Vec<Ty> = slots.into_iter().map(|s| s.unwrap_or(Ty::unit())).collect();
         // check bounds
@@ -1655,10 +1902,13 @@ impl Checker {
                     }
                     continue;
                 }
-                let tid = self.resolve_trait_ref(b, module)?;
-                if !self.implements(a, tid) {
+                let (tid, targs) =
+                    self.resolve_trait_with_args(b, module, &env, Some(a.clone()))?;
+                if !self.is_future_frame(a, tid)
+                    && self.find_trait_impl_args(a, tid, Some(&targs)).is_none()
+                {
                     let tys = self.ty_str(a);
-                    let tname = self.traits[tid as usize].name.clone();
+                    let tname = self.trait_str(tid, &targs);
                     return Err(Diagnostic::new(span, format!("the trait `{tname}` is not implemented for `{tys}` (required by `{}: {tname}`)", g.name.name)));
                 }
             }
@@ -1688,8 +1938,193 @@ impl Checker {
             };
             return Ok(ps == aps && r == ar && akind <= *bound_kind);
         }
-        let tid = self.resolve_trait_ref(b, module)?;
-        Ok(self.implements(arg, tid))
+        let (tid, targs) = self.resolve_trait_with_args(b, module, env, Some(arg.clone()))?;
+        Ok(self.is_future_frame(arg, tid)
+            || self.find_trait_impl_args(arg, tid, Some(&targs)).is_some())
+    }
+
+    // ------------------------------------------------------ associated types
+
+    /// Resolve associated types (`T.Item`) whose base type is now known.
+    pub fn normalize(&mut self, t: &Ty, span: Span) -> Result<Ty> {
+        if !t.has_assoc() {
+            return Ok(t.clone());
+        }
+        Ok(match t {
+            Ty::Assoc(a) => {
+                let base = self.normalize(&a.base, span)?;
+                let tr = match &a.tr {
+                    Some((id, ts)) => Some((
+                        *id,
+                        ts.iter()
+                            .map(|t| self.normalize(t, span))
+                            .collect::<Result<Vec<_>>>()?,
+                    )),
+                    None => None,
+                };
+                let open = base.has_params()
+                    || tr
+                        .as_ref()
+                        .is_some_and(|(_, ts)| ts.iter().any(|t| t.has_params()));
+                if open {
+                    return Ok(Ty::Assoc(Box::new(crate::types::AssocTy {
+                        base,
+                        tr,
+                        name: a.name.clone(),
+                    })));
+                }
+                self.project(&base, tr, &a.name, span)?
+            }
+            Ty::Ref(t, m) => Ty::Ref(Box::new(self.normalize(t, span)?), *m),
+            Ty::Ptr(t) => Ty::Ptr(Box::new(self.normalize(t, span)?)),
+            Ty::Array(t, n) => Ty::Array(Box::new(self.normalize(t, span)?), *n),
+            Ty::Slice(t) => Ty::Slice(Box::new(self.normalize(t, span)?)),
+            Ty::Tuple(ts) => Ty::Tuple(
+                ts.iter()
+                    .map(|t| self.normalize(t, span))
+                    .collect::<Result<_>>()?,
+            ),
+            Ty::Adt(id, ts) => Ty::Adt(
+                *id,
+                ts.iter()
+                    .map(|t| self.normalize(t, span))
+                    .collect::<Result<_>>()?,
+            ),
+            Ty::FnPtr(ps, r) => Ty::FnPtr(
+                ps.iter()
+                    .map(|t| self.normalize(t, span))
+                    .collect::<Result<_>>()?,
+                Box::new(self.normalize(r, span)?),
+            ),
+            _ => t.clone(),
+        })
+    }
+
+    /// The associated type `name` of the concrete type `base` (in trait
+    /// `tr`, when given).
+    pub fn project(
+        &mut self,
+        base: &Ty,
+        tr: Option<(TraitId, Vec<Ty>)>,
+        name: &str,
+        span: Span,
+    ) -> Result<Ty> {
+        // an `async fn`'s future: its `Output` is the function's return type
+        if let Ty::Frame(id) = base {
+            if name == "Output" {
+                return Ok(self.frames[*id as usize].output.clone());
+            }
+        }
+        let mut found: Vec<(ImplId, Vec<Ty>)> = Vec::new();
+        for iid in 0..self.impls.len() {
+            let Some(tid) = self.impls[iid].trait_id else {
+                continue;
+            };
+            if let Some((want, _)) = &tr {
+                if *want != tid {
+                    continue;
+                }
+            }
+            let declares = self.traits[tid as usize]
+                .decl
+                .assoc_types
+                .iter()
+                .any(|a| a.name.name == name);
+            if !declares {
+                continue;
+            }
+            let targs = tr.as_ref().map(|(_, a)| a.clone());
+            if let Some(args) = self.match_impl_with(iid as ImplId, base, targs.as_deref()) {
+                found.push((iid as ImplId, args));
+            }
+        }
+        let bs = self.ty_str(base);
+        if found.is_empty() {
+            return Err(Diagnostic::new(
+                span,
+                match &tr {
+                    Some((tid, ts)) => format!(
+                        "`{bs}` does not implement `{}`, so it has no associated type `{name}`",
+                        self.trait_str(*tid, ts)
+                    ),
+                    None => format!("`{bs}` has no associated type `{name}`"),
+                },
+            ));
+        }
+        if found.len() > 1 {
+            let tids: Vec<TraitId> = found
+                .iter()
+                .filter_map(|(i, _)| self.impls[*i as usize].trait_id)
+                .collect();
+            if tids.iter().any(|t| *t != tids[0]) {
+                return Err(Diagnostic::new(span, format!("`{bs}.{name}` is ambiguous: more than one trait implemented by `{bs}` has an associated type `{name}`")));
+            }
+            return Err(Diagnostic::new(
+                span,
+                format!(
+                    "`{bs}.{name}` is ambiguous: `{bs}` implements `{}` more than once",
+                    self.traits[tids[0] as usize].name
+                ),
+            ));
+        }
+        let (iid, args) = found.remove(0);
+        self.assoc_depth += 1;
+        if self.assoc_depth > 64 {
+            self.assoc_depth = 0;
+            return Err(Diagnostic::new(
+                span,
+                format!("`{bs}.{name}` refers to itself"),
+            ));
+        }
+        let r = self.impl_assoc(iid, &args, base, name, span);
+        self.assoc_depth -= 1;
+        r
+    }
+
+    /// Associated type `name` from impl `iid` (or its trait's default).
+    fn impl_assoc(
+        &mut self,
+        iid: ImplId,
+        args: &[Ty],
+        base: &Ty,
+        name: &str,
+        span: Span,
+    ) -> Result<Ty> {
+        let im = &self.impls[iid as usize];
+        let tid = im.trait_id.unwrap();
+        let trait_args: Vec<Ty> = im.trait_args.iter().map(|t| t.subst(args)).collect();
+        let module = im.module;
+        let given = im
+            .assoc
+            .iter()
+            .find(|(n, _)| n.name == name)
+            .map(|(_, t)| t.clone());
+        let generics = im.generics.clone();
+        if let Some(te) = given {
+            let mut env = generic_env(&generics, args);
+            env.self_ty = Some(base.clone());
+            env.cur_trait = Some((tid, trait_args));
+            let t = self.resolve_type(&te, module, &env)?;
+            return self.normalize(&t, span);
+        }
+        let tdecl = self.traits[tid as usize].decl.clone();
+        let tmodule = self.traits[tid as usize].module;
+        let Some(d) = tdecl
+            .assoc_types
+            .iter()
+            .find(|a| a.name.name == name)
+            .and_then(|a| a.default.clone())
+        else {
+            return Err(Diagnostic::new(
+                span,
+                format!("missing associated type `{name}`"),
+            ));
+        };
+        let mut env = generic_env(&tdecl.generics.params, &trait_args);
+        env.self_ty = Some(base.clone());
+        env.cur_trait = Some((tid, trait_args));
+        let t = self.resolve_type(&d, tmodule, &env)?;
+        self.normalize(&t, span)
     }
 
     fn fn_bound_str(&mut self, b: &TypeExpr, module: ModId, env: &Env) -> Result<String> {
@@ -1732,10 +2167,23 @@ impl Checker {
                     let im = &self.impls[iid as usize];
                     let n = im.generics.len();
                     let self_ty = im.self_ty.subst(&key.targs[..n.min(key.targs.len())]);
-                    let tr = im
-                        .trait_id
-                        .map(|t| format!(" as {}", self.traits[t as usize].name))
-                        .unwrap_or_default();
+                    let tr = match im.trait_id {
+                        Some(t) => {
+                            let targs: Vec<String> = im
+                                .trait_args
+                                .iter()
+                                .map(|a| {
+                                    self.ty_mangle(&a.subst(&key.targs[..n.min(key.targs.len())]))
+                                })
+                                .collect();
+                            if targs.is_empty() {
+                                format!(" as {}", self.traits[t as usize].name)
+                            } else {
+                                format!(" as {}<{}>", self.traits[t as usize].name, targs.join(","))
+                            }
+                        }
+                        None => String::new(),
+                    };
                     format!("<{}{}>.", self.ty_mangle(&self_ty), tr)
                 }
                 FnOwner::Trait(tid) => {
@@ -1789,7 +2237,13 @@ impl Checker {
                 ));
                 return;
             }
-            match expr::check_fn(self, &key, name) {
+            let checked = match self.prechecked.remove(&key) {
+                Some(Some(r)) => Ok(r),
+                // checked early and failed; the error was reported then
+                Some(None) => continue,
+                None => expr::check_fn(self, &key, name),
+            };
+            match checked {
                 Ok((f, closures)) => {
                     // a function and the closures defined in it
                     for f in std::iter::once(f).chain(closures) {
@@ -1807,15 +2261,326 @@ impl Checker {
                 Err(d) => self.error(d),
             }
         }
+        // an async fn whose future would contain itself has no finite size
+        let frame_locals: HashMap<u32, Vec<Ty>> = self
+            .out_funcs
+            .iter()
+            .filter_map(|f| {
+                f.async_frame
+                    .map(|(id, _)| (id, f.locals.iter().map(|l| l.ty.clone()).collect()))
+            })
+            .collect();
+        for (&id, _) in frame_locals.iter() {
+            let mut seen = Vec::new();
+            if self.frame_reaches(&Ty::Frame(id), id, &frame_locals, &mut seen, true) {
+                let fid = self.frames[id as usize].key.fid;
+                let d = &self.fns[fid as usize].decl;
+                let (n, sp) = (d.name.name.clone(), d.name.span);
+                self.error(Diagnostic::new(sp, format!("recursive `async fn` `{n}`: its future would contain itself and have no finite size; make the recursive call in a plain function, or restructure it as a loop")));
+                return;
+            }
+        }
         // Borrow checking runs once every function is known, so calls can use
         // what each callee's result borrows from.
         self.summaries = crate::borrowck::summaries(self, &self.out_funcs);
+        // a future's `poll(&mut frame, cx)` result holds what the frame holds
+        for f in &self.frames {
+            self.summaries
+                .insert(f.name.clone(), [(0, true)].into_iter().collect());
+        }
+        // a frame keeps the `cx` of the current poll only until it returns
+        for f in &self.frames {
+            self.storing.remove(&f.name);
+        }
         self.storing = crate::borrowck::storing_fns(&self.out_funcs);
         for i in 0..self.out_funcs.len() {
             if let Err(ds) = crate::borrowck::check(self, &self.out_funcs[i]) {
                 self.diags.extend(ds);
             }
         }
+    }
+
+    /// The concrete return type of an `-> impl Trait` instance: its body is
+    /// checked now (once) to find it.
+    pub fn opaque_ty(&mut self, key: &FnKey, name: &str, span: Span) -> Result<Ty> {
+        if let Some(t) = self.opaque.get(key) {
+            return Ok(t.clone());
+        }
+        if !self.opaque_busy.insert(key.clone()) {
+            return Err(Diagnostic::new(
+                span,
+                "a function returning `impl Trait` cannot call itself before its type is known",
+            ));
+        }
+        let r = expr::check_fn(self, key, name.to_string());
+        self.opaque_busy.remove(key);
+        match r {
+            Ok((f, closures)) => {
+                let t = f.ret.clone();
+                self.opaque.insert(key.clone(), t.clone());
+                self.prechecked.insert(key.clone(), Some((f, closures)));
+                Ok(t)
+            }
+            Err(d) => {
+                self.prechecked.insert(key.clone(), None);
+                Err(d)
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- async
+
+    /// The frame type of `async fn` instance `key`.
+    pub fn frame_for(&mut self, key: &FnKey, name: &str, output: Ty, params: Vec<Ty>) -> u32 {
+        if let Some(&id) = self.frame_index.get(key) {
+            return id;
+        }
+        let id = self.frames.len() as u32;
+        self.frames.push(FrameDef {
+            key: key.clone(),
+            name: name.to_string(),
+            output,
+            params,
+        });
+        self.frame_index.insert(key.clone(), id);
+        id
+    }
+
+    /// Does `t` contain frame `target` by value (through other frames' locals)?
+    fn frame_reaches(
+        &self,
+        t: &Ty,
+        target: u32,
+        locals: &HashMap<u32, Vec<Ty>>,
+        seen: &mut Vec<Ty>,
+        root: bool,
+    ) -> bool {
+        if *t == Ty::Frame(target) && !root {
+            return true;
+        }
+        if seen.contains(t) {
+            return false;
+        }
+        match t {
+            Ty::Frame(id) => {
+                if *id == target && !root {
+                    return true;
+                }
+                seen.push(t.clone());
+                let r = locals
+                    .get(id)
+                    .map(|ls| ls.clone())
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|l| self.frame_reaches(l, target, locals, seen, false));
+                r
+            }
+            Ty::Array(e, _) => self.frame_reaches(e, target, locals, seen, false),
+            Ty::Tuple(ts) => ts
+                .iter()
+                .any(|x| self.frame_reaches(x, target, locals, seen, false)),
+            Ty::Closure(id) => self.closures[*id as usize]
+                .fields
+                .clone()
+                .iter()
+                .any(|x| self.frame_reaches(x, target, locals, seen, false)),
+            Ty::Adt(id, args) => {
+                seen.push(t.clone());
+                let a = &self.adts[*id as usize];
+                let fs: Vec<Ty> = a
+                    .fields
+                    .iter()
+                    .chain(a.variants.iter().flatten())
+                    .map(|f| f.subst(args))
+                    .collect();
+                fs.iter()
+                    .any(|x| self.frame_reaches(x, target, locals, seen, false))
+            }
+            _ => false,
+        }
+    }
+
+    /// Can a value of type `t` contain an `adt` (directly, in fields, behind
+    /// references or pointers)?
+    pub fn mentions_adt(&self, t: &Ty, adt: AdtId) -> bool {
+        let mut seen = Vec::new();
+        self.mentions_adt_in(t, adt, &mut seen)
+    }
+
+    fn mentions_adt_in(&self, t: &Ty, adt: AdtId, seen: &mut Vec<Ty>) -> bool {
+        if seen.contains(t) {
+            return false;
+        }
+        match t {
+            Ty::Adt(id, args) => {
+                if *id == adt {
+                    return true;
+                }
+                seen.push(t.clone());
+                let a = &self.adts[*id as usize];
+                let fs: Vec<Ty> = a
+                    .fields
+                    .iter()
+                    .chain(a.variants.iter().flatten())
+                    .map(|f| f.subst(args))
+                    .collect();
+                fs.iter().any(|f| self.mentions_adt_in(f, adt, seen))
+            }
+            Ty::Ref(e, _) | Ty::Ptr(e) | Ty::Array(e, _) | Ty::Slice(e) => {
+                self.mentions_adt_in(e, adt, seen)
+            }
+            Ty::Tuple(ts) => ts.iter().any(|x| self.mentions_adt_in(x, adt, seen)),
+            Ty::Closure(id) => self.closures[*id as usize]
+                .fields
+                .iter()
+                .any(|x| self.mentions_adt_in(x, adt, seen)),
+            Ty::Frame(id) => self.frames[*id as usize]
+                .params
+                .iter()
+                .any(|x| self.mentions_adt_in(x, adt, seen)),
+            // a trait object could be anything
+            Ty::Dyn(_) => true,
+            _ => false,
+        }
+    }
+
+    pub fn prelude_trait(&self, name: &str) -> Option<TraitId> {
+        let p = self.prelude?;
+        match self.modules[p as usize].scope.get(name).map(|b| b.def) {
+            Some(Def::Trait(t)) => Some(t),
+            _ => None,
+        }
+    }
+
+    pub fn prelude_adt(&self, name: &str) -> Option<AdtId> {
+        let p = self.prelude?;
+        match self.modules[p as usize].scope.get(name).map(|b| b.def) {
+            Some(Def::Adt(t)) => Some(t),
+            _ => None,
+        }
+    }
+
+    fn is_future_frame(&self, t: &Ty, tid: TraitId) -> bool {
+        matches!(t, Ty::Frame(_)) && self.prelude_trait("Future") == Some(tid)
+    }
+
+    // ------------------------------------------------------- trait objects
+
+    /// The methods of `tid` and its supertraits, in vtable order.
+    pub fn dyn_methods(&self, tid: TraitId) -> Vec<(TraitId, ast::FnDecl)> {
+        let mut out: Vec<(TraitId, ast::FnDecl)> = Vec::new();
+        let mut stack = vec![tid];
+        let mut seen = Vec::new();
+        while let Some(t) = stack.pop() {
+            if seen.contains(&t) {
+                continue;
+            }
+            seen.push(t);
+            for m in &self.traits[t as usize].decl.methods {
+                if !out.iter().any(|(_, o)| o.name.name == m.name.name) {
+                    out.push((t, m.clone()));
+                }
+            }
+            stack.extend(self.traits[t as usize].supertraits.iter().rev());
+        }
+        out
+    }
+
+    /// `dyn T` needs every method to be callable through a pointer.
+    fn check_object_safe(&self, tid: TraitId, span: Span) -> Result<()> {
+        let tr = &self.traits[tid as usize];
+        let why = |m: &str| {
+            Err(Diagnostic::new(
+                span,
+                format!("`{}` cannot be used as `dyn {}`: {m}", tr.name, tr.name),
+            ))
+        };
+        if !tr.decl.generics.params.is_empty() {
+            return why("it has generic parameters");
+        }
+        if !tr.decl.assoc_types.is_empty() {
+            return why("it has associated types");
+        }
+        fn mentions_self(t: &TypeExpr) -> bool {
+            match &t.kind {
+                TypeKind::SelfType => true,
+                TypeKind::Path(p, args) => p[0].name == "Self" || args.iter().any(mentions_self),
+                TypeKind::Ref(_, i)
+                | TypeKind::Ptr(i)
+                | TypeKind::Slice(i)
+                | TypeKind::Array(i, _) => mentions_self(i),
+                TypeKind::Tuple(ts) => ts.iter().any(mentions_self),
+                TypeKind::FnPtr(ps, r) | TypeKind::FnTrait(_, ps, r) => {
+                    ps.iter().any(mentions_self) || r.as_deref().is_some_and(mentions_self)
+                }
+                _ => false,
+            }
+        }
+        for (_, m) in self.dyn_methods(tid) {
+            let n = &m.name.name;
+            match m.self_param {
+                Some((SelfKind::Ref | SelfKind::RefMut, _, _)) => {}
+                Some(_) => return why(&format!("method `{n}` takes `self` by value")),
+                None => return why(&format!("`{n}` is a static function (it takes no `self`)")),
+            }
+            if !m.generics.params.is_empty() {
+                return why(&format!("method `{n}` is generic"));
+            }
+            if m.params.iter().any(|p| mentions_self(&p.ty))
+                || m.ret.as_ref().is_some_and(mentions_self)
+            {
+                return why(&format!("method `{n}` mentions `Self`"));
+            }
+        }
+        Ok(())
+    }
+
+    /// The vtable for concrete type `t` as `dyn tid`; returns its symbol.
+    pub fn vtable(&mut self, t: &Ty, tid: TraitId, span: Span) -> Result<String> {
+        let key = (t.clone(), tid);
+        if let Some(i) = self.vtable_index.get(&key) {
+            return Ok(self.vtables[*i].name.clone());
+        }
+        let methods = self.dyn_methods(tid);
+        let mut names = Vec::new();
+        for (mt, m) in &methods {
+            let Some((iid, args)) = self.find_trait_impl(t, *mt) else {
+                return Err(Diagnostic::new(
+                    span,
+                    format!(
+                        "`{}` does not implement `{}`",
+                        self.ty_str(t),
+                        self.traits[*mt as usize].name
+                    ),
+                ));
+            };
+            let key = match self.impls[iid as usize].methods.get(&m.name.name) {
+                Some(&fid) => FnKey {
+                    fid,
+                    targs: args,
+                    self_ty: None,
+                },
+                None => FnKey {
+                    fid: self.traits[*mt as usize].defaults[&m.name.name],
+                    targs: Vec::new(),
+                    self_ty: Some(t.clone()),
+                },
+            };
+            names.push(self.instance(key));
+        }
+        self.ensure_drop(t);
+        let name = format!(
+            "vtable.<{} as {}>",
+            self.ty_mangle(t),
+            self.traits[tid as usize].name
+        );
+        self.vtable_index.insert(key, self.vtables.len());
+        self.vtables.push(Vtable {
+            name: name.clone(),
+            ty: t.clone(),
+            methods: names,
+        });
+        Ok(name)
     }
 
     pub fn declare_extern(&mut self, fid: FnId) -> Result<String> {
@@ -1996,6 +2761,7 @@ pub fn xir_children(e: &xir::Expr, f: &mut dyn FnMut(&xir::Expr)) {
         | K::Cast(a, _)
         | K::ArrayToSlice(a)
         | K::ArrayRepeat(a, _)
+        | K::Suspend(_, a)
         | K::Loop(a, _) => f(a),
         K::Binary(_, a, b) => {
             f(a);

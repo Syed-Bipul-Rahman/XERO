@@ -64,6 +64,97 @@ jobs:
           XERO_TEST_RUNNER="qemu-${{ matrix.target }}" \
           cargo test --release --test harness run_programs
 
+  builtin-llvm:
+    # xeroc with LLVM and lld linked in (`--features llvm`): every test must
+    # pass with no clang installed.
+    name: built-in LLVM (ubuntu-24.04)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install LLVM libraries and qemu
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm-18-dev liblld-18-dev libpolly-18-dev qemu-user
+          echo "XERO_LLVM_CONFIG=/usr/lib/llvm-18/bin/llvm-config" >> "$GITHUB_ENV"
+      - name: Build
+        run: cargo build --release --features llvm
+      - name: Hide clang
+        run: |
+          mkdir -p "$RUNNER_TEMP/noclang"
+          for c in clang $(seq -f 'clang-%g' 14 24); do printf '#!/bin/sh\nexit 127\n' > "$RUNNER_TEMP/noclang/$c"; chmod +x "$RUNNER_TEMP/noclang/$c"; done
+          echo "$RUNNER_TEMP/noclang" >> "$GITHUB_PATH"
+      - name: Test without clang
+        run: cargo test --release --features llvm
+      - name: Test ARM64 and RISC-V without clang
+        run: |
+          for t in aarch64 riscv64; do
+            XERO_TEST_FLAGS="--target $t-linux" XERO_TEST_RUNNER="qemu-$t" cargo test --release --features llvm --test harness run_programs
+          done
+
+  static-llvm-linux:
+    # The release build for Linux: a static musl binary with LLVM inside,
+    # built on Alpine (whose LLVM and lld are musl static libraries).
+    name: static built-in LLVM (alpine, ${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            os: ubuntu-24.04
+          - arch: aarch64
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and test in Alpine
+        run: docker run --rm -v "$PWD:/src" -w /src alpine:3.21 sh .github/scripts/build-alpine.sh test
+
+  prebuilt-llvm:
+    # macOS and Windows release builds: LLVM's official prebuilt libraries.
+    name: built-in LLVM (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            llvm: clang+llvm-18.1.8-arm64-apple-macos11
+          - os: windows-2022
+            llvm: clang+llvm-18.1.8-x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download LLVM
+        shell: bash
+        run: |
+          curl -fsSL "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/${{ matrix.llvm }}.tar.xz" -o llvm.tar.xz
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            7z x -y llvm.tar.xz > /dev/null && 7z x -y llvm.tar -o"$RUNNER_TEMP" > /dev/null && mv "$RUNNER_TEMP/${{ matrix.llvm }}" "$RUNNER_TEMP/llvm" && rm llvm.tar
+          else
+            mkdir -p "$RUNNER_TEMP/llvm" && tar -xJf llvm.tar.xz -C "$RUNNER_TEMP/llvm" --strip-components=1
+          fi
+          rm llvm.tar.xz
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            # link zstd into xeroc (the prebuilt LLVM uses it; macOS does not ship it)
+            echo "XERO_LLVM_STATIC_SYSLIBS=zstd" >> "$GITHUB_ENV"
+            echo "RUSTFLAGS=-L $(brew --prefix zstd)/lib" >> "$GITHUB_ENV"
+          fi
+          ls "$RUNNER_TEMP/llvm/lib" | grep -iE "^(lib)?lld" | tr '\n' ' ' > lld.txt || true
+          echo "::warning title=llvm package::lld: $(cat lld.txt) syslibs: $("$RUNNER_TEMP/llvm/bin/llvm-config" --system-libs --link-static 2>&1 | tr '\n' ' ')"
+          echo "XERO_LLVM_CONFIG=$RUNNER_TEMP/llvm/bin/llvm-config" >> "$GITHUB_ENV"
+      - name: Build
+        shell: bash
+        run: |
+          cargo build --release --features llvm > build.log 2>&1 || { echo "::error title=build::$(grep -E "error|unresolved|undefined" build.log | sort -u | head -30 | tr '\n' '|')"; exit 1; }
+          ls -l target/release/
+      - name: Test
+        shell: bash
+        run: |
+          # the runner's own LLVM must not be used
+          export PATH="$(echo "$PATH" | tr ':' '\n' | grep -viE "llvm" | paste -sd: -)"
+          ./target/release/xeroc run examples/hello.xr > hello.log 2>&1 || { echo "::error title=hello::$(tail -30 hello.log | tr '\n' '|')"; exit 1; }
+          cargo test --release --features llvm > test.log 2>&1 || { echo "::error title=test::$(tail -40 test.log | tr '\n' '|')"; exit 1; }
+          tail -5 test.log
+
   installers:
     # Builds a release-style archive and installs it with the real install scripts.
     name: installer (${{ matrix.os }})
@@ -122,12 +213,13 @@ jobs:
     # `main` must pass the tests on all platforms and the installer checks.
     name: CI passed
     if: always()
-    needs: [test, cross, installers]
+    needs: [test, cross, installers, builtin-llvm, static-llvm-linux, prebuilt-llvm]
     runs-on: ubuntu-latest
     steps:
       - name: All jobs succeeded
         run: |
-          if [ "${{ needs.test.result }}" != "success" ] || [ "${{ needs.cross.result }}" != "success" ] || [ "${{ needs.installers.result }}" != "success" ]; then
-            echo "test: ${{ needs.test.result }}, cross: ${{ needs.cross.result }}, installers: ${{ needs.installers.result }}"
+          r="${{ needs.test.result }} ${{ needs.cross.result }} ${{ needs.installers.result }} ${{ needs.builtin-llvm.result }} ${{ needs.static-llvm-linux.result }} ${{ needs.prebuilt-llvm.result }}"
+          if [ "$r" != "success success success success success success" ]; then
+            echo "test, cross, installers, built-in LLVM (ubuntu, alpine, prebuilt): $r"
             exit 1
           fi

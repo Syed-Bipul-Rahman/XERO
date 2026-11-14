@@ -1,0 +1,8 @@
+fn main() {
+    let t = (1, 7)
+    match t {
+        (0, x) | (y, 0) => println(1)
+        _ => {}
+    }
+}
+// error: every alternative of a `|` pattern must bind the same names: the first binds `x`, this one binds `y`

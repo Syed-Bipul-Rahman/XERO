@@ -73,6 +73,16 @@ pub struct Generics {
 pub struct GenericParam {
     pub name: Ident,
     pub bounds: Vec<TypeExpr>,
+    /// `Rhs = Self` (generic traits only).
+    pub default: Option<TypeExpr>,
+}
+
+/// `type Item` / `type Output = Self` in a trait.
+#[derive(Clone, Debug)]
+pub struct AssocTypeDecl {
+    pub name: Ident,
+    pub bounds: Vec<TypeExpr>,
+    pub default: Option<TypeExpr>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,6 +110,8 @@ pub struct FnDecl {
     pub body: Option<Block>,
     pub is_unsafe: bool,
     pub is_export: bool,
+    /// `async fn`: calling it returns a future.
+    pub is_async: bool,
     pub span: Span,
 }
 
@@ -139,6 +151,7 @@ pub struct TraitDecl {
     pub generics: Generics,
     pub supertraits: Vec<TypeExpr>,
     pub methods: Vec<FnDecl>,
+    pub assoc_types: Vec<AssocTypeDecl>,
 }
 
 #[derive(Clone, Debug)]
@@ -147,6 +160,8 @@ pub struct ImplDecl {
     pub trait_ref: Option<TypeExpr>,
     pub self_ty: TypeExpr,
     pub methods: Vec<(Vis, FnDecl)>,
+    /// `type Item = T`
+    pub assoc_types: Vec<(Ident, TypeExpr)>,
     pub drop: Option<Block>,
     pub span: Span,
 }
@@ -167,6 +182,11 @@ pub enum TypeKind {
     Array(Box<TypeExpr>, Box<Expr>),
     Slice(Box<TypeExpr>),
     Tuple(Vec<TypeExpr>),
+    /// `impl Fn(i32) -> i32`, `impl Iterator`: a return type known only by
+    /// its bounds.
+    Impl(Vec<TypeExpr>),
+    /// `dyn Trait`: a trait object.
+    Dyn(Box<TypeExpr>),
     Never,
     Infer,
     /// `fn(i32, i32) -> i32`: a plain function pointer.
@@ -309,6 +329,8 @@ pub enum ExprKind {
     Closure(Box<ClosureExpr>),
     /// `spawn { ... }` / `spawn move { ... }`: start a thread.
     Spawn(bool, Block),
+    /// `future.await`
+    Await(Box<Expr>),
 }
 
 #[derive(Clone, Debug)]
@@ -350,5 +372,7 @@ pub enum PatKind {
     Tuple(Vec<Pattern>),
     /// `Some(x)`, `Shape.Circle(r)`, `Color.Red`
     Variant(Vec<Ident>, Option<Vec<Pattern>>),
+    /// `Point { x, y: py, .. }`: fields by name; `true` if it ends in `..`.
+    Struct(Vec<Ident>, Vec<(Ident, Pattern)>, bool),
     Or(Vec<Pattern>),
 }

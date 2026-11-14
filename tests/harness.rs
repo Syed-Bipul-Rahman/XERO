@@ -87,9 +87,17 @@ fn run_programs() {
             ));
             continue;
         }
-        let run = match std::env::var("XERO_TEST_RUNNER") {
-            Ok(r) if !r.is_empty() => Command::new(r).arg(&exe).output().unwrap(),
-            _ => Command::new(&exe).output().unwrap(),
+        let mut cmd = match std::env::var("XERO_TEST_RUNNER") {
+            Ok(r) if !r.is_empty() => {
+                let mut c = Command::new(r);
+                c.arg(&exe);
+                c
+            }
+            _ => Command::new(&exe),
+        };
+        let Some(run) = run_with_timeout(&mut cmd, 120) else {
+            failures.push(format!("{}: timed out after 120 s", f.display()));
+            continue;
         };
         // the Windows C runtime writes text-mode stdout with CRLF line endings
         let got = String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n");
@@ -106,6 +114,44 @@ fn run_programs() {
             failures.len(),
             failures.join("\n")
         );
+    }
+}
+
+/// Run `cmd`, killing it after `secs` seconds (then `None`).
+fn run_with_timeout(cmd: &mut Command, secs: u64) -> Option<std::process::Output> {
+    use std::process::Stdio;
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut out = child.stdout.take().unwrap();
+    let mut err = child.stderr.take().unwrap();
+    let o = std::thread::spawn(move || {
+        let mut v = Vec::new();
+        std::io::Read::read_to_end(&mut out, &mut v).ok();
+        v
+    });
+    let e = std::thread::spawn(move || {
+        let mut v = Vec::new();
+        std::io::Read::read_to_end(&mut err, &mut v).ok();
+        v
+    });
+    let start = std::time::Instant::now();
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            return Some(std::process::Output {
+                status,
+                stdout: o.join().unwrap(),
+                stderr: e.join().unwrap(),
+            });
+        }
+        if start.elapsed().as_secs() >= secs {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
     }
 }
 

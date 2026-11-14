@@ -1,0 +1,12 @@
+import std.task
+async fn show(r: &i32) -> i32 { *r }
+fn main() {
+    let y = 0
+    let mut f = show(&y)
+    {
+        let x = 1
+        f = show(&x)
+    }
+    println(task.block_on(f))
+}
+// error: `x` does not live long enough: it is still borrowed by `f` after its scope ends

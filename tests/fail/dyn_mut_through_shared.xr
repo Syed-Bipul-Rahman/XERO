@@ -1,0 +1,7 @@
+trait T { fn bump(&mut self) }
+struct A { v: i32 }
+impl T for A { fn bump(&mut self) { self.v += 1 } }
+fn main() { let a = A { v: 1 }
+    let d: &dyn T = &a
+    d.bump() }
+// error: cannot mutate through a `&` reference; use `&mut`

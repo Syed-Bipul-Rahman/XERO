@@ -105,6 +105,23 @@ pub enum Ty {
     Closure(u32),
     /// A plain function pointer: `fn(A, B) -> R`.
     FnPtr(Vec<Ty>, Box<Ty>),
+    /// An associated type of a type that is not known yet (`T.Item`,
+    /// `Self.Output`), inside a signature template. It is resolved once the
+    /// base type is concrete.
+    Assoc(Box<AssocTy>),
+    /// A trait object (`dyn Shape`): unsized; used behind `&`, `&mut`, `Box`.
+    Dyn(u32),
+    /// The future returned by calling an `async fn` instance: its state
+    /// machine (the state, the function's locals and their drop flags).
+    Frame(u32),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct AssocTy {
+    pub base: Ty,
+    /// The trait (and its arguments) the name belongs to, when known.
+    pub tr: Option<(u32, Vec<Ty>)>,
+    pub name: String,
 }
 
 impl Ty {
@@ -133,7 +150,7 @@ impl Ty {
     }
 
     pub fn is_unsized(&self) -> bool {
-        matches!(self, Ty::Str | Ty::Slice(_))
+        matches!(self, Ty::Str | Ty::Slice(_) | Ty::Dyn(_))
     }
 
     /// `&str` / `&[T]` are fat pointers (pointer + length).
@@ -151,6 +168,23 @@ impl Ty {
             Ty::Ref(t, _) | Ty::Ptr(t) | Ty::Array(t, _) | Ty::Slice(t) => t.has_params(),
             Ty::Tuple(ts) | Ty::Adt(_, ts) => ts.iter().any(|t| t.has_params()),
             Ty::FnPtr(ps, r) => ps.iter().any(|t| t.has_params()) || r.has_params(),
+            Ty::Assoc(a) => {
+                a.base.has_params()
+                    || a.tr
+                        .as_ref()
+                        .is_some_and(|(_, ts)| ts.iter().any(|t| t.has_params()))
+            }
+            _ => false,
+        }
+    }
+
+    /// Does this type still contain an unresolved associated type?
+    pub fn has_assoc(&self) -> bool {
+        match self {
+            Ty::Assoc(_) => true,
+            Ty::Ref(t, _) | Ty::Ptr(t) | Ty::Array(t, _) | Ty::Slice(t) => t.has_assoc(),
+            Ty::Tuple(ts) | Ty::Adt(_, ts) => ts.iter().any(|t| t.has_assoc()),
+            Ty::FnPtr(ps, r) => ps.iter().any(|t| t.has_assoc()) || r.has_assoc(),
             _ => false,
         }
     }
@@ -172,6 +206,14 @@ impl Ty {
                 ps.iter().map(|t| t.subst(args)).collect(),
                 Box::new(r.subst(args)),
             ),
+            Ty::Assoc(a) => Ty::Assoc(Box::new(AssocTy {
+                base: a.base.subst(args),
+                tr: a
+                    .tr
+                    .as_ref()
+                    .map(|(id, ts)| (*id, ts.iter().map(|t| t.subst(args)).collect())),
+                name: a.name.clone(),
+            })),
             _ => self.clone(),
         }
     }
@@ -218,6 +260,8 @@ pub fn match_template(pat: &Ty, ty: &Ty, out: &mut Vec<Option<Ty>>) -> bool {
                 && a.iter().zip(b).all(|(x, y)| match_template(x, y, out))
                 && match_template(r1, r2, out)
         }
+        // decided once the base type is known (the caller re-checks)
+        (Ty::Assoc(_), _) => true,
         _ => pat == ty,
     }
 }
@@ -227,6 +271,7 @@ pub struct TyFmt<'a> {
     pub ty: &'a Ty,
     pub adt_name: &'a dyn Fn(AdtId) -> String,
     pub param_name: &'a dyn Fn(u32) -> String,
+    pub trait_name: &'a dyn Fn(u32) -> String,
 }
 
 impl fmt::Display for TyFmt<'_> {
@@ -236,6 +281,7 @@ impl fmt::Display for TyFmt<'_> {
                 ty: t,
                 adt_name: self.adt_name,
                 param_name: self.param_name,
+                trait_name: self.trait_name,
             }
             .to_string()
         };
@@ -279,6 +325,9 @@ impl fmt::Display for TyFmt<'_> {
                 Ok(())
             }
             Ty::Param(i) => write!(f, "{}", (self.param_name)(*i)),
+            Ty::Assoc(a) => write!(f, "{}.{}", sub(&a.base), a.name),
+            Ty::Dyn(t) => write!(f, "dyn {}", (self.trait_name)(*t)),
+            Ty::Frame(id) => write!(f, "future#{id}"),
             Ty::Closure(id) => write!(f, "closure#{id}"),
             Ty::FnPtr(ps, r) => {
                 write!(f, "fn(")?;

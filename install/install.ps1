@@ -131,8 +131,10 @@ function Find-Clang {
 
 function Install-Toolchain {
     # 1. clang: the LLVM back end that turns Xero's output into machine code
+    #    (not needed when xeroc has LLVM built in)
+    $builtin = (& (Join-Path $bin 'xeroc.exe') --version) -match 'LLVM built in'
     $clang = Find-Clang
-    if (-not $clang) {
+    if (-not $clang -and -not $builtin) {
         if (Get-Command winget -ErrorAction SilentlyContinue) {
             Write-Ok 'installing LLVM/clang with winget (Xero uses it for code generation)'
             winget install --id LLVM.LLVM -e --silent --accept-package-agreements --accept-source-agreements | Out-Host
@@ -146,6 +148,8 @@ function Install-Toolchain {
             $env:XERO_CLANG = $clang
         }
         Write-Ok "found clang: $clang"
+    } elseif ($builtin) {
+        Write-Ok 'xeroc has LLVM built in; no clang needed'
     } else {
         Write-Warn 'clang not found. Install LLVM: winget install LLVM.LLVM  (or https://github.com/llvm/llvm-project/releases)'
     }

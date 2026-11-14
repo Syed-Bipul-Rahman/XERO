@@ -138,8 +138,9 @@ curl -fsSL https://download.xerolang.org/install.sh | sudo bash
 irm https://download.xerolang.org/install.ps1 | iex
 ```
 
-The installer also sets up `clang` (LLVM 15+), which is Xero's code-generation
-back end. See [INSTALL.md](INSTALL.md) for options and manual installation.
+`xeroc` has LLVM built in, so nothing else is needed on Linux. On macOS it
+links with the Xcode Command Line Tools, and on Windows with the Visual Studio
+C++ Build Tools; the installers check for them. See [INSTALL.md](INSTALL.md) for options and manual installation.
 To build from source:
 
 ```console
@@ -180,6 +181,7 @@ xeroc targets                       list supported targets
 | [`examples/ownership.xr`](examples/ownership.xr) | moves, borrows, RAII |
 | [`examples/concurrency.xr`](examples/concurrency.xr) | threads, `Mutex`, `Channel`, no data races |
 | [`examples/wc.xr`](examples/wc.xr) | files and command-line arguments: a small `wc` |
+| [`examples/whats_new_0_5.xr`](examples/whats_new_0_5.xr) | generic traits, indexing, iterators, `impl Trait`, `dyn Trait`, `async fn` |
 | [`examples/sieve.xr`](examples/sieve.xr) | CPU-bound code (within about 10% of C at `-O3`) |
 | [`examples/wasm_math.xr`](examples/wasm_math.xr) | a 447-byte WebAssembly module |
 | [`examples/baremetal.xr`](examples/baremetal.xr) | no OS: MMIO with `volatile_load`/`volatile_store`, inline asm |
@@ -197,16 +199,19 @@ on `static mut`, non-exhaustive matches and more.
 
 ## Status
 
-Xero 0.4 is a working compiler. Language features:
+Xero 0.5 is a working compiler. Language features:
 
 * **Types:** structs and enums (which can hold references), enums with data,
   closures (`Fn`, `FnMut`, `FnOnce`), and function pointers.
 * **Traits and generics:** traits with default methods and supertraits,
-  operator traits, and generics with bounds.
+  generic traits and associated types, operator and indexing traits,
+  iterators, `impl Trait` returns, trait objects (`dyn Trait`), and generics
+  with bounds.
 * **Control flow:** pattern matching with exhaustiveness checking, slicing,
   and errors as values.
 * **Concurrency:** threads with `spawn`, where data races are compile errors,
-  plus `Mutex`, `Channel` and atomics.
+  plus `Mutex`, `Channel` and atomics; `async fn` and `.await` compiled to
+  state machines.
 
 Compiler and runtime support:
 
@@ -218,8 +223,7 @@ Compiler and runtime support:
 * **Low level:** unsafe code, raw pointers, C FFI, inline assembly, and
   cross-compilation.
 
-`async` and `await` are reserved; see the [roadmap](docs/ROADMAP.md) and the
-[changelog](CHANGELOG.md).
+See the [roadmap](docs/ROADMAP.md) and the [changelog](CHANGELOG.md).
 
 ```console
 $ cargo test       # builds and runs every test program

@@ -113,10 +113,23 @@ The borrow checker runs per function on XIR, in two passes:
 ## Driver (`driver.rs`)
 
 The driver loads the root file and follows imports. The standard library is
-embedded in the `xeroc` binary. The driver then runs the front end, writes
-LLVM IR, and invokes `clang -x ir --target=<triple> -O<n>` to produce assembly,
-an object file, an executable or a wasm module. Set `XERO_CLANG` to choose a
-specific clang binary.
+embedded in the `xeroc` binary. The driver then runs the front end and
+produces LLVM IR, which becomes assembly, an object file, an executable or a
+wasm module in one of two ways:
+
+* **LLVM built in** (`cargo build --features llvm`, `src/llvm/`): the IR is
+  parsed, verified, optimized with the same `default<On>` pipelines clang
+  uses, and compiled through LLVM's C API, in-process. lld is linked in too,
+  through a small C++ shim (`lld_shim.cpp`), so Linux executables without
+  libc (`ld.lld -static`) and wasm modules (`wasm-ld`) need no other tool.
+  Programs that use the C library are linked with the system's toolchain
+  (`cc`, or Visual Studio's `link.exe`, found through the registry).
+  `build.rs` links LLVM's static libraries found with `llvm-config`
+  (`XERO_LLVM_CONFIG`); the release builds use Alpine's musl LLVM (with lld
+  built from source) on Linux and LLVM's prebuilt packages on macOS and
+  Windows.
+* **clang** (the default build, or whenever `XERO_CLANG` is set):
+  `clang -x ir --target=<triple> -O<n>` does the same work.
 
 The driver also chooses the OS layer, `std.sys`, for the target. It is the
 only part of the standard library that knows about the operating system:
@@ -143,6 +156,27 @@ the target isn't the host. The `syscall` intrinsic becomes an inline `syscall`,
 `svc #0` or `ecall` instruction. The runtime's `memcpy`, `memmove`, `memset`,
 `memcmp` and `bcmp` get LLVM's `no-builtins` attribute, so their loops are
 never turned back into calls to themselves.
+
+## Async functions
+
+An `async fn` instance is checked like any function, with its result wrapped
+in `Poll.Ready`, and `.await` lowered to a loop that polls the inner future
+(stored in a local) and, on `Pending`, executes `Suspend(k)`: save state `k`
+and return `Pending`. Its type `Ty::Frame(id)` is a struct of the state, every
+local and their drop flags; calling the function builds one (`MakeFrame`)
+holding the arguments. Codegen turns the function into the frame's `poll`:
+locals are fields of the frame, and the entry dispatches on the saved state to
+the code after each suspension. Since registers do not survive a suspension,
+operands evaluated before one are first stored in locals (`spill_suspends`).
+Drop glue for a frame drops the locals whose flags are set, which handles a
+future dropped before it finishes.
+
+## Trait objects
+
+`&dyn Trait` is a fat pointer: the data pointer and a vtable address. A vtable
+(one per concrete type and trait) holds the type's drop glue and its methods,
+in the order of the trait's (and supertraits') declarations. Method calls load
+the function pointer from the vtable; `Box<dyn Trait>` drops through it.
 
 ## Testing
 

@@ -1,0 +1,5 @@
+trait T { fn f(&self) -> i32
+    fn g(self) -> i32 }
+fn main() { }
+fn use_it(x: &dyn T) { }
+// error: `T` cannot be used as `dyn T`: method `g` takes `self` by value

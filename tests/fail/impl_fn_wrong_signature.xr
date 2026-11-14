@@ -1,0 +1,5 @@
+fn bad() -> impl Fn(i32) -> i32 {
+    |x: i32, y: i32| x + y
+}
+fn main() { }
+// error: the returned value has type `closure#0`, which does not satisfy this bound

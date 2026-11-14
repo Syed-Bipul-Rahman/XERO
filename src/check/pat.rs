@@ -1,8 +1,8 @@
 //! Pattern lowering with default binding modes.
 
 use super::expr::{FnCx, PathRes};
-use super::Def;
-use crate::ast::{self, ExprKind as E, PatKind, UnOp};
+use super::{AdtKind, Def};
+use crate::ast::{self, ExprKind as E, PatKind, UnOp, Vis};
 use crate::diag::Result;
 use crate::types::{AdtId, Ty};
 use crate::xir::{BindMode, LocalId, Pat};
@@ -55,6 +55,18 @@ impl FnCx<'_> {
                     BindMode::Value => ty.clone(),
                     BindMode::Ref(m) => Ty::reference(ty.clone(), m),
                 };
+                // a later alternative of `a | b` reuses the first one's variable
+                if let Some(reuse) = &self.or_reuse {
+                    if let Some((_, lid)) = reuse.iter().find(|(n, _)| *n == id.name) {
+                        let lid = *lid;
+                        let have = self.locals[lid as usize].ty.clone();
+                        if have != bty {
+                            return self.err(id.span, format!("`{}` has type `{}` here but `{}` in the first alternative of the `|` pattern", id.name, self.ts(&bty), self.ts(&have)));
+                        }
+                        binds.push((id.name.clone(), lid));
+                        return Ok(Pat::Bind(lid, mode));
+                    }
+                }
                 let lid = self.new_local(&id.name, bty, *mutable, id.span, false);
                 binds.push((id.name.clone(), lid));
                 Ok(Pat::Bind(lid, mode))
@@ -118,16 +130,120 @@ impl FnCx<'_> {
                 let (aid, idx) = self.resolve_variant_path(path, ty, p.span)?;
                 self.variant_pat(aid, idx, args.as_deref(), ty, mode, p.span, binds)
             }
-            PatKind::Or(alts) => {
-                let mut out = Vec::new();
-                for a in alts {
-                    let mut inner = Vec::new();
-                    out.push(self.pattern(a, ty, mode, &mut inner)?);
-                    if !inner.is_empty() {
-                        return self
-                            .err(a.span, "bindings inside `|` patterns are not supported yet");
+            PatKind::Struct(path, fields, rest) => {
+                let (aid, _) = self.resolve_variant_path(path, ty, p.span)?;
+                let a = &self.ck.adts[aid as usize];
+                let sname = a.name.clone();
+                if a.is_enum() {
+                    return self.err(
+                        p.span,
+                        format!("`{sname}` is an enum; match its variants: `{sname}.Variant(...)`"),
+                    );
+                }
+                let Ty::Adt(tid, args) = ty else {
+                    return self.err(
+                        p.span,
+                        format!(
+                            "struct pattern `{sname}` cannot match a value of type `{}`",
+                            self.ts(ty)
+                        ),
+                    );
+                };
+                if *tid != aid {
+                    return self.err(
+                        p.span,
+                        format!(
+                            "struct pattern `{sname}` cannot match a value of type `{}`",
+                            self.ts(ty)
+                        ),
+                    );
+                }
+                let ftys = self.ck.struct_fields(aid, args);
+                let AdtKind::Struct(decls) = self.ck.adts[aid as usize].kind.clone() else {
+                    unreachable!()
+                };
+                let amod = self.ck.adts[aid as usize].module;
+                let mut pats = vec![Pat::Wild; ftys.len()];
+                let mut seen = vec![false; ftys.len()];
+                for (name, sub) in fields {
+                    let Some(i) = decls.iter().position(|d| d.name.name == name.name) else {
+                        return self.err(
+                            name.span,
+                            format!("struct `{sname}` has no field `{}`", name.name),
+                        );
+                    };
+                    if seen[i] {
+                        return self.err(
+                            name.span,
+                            format!("field `{}` appears twice in the pattern", name.name),
+                        );
+                    }
+                    if decls[i].vis != Vis::Pub
+                        && amod != self.module
+                        && !self.ck.modules[self.module as usize].is_std
+                    {
+                        return self.err(
+                            name.span,
+                            format!("field `{}` of `{sname}` is private", name.name),
+                        );
+                    }
+                    seen[i] = true;
+                    pats[i] = self.pattern(sub, &ftys[i], mode, binds)?;
+                }
+                if !rest {
+                    let missing: Vec<String> = decls
+                        .iter()
+                        .zip(&seen)
+                        .filter(|(_, s)| !**s)
+                        .map(|(d, _)| format!("`{}`", d.name.name))
+                        .collect();
+                    if !missing.is_empty() {
+                        return self.err(p.span, format!("pattern does not mention field(s) {}; list them or end the pattern with `..`", missing.join(", ")));
                     }
                 }
+                Ok(Pat::Variant(0, pats))
+            }
+            PatKind::Or(alts) => {
+                // every alternative binds the same names, to the same variables
+                let mut out = Vec::new();
+                let mut first: Vec<(String, LocalId)> = Vec::new();
+                let saved = self.or_reuse.take();
+                for (i, a) in alts.iter().enumerate() {
+                    let mut inner = Vec::new();
+                    if i > 0 {
+                        self.or_reuse = Some(first.clone());
+                    }
+                    let r = self.pattern(a, ty, mode, &mut inner);
+                    self.or_reuse = None;
+                    let r = match r {
+                        Ok(r) => r,
+                        Err(e) => {
+                            self.or_reuse = saved;
+                            return Err(e);
+                        }
+                    };
+                    out.push(r);
+                    if i == 0 {
+                        first = inner;
+                    } else {
+                        let mut a_names: Vec<&String> = inner.iter().map(|(n, _)| n).collect();
+                        let mut f_names: Vec<&String> = first.iter().map(|(n, _)| n).collect();
+                        a_names.sort();
+                        f_names.sort();
+                        if a_names != f_names {
+                            self.or_reuse = saved;
+                            let list = |v: &[&String]| {
+                                v.iter()
+                                    .map(|n| format!("`{n}`"))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            };
+                            return self.err(a.span, format!("every alternative of a `|` pattern must bind the same names: the first binds {}, this one binds {}", if f_names.is_empty() { "nothing".into() } else { list(&f_names) }, if a_names.is_empty() { "nothing".into() } else { list(&a_names) }));
+                        }
+                    }
+                }
+                self.or_reuse = saved;
+                binds.extend(first);
                 Ok(Pat::Or(out))
             }
         }

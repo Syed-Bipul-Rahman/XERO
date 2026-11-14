@@ -1,0 +1,227 @@
+// Running futures: `block_on` for one, `Executor` for many, plus the
+// small futures `yield_now` and `join`.
+//
+// An `async fn` compiles to a state machine; nothing runs until something
+// polls it. These executors poll futures in place (they never move one
+// after polling it), and park the thread while nothing can make progress.
+
+module std.task
+
+import std.mem
+import std.mem.{Box}
+import std.sys
+
+/// Lets a waker wake a thread that waits for it.
+struct Parker {
+    lock: *u8
+    cond: *u8
+    woken: bool
+}
+
+impl Parker {
+    fn new() -> Parker {
+        unsafe {
+            Parker { lock: sys.lock_new(), cond: sys.cond_new(), woken: false }
+        }
+    }
+
+    /// Wait until woken (returns at once if woken since the last wait).
+    fn wait(&mut self) {
+        unsafe {
+            sys.lock_acquire(self.lock)
+            while !self.woken {
+                sys.cond_wait(self.cond, self.lock)
+            }
+            self.woken = false
+            sys.lock_release(self.lock)
+        }
+    }
+
+    drop {
+        unsafe {
+            sys.cond_free(self.cond)
+            sys.lock_free(self.lock)
+        }
+    }
+}
+
+fn wake_parker(data: *u8) {
+    unsafe {
+        let p = data as *Parker
+        sys.lock_acquire((*p).lock)
+        (*p).woken = true
+        sys.cond_notify_all((*p).cond)
+        sys.lock_release((*p).lock)
+    }
+}
+
+/// Run `f` to completion on this thread and return its value.
+pub fn block_on<F: Future>(mut f: F) -> F.Output {
+    let parker = Box.new(Parker.new())
+    let mut cx = Context.new(Waker.new(parker.as_ptr() as *u8, wake_parker))
+    loop {
+        match unsafe { f.poll(&mut cx) } {
+            Poll.Ready(v) => return v
+            Poll.Pending => unsafe { (*parker.as_ptr()).wait() }
+        }
+    }
+}
+
+/// A future that is pending once (waking itself), letting other tasks run.
+pub struct YieldNow {
+    yielded: bool
+}
+
+impl Future for YieldNow {
+    type Output = ()
+    unsafe fn poll(&mut self, cx: &mut Context) -> Poll<()> {
+        if self.yielded {
+            return Poll.Ready(())
+        }
+        self.yielded = true
+        cx.waker().wake()
+        Poll.Pending
+    }
+}
+
+/// Give other tasks a turn: `yield_now().await`.
+pub fn yield_now() -> YieldNow {
+    YieldNow { yielded: false }
+}
+
+/// Two futures run together; ready when both are.
+pub struct Join<A, B, X, Y> {
+    a: A
+    b: B
+    ra: Option<X>
+    rb: Option<Y>
+}
+
+/// Wait for both `a` and `b`, which make progress in turn: `join(a, b).await`.
+pub fn join<A: Future, B: Future>(a: A, b: B) -> Join<A, B, A.Output, B.Output> {
+    Join { a: a, b: b, ra: None, rb: None }
+}
+
+impl<A: Future, B: Future, X, Y> Future for Join<A, B, X, Y> {
+    type Output = (X, Y)
+    unsafe fn poll(&mut self, cx: &mut Context) -> Poll<(X, Y)> {
+        if self.ra.is_none() {
+            if self.a.poll(cx) is Poll.Ready(v) {
+                self.ra = Some(v)
+            }
+        }
+        if self.rb.is_none() {
+            if self.b.poll(cx) is Poll.Ready(v) {
+                self.rb = Some(v)
+            }
+        }
+        if self.ra.is_some() && self.rb.is_some() {
+            let a = mem.replace(&mut self.ra, None).unwrap()
+            let b = mem.replace(&mut self.rb, None).unwrap()
+            return Poll.Ready((a, b))
+        }
+        Poll.Pending
+    }
+}
+
+// ------------------------------------------------------------ executor
+
+/// A spawned future with its output discarded.
+trait Task {
+    /// Poll once; true when the task has finished.
+    fn run(&mut self, cx: &mut Context) -> bool
+}
+
+struct TaskOf<F> {
+    f: F
+    done: bool
+}
+
+impl<F: Future> Task for TaskOf<F> {
+    fn run(&mut self, cx: &mut Context) -> bool {
+        if !self.done {
+            if unsafe { self.f.poll(cx) } is Poll.Ready(_) {
+                self.done = true
+            }
+        }
+        self.done
+    }
+}
+
+/// A task's wake-up flag, and the executor's parker to wake with it.
+struct WakeFlag {
+    woken: u32
+    parker: *Parker
+}
+
+fn wake_task(data: *u8) {
+    unsafe {
+        let f = data as *WakeFlag
+        atomic_store(&mut (*f).woken as *u32, 1)
+        wake_parker((*f).parker as *u8)
+    }
+}
+
+/// Runs many futures on one thread, each polled when woken.
+///
+///   let mut ex = Executor.new()
+///   ex.start(download(1))
+///   ex.start(download(2))
+///   ex.run()        // returns when every task has finished
+pub struct Executor {
+    tasks: Vec<Box<dyn Task>>
+    flags: Vec<Box<WakeFlag>>
+    done: Vec<bool>
+    parker: Box<Parker>
+}
+
+impl Executor {
+    pub fn new() -> Executor {
+        Executor { tasks: Vec.new(), flags: Vec.new(), done: Vec.new(), parker: Box.new(Parker.new()) }
+    }
+
+    /// Add a future; it first runs in `run`.
+    pub fn start<F: Future>(&mut self, f: F) {
+        let t: Box<dyn Task> = Box.new(TaskOf { f: f, done: false })
+        self.tasks.push(t)
+        self.flags.push(Box.new(WakeFlag { woken: 1, parker: self.parker.as_ptr() }))
+        self.done.push(false)
+    }
+
+    /// The number of tasks that have not finished.
+    pub fn pending(&self) -> usize {
+        self.done.iter().filter(|d| !**d).count()
+    }
+
+    /// Poll woken tasks until all have finished.
+    pub fn run(&mut self) {
+        loop {
+            let mut left: usize = 0
+            let mut ran = false
+            let mut i: usize = 0
+            while i < self.tasks.len() {
+                if !self.done[i] {
+                    let flag = self.flags[i].as_ptr()
+                    let woken = unsafe { atomic_swap(&mut (*flag).woken as *u32, 0) }
+                    if woken == 1 {
+                        ran = true
+                        let mut cx = Context.new(Waker.new(flag as *u8, wake_task))
+                        if self.tasks[i].run(&mut cx) {
+                            self.done[i] = true
+                        }
+                    }
+                    if !self.done[i] {
+                        left += 1
+                    }
+                }
+                i += 1
+            }
+            if left == 0 {
+                return
+            }
+            if !ran {
+                unsafe { (*self.parker.as_ptr()).wait() }
+            }
+        }
+    }
+}

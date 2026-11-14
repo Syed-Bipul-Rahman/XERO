@@ -132,6 +132,21 @@ impl<T> Vec<T> {
         unsafe { slice_from_raw_mut(self.ptr, self.len) }
     }
 
+    /// Iterate by reference (what `for x in &v` does).
+    pub fn iter(&self) -> SliceIter<T> {
+        self.as_slice().iter()
+    }
+
+    /// Iterate by mutable reference (what `for x in &mut v` does).
+    pub fn iter_mut(&mut self) -> SliceIterMut<T> {
+        self.as_mut_slice().iter_mut()
+    }
+
+    /// Iterate by value, consuming the vector (what `for x in v` does).
+    pub fn into_iter(self) -> IntoIter<T> {
+        IntoIter { v: self, i: 0 }
+    }
+
     pub fn clear(&mut self) {
         while self.len > 0 {
             self.len -= 1
@@ -284,5 +299,48 @@ impl<T> Vec<T> {
         if self.cap > 0 {
             unsafe { mem.dealloc(self.ptr) }
         }
+    }
+}
+
+impl<T> Index<usize> for Vec<T> {
+    type Output = T
+    fn index(&self, i: usize) -> &T {
+        self.at(i)
+    }
+}
+
+impl<T> IndexMut<usize> for Vec<T> {
+    fn index_mut(&mut self, i: usize) -> &mut T {
+        self.at_mut(i)
+    }
+}
+
+/// The elements of a `Vec`, moved out one at a time: `v.into_iter()`.
+pub struct IntoIter<T> {
+    v: Vec<T>
+    i: usize
+}
+
+impl<T> Iterator for IntoIter<T> {
+    type Item = T
+    fn next(&mut self) -> Option<T> {
+        if self.i < self.v.len {
+            let x = unsafe { ptr_read(self.v.ptr + self.i) }
+            self.i += 1
+            Some(x)
+        } else {
+            None
+        }
+    }
+}
+
+impl<T> IntoIter<T> {
+    drop {
+        // drop the elements not yet taken; the Vec then frees its buffer
+        while self.i < self.v.len {
+            unsafe { drop_in_place(self.v.ptr + self.i) }
+            self.i += 1
+        }
+        self.v.len = 0
     }
 }

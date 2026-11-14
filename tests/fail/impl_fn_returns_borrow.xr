@@ -1,0 +1,6 @@
+fn bad(n: i32) -> impl Fn(i32) -> i32 {
+    let k = n
+    |x| x + k
+}
+fn main() { println(bad(1)(2)) }
+// error: `k` does not live long enough: the borrow escapes the block that owns it

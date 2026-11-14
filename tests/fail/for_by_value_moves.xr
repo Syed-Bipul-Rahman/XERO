@@ -1,0 +1,7 @@
+fn main() {
+    let mut v: Vec<String> = Vec.new()
+    v.push(String.from("a"))
+    for s in v { println(&s) }
+    println(v.len())
+}
+// error: use of moved value `v`

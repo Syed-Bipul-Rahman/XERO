@@ -203,7 +203,9 @@ pub fn check(ck: &Checker, ty: &Ty, arms: &[Arm], span: Span) -> Result<()> {
                         } else {
                             a.name.clone()
                         };
-                        if arity > 0 {
+                        if !a.is_enum() {
+                            format!("`{n} {{ .. }}`")
+                        } else if arity > 0 {
                             format!("`{n}(..)`")
                         } else {
                             format!("`{n}`")

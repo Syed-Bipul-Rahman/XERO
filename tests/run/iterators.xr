@@ -1,0 +1,70 @@
+// The Iterator trait, adapters, for loops over iterators, ranges as values.
+
+struct Countdown { n: i32 }
+impl Iterator for Countdown {
+    type Item = i32
+    fn next(&mut self) -> Option<i32> {
+        if self.n == 0 { return None }
+        self.n -= 1
+        Some(self.n + 1)
+    }
+}
+
+fn main() {
+    let mut v: Vec<i32> = Vec.new()
+    for i in 1..=5 { v.push(i * 10) }
+    let mut total = 0
+    for x in &v { total += *x }
+    println(total)
+    for x in &mut v { *x += 1 }
+    println(v[0])
+    for c in (Countdown { n: 3 }) { print(c) }
+    println("")
+    let sq: Vec<i32> = (1..5).map(|i| i * i).collect()
+    for s in &sq { print(*s)
+        print(" ") }
+    println("")
+    let evens = v.iter().filter(|x| **x % 2 == 1).count()
+    println(evens)
+    let s: i32 = (1..=100).sum()
+    println(s)
+    for (i, x) in v.iter().enumerate() {
+        if i == 4 { println(*x) }
+    }
+    println(Countdown { n: 10 }.skip(2).take(3).fold(0, |a, b| a + b))
+    let names: Vec<String> = Vec.new()
+    let mut owned: Vec<String> = Vec.new()
+    owned.push(String.from("a"))
+    owned.push(String.from("bc"))
+    owned.push(String.from("def"))
+    let mut lens = 0
+    for s in owned { lens += s.len() }
+    println(lens)
+    let arr = [3, 1, 4, 1, 5]
+    println(arr.iter().max().is_some())
+    let m = arr.iter().map(|x| *x).max()
+    match m { Some(x) => println(x)
+        None => println("none") }
+    let pairs = (0..3).zip(10..13).map(|p| p.0 + p.1).collect()
+    println(pairs[2])
+    println((1..4).chain(7..9).count())
+    println(Countdown { n: 5 }.any(|x| *x == 2))
+    println(Countdown { n: 5 }.position(|x| *x == 2).is_some())
+}
+
+// output:
+// 150
+// 11
+// 321
+// 1 4 9 16 
+// 5
+// 5050
+// 51
+// 21
+// 6
+// true
+// 5
+// 14
+// 5
+// true
+// true

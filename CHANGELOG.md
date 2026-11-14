@@ -1,3 +1,23 @@
+## 0.5.0
+
+* Adds generic traits with default type arguments (`trait Mul<Rhs = Self>`) and associated types (`type Item`, written `T.Item` and `Self.Item`).
+* Adds static functions in traits, called as `T.zero()` or `Self.name()`.
+* Changes the arithmetic operator traits to take the right operand's type and an `Output` type, so `vector * 2.0` and a `Vec2 * Vec2 -> f64` dot product can both be defined.
+* Adds `Index` and `IndexMut`: `a[i]` on your own types, and `v[i]`, `v[i] = x` and `&mut v[i]` on `Vec`.
+* Adds slicing a `Vec` or `String` with ranges: `&v[1..3]`.
+* Adds the `Iterator` trait with `map`, `filter`, `enumerate`, `take`, `skip`, `zip`, `chain`, `fold`, `for_each`, `count`, `last`, `any`, `all`, `find`, `position`, `min`, `max`, `sum` and `collect`.
+* Adds `for` loops over any iterator, and `for x in &v`, `for x in &mut v` and `for x in v` on `Vec`.
+* Adds ranges as values (`(1..=10).map(|x| x * x).sum()`), and `iter()` and `iter_mut()` on slices and arrays.
+* Adds struct patterns: `let Point { x, y } = p`, `Point { x: 0, .. } => ...`.
+* Adds bindings inside `|` patterns: `Ok(s) | Err(s) => s`.
+* Adds `impl Trait` return types, so functions can return closures (`-> impl Fn(i32) -> i32`) and iterators.
+* Adds trait objects: `&dyn Trait`, `&mut dyn Trait` and `Box<dyn Trait>`, with methods called through a vtable.
+* Adds `async fn` and `.await`, compiled to state machines with no allocation and no required runtime.
+* Adds `Future`, `Poll`, `Context` and `Waker` to the prelude, and `std.task` with `block_on`, `yield_now`, `join` and a single-threaded `Executor`.
+* Adds LLVM and lld inside `xeroc` (the `llvm` cargo feature, used by the release builds): no clang install is needed, and Linux executables and WebAssembly modules link without any other tool.
+* Changes comparisons between two references to compare the values they refer to.
+* Fixes the borrow checker treating every `&mut` argument of a type with references as storing a `&mut Context`.
+
 ## 0.4.0
 
 * Adds Xero's own runtime on Linux: programs make system calls directly and no longer use the C library, so executables are small and static ("hello, world" is about 9 KB) and run on any Linux system of the same architecture.

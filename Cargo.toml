@@ -1,6 +1,6 @@
 [package]
 name = "xeroc"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 description = "The Xero compiler: a minimal, native, zero-runtime-cost systems language"
 license = "MIT OR Apache-2.0"
@@ -13,7 +13,18 @@ path = "src/main.rs"
 name = "xeroc"
 path = "src/lib.rs"
 
+[features]
+# Link LLVM and lld into xeroc, so no clang is needed (see build.rs).
+llvm = ["dep:cc"]
+
 [dependencies]
+
+# finds MSVC's link.exe (and its library paths) on Windows
+[target.'cfg(windows)'.dependencies]
+cc = { version = "1", optional = true }
+
+[build-dependencies]
+cc = { version = "1", optional = true }
 
 [profile.release]
 opt-level = 3

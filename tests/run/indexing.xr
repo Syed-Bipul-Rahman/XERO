@@ -1,0 +1,60 @@
+// Index and IndexMut: v[i] on Vec and user types, &v[a..b] on Vec.
+
+struct Grid {
+    w: usize
+    cells: Vec<i32>
+}
+
+impl Index<(usize, usize)> for Grid {
+    type Output = i32
+    fn index(&self, p: (usize, usize)) -> &i32 { &self.cells[p.1 * self.w + p.0] }
+}
+impl IndexMut<(usize, usize)> for Grid {
+    fn index_mut(&mut self, p: (usize, usize)) -> &mut i32 { &mut self.cells[p.1 * self.w + p.0] }
+}
+
+fn main() {
+    let mut v: Vec<i32> = Vec.new()
+    v.push(10)
+    v.push(20)
+    v.push(30)
+    println(v[1])
+    v[1] = 25
+    v[2] += 5
+    println(v[1] + v[2])
+    let r = &mut v[0]
+    *r = 1
+    println(v[0])
+    let s = &v[1..]
+    println(s.len())
+    let m = &mut v[..2]
+    m[0] = 7
+    println(v[0])
+    let mut names: Vec<String> = Vec.new()
+    names.push(String.from("ab"))
+    names[0].push_str("cd")
+    println(&names[0])
+    println(names[0].len())
+    let mut g = Grid { w: 3, cells: Vec.new() }
+    for i in 0..9 { g.cells.push(i) }
+    g[(1, 2)] = 100
+    println(g[(1, 2)])
+    println(g[(2, 0)])
+    let mut vv: Vec<Vec<i32>> = Vec.new()
+    vv.push(Vec.new())
+    vv[0].push(4)
+    vv[0][0] *= 3
+    println(vv[0][0])
+}
+
+// output:
+// 20
+// 60
+// 1
+// 2
+// 7
+// abcd
+// 4
+// 100
+// 2
+// 12

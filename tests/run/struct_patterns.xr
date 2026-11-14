@@ -1,0 +1,43 @@
+// Struct patterns.
+
+copy struct Point { x: i32
+    y: i32 }
+struct Line { a: Point
+    b: Point
+    name: String }
+
+fn len2(l: &Line) -> i32 {
+    let Line { a: Point { x: x1, y: y1 }, b: Point { x: x2, y: y2 }, .. } = l
+    (*x2 - *x1) * (*x2 - *x1) + (*y2 - *y1) * (*y2 - *y1)
+}
+
+fn main() {
+    let p = Point { x: 3, y: 4 }
+    let Point { x, y } = p
+    println(x + y)
+    match p {
+        Point { x: 0, .. } => println("on the y axis")
+        Point { x, y: 4 } => println(x)
+        Point { .. } => println("elsewhere")
+    }
+    let l = Line { a: Point { x: 0, y: 0 }, b: Point { x: 3, y: 4 }, name: String.from("diag") }
+    println(len2(&l))
+    let Line { name, .. } = l
+    println(&name)
+    let pts = [Point { x: 1, y: 2 }, Point { x: 5, y: 6 }]
+    for Point { x, y } in &pts {
+        println(*x * *y)
+    }
+    if p is (Point { x: 3, y }) {
+        println(y)
+    }
+}
+
+// output:
+// 7
+// 3
+// 25
+// diag
+// 2
+// 30
+// 4

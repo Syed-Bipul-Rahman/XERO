@@ -272,6 +272,9 @@ impl Parser {
                 ItemKind::Import(Import { path, names, alias })
             }
             Tok::Kw(Kw::Fn | Kw::Unsafe | Kw::Export) => ItemKind::Fn(self.fn_decl()?),
+            Tok::Kw(Kw::Async) if matches!(self.peek_at(1), Tok::Kw(Kw::Fn)) => {
+                ItemKind::Fn(self.fn_decl()?)
+            }
             Tok::Kw(Kw::Copy) => {
                 self.bump();
                 match self.peek() {
@@ -341,7 +344,12 @@ impl Parser {
                         bounds.push(p.ty()?);
                     }
                 }
-                g.params.push(GenericParam { name, bounds });
+                let default = if p.eat(&Tok::Eq) { Some(p.ty()?) } else { None };
+                g.params.push(GenericParam {
+                    name,
+                    bounds,
+                    default,
+                });
                 if !p.eat(&Tok::Comma) {
                     break;
                 }
@@ -386,6 +394,7 @@ impl Parser {
     fn fn_decl(&mut self) -> Result<FnDecl> {
         let start = self.span();
         let is_export = self.eat_kw(Kw::Export);
+        let is_async = self.eat_kw(Kw::Async);
         let is_unsafe = self.eat_kw(Kw::Unsafe);
         self.expect_kw(Kw::Fn)?;
         let name = self.ident()?;
@@ -460,6 +469,7 @@ impl Parser {
             body,
             is_unsafe,
             is_export,
+            is_async,
             span: start.to(self.prev_span()),
         })
     }
@@ -568,7 +578,25 @@ impl Parser {
         }
         self.where_clause(&mut generics)?;
         let mut methods = Vec::new();
+        let mut assoc_types = Vec::new();
         self.brace_list(|p| {
+            if p.eat_kw(Kw::Type) {
+                let name = p.ident()?;
+                let mut bounds = Vec::new();
+                if p.eat(&Tok::Colon) {
+                    bounds.push(p.ty()?);
+                    while p.eat(&Tok::Plus) {
+                        bounds.push(p.ty()?);
+                    }
+                }
+                let default = if p.eat(&Tok::Eq) { Some(p.ty()?) } else { None };
+                assoc_types.push(AssocTypeDecl {
+                    name,
+                    bounds,
+                    default,
+                });
+                return Ok(());
+            }
             methods.push(p.fn_decl()?);
             Ok(())
         })?;
@@ -577,6 +605,7 @@ impl Parser {
             generics,
             supertraits,
             methods,
+            assoc_types,
         })
     }
 
@@ -591,8 +620,15 @@ impl Parser {
         };
         self.where_clause(&mut generics)?;
         let mut methods = Vec::new();
+        let mut assoc_types = Vec::new();
         let mut drop = None;
         self.brace_list(|p| {
+            if p.eat_kw(Kw::Type) {
+                let name = p.ident()?;
+                p.expect(&Tok::Eq)?;
+                assoc_types.push((name, p.ty()?));
+                return Ok(());
+            }
             if p.at_kw(Kw::Drop) {
                 let sp = p.bump().span;
                 if drop.is_some() {
@@ -614,6 +650,7 @@ impl Parser {
             trait_ref,
             self_ty,
             methods,
+            assoc_types,
             drop,
             span: start.to(self.prev_span()),
         })
@@ -678,13 +715,41 @@ impl Parser {
                 TypeKind::Infer
             }
             Tok::Kw(Kw::SelfType) => {
-                self.bump();
-                TypeKind::SelfType
+                let sp = self.bump().span;
+                if self.at(&Tok::Dot) && matches!(self.peek_at(1), Tok::Ident(_)) {
+                    // `Self.Item`: an associated type
+                    self.bump();
+                    let item = self.ident()?;
+                    TypeKind::Path(
+                        vec![
+                            Ident {
+                                name: "Self".into(),
+                                span: sp,
+                            },
+                            item,
+                        ],
+                        Vec::new(),
+                    )
+                } else {
+                    TypeKind::SelfType
+                }
             }
             Tok::Kw(Kw::Fn) => {
                 self.bump();
                 let (params, ret) = self.fn_type_sig()?;
                 TypeKind::FnPtr(params, ret)
+            }
+            Tok::Kw(Kw::Impl) => {
+                self.bump();
+                let mut bounds = vec![self.ty()?];
+                while self.eat(&Tok::Plus) {
+                    bounds.push(self.ty()?);
+                }
+                TypeKind::Impl(bounds)
+            }
+            Tok::Ident(name) if name == "dyn" && matches!(self.peek_at(1), Tok::Ident(_)) => {
+                self.bump();
+                TypeKind::Dyn(Box::new(self.ty()?))
             }
             Tok::Ident(name)
                 if (name == "Fn" || name == "FnMut" || name == "FnOnce")
@@ -1205,14 +1270,27 @@ impl Parser {
                         Tok::Int(n, None) => {
                             let sp = self.bump().span;
                             let span = e.span.to(sp);
-                            e = Expr { kind: ExprKind::TupleField(Box::new(e), n as u32, sp), span };
+                            e = Expr {
+                                kind: ExprKind::TupleField(Box::new(e), n as u32, sp),
+                                span,
+                            };
                         }
-                        Tok::Kw(Kw::Await) => return self.err("`await` is reserved for Xero's concurrency model and not yet implemented"),
+                        Tok::Kw(Kw::Await) => {
+                            let sp = self.bump().span;
+                            let span = e.span.to(sp);
+                            e = Expr {
+                                kind: ExprKind::Await(Box::new(e)),
+                                span,
+                            };
+                        }
                         _ => {
                             let name = self.ident()?;
                             let args = self.try_generic_args().unwrap_or_default();
                             let span = e.span.to(self.prev_span());
-                            e = Expr { kind: ExprKind::Field(Box::new(e), name, args), span };
+                            e = Expr {
+                                kind: ExprKind::Field(Box::new(e), name, args),
+                                span,
+                            };
                         }
                     }
                 }
@@ -1508,6 +1586,7 @@ impl Parser {
             match &p.kind {
                 PatKind::Wild | PatKind::Bind(..) => Ok(()),
                 PatKind::Tuple(ps) => ps.iter().try_for_each(check),
+                PatKind::Struct(_, fs, _) => fs.iter().try_for_each(|(_, p)| check(p)),
                 _ => Err(Diagnostic::new(
                     p.span,
                     "refutable pattern not allowed here; use `match` or `if ... is ...`",
@@ -1551,7 +1630,7 @@ impl Parser {
                 let elems = self.with_nl(false, |p| {
                     let mut elems = Vec::new();
                     while !p.at(&Tok::RParen) {
-                        elems.push(p.pattern()?);
+                        elems.push(p.with_no_struct(false, |p| p.pattern())?);
                         if !p.eat(&Tok::Comma) {
                             break;
                         }
@@ -1607,6 +1686,37 @@ impl Parser {
                         Ok(args)
                     })?;
                     PatKind::Variant(path, Some(args))
+                } else if self.at(&Tok::LBrace) && !self.no_struct {
+                    // `Point { x, y: py, .. }`
+                    self.bump();
+                    let (fields, rest) = self.with_nl(false, |p| {
+                        let mut fields = Vec::new();
+                        let mut rest = false;
+                        while !p.at(&Tok::RBrace) {
+                            if p.eat(&Tok::DotDot) {
+                                rest = true;
+                                break;
+                            }
+                            let fstart = p.span();
+                            let mutable = p.eat_kw(Kw::Mut);
+                            let name = p.ident()?;
+                            let pat = if !mutable && p.eat(&Tok::Colon) {
+                                p.with_no_struct(false, |p| p.pattern())?
+                            } else {
+                                Pattern {
+                                    kind: PatKind::Bind(name.clone(), mutable),
+                                    span: fstart.to(p.prev_span()),
+                                }
+                            };
+                            fields.push((name, pat));
+                            if !p.eat(&Tok::Comma) {
+                                break;
+                            }
+                        }
+                        p.expect(&Tok::RBrace)?;
+                        Ok((fields, rest))
+                    })?;
+                    PatKind::Struct(path, fields, rest)
                 } else if path.len() == 1 {
                     PatKind::Bind(path.pop().unwrap(), false)
                 } else {

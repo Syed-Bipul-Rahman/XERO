@@ -1,4 +1,4 @@
-# The Xero Language Reference (v0.4)
+# The Xero Language Reference (v0.5)
 
 This document describes the language as implemented by `xeroc` 0.3. Features
 that are reserved but not implemented yet are marked **(reserved)**.
@@ -312,6 +312,79 @@ impl<T: Print> Print for Stack<T> { ... }
   given explicitly: `size_of<u64>()`, `Vec<i32>.new()`, `mem.alloc<T>(n)`.
 * Two implementations of the same trait for the same type are rejected.
 
+### Generic traits and associated types
+
+```xero
+trait Convert<T> {
+    fn convert(&self) -> T
+}
+impl Convert<f64> for i64 { fn convert(&self) -> f64 { *self as f64 } }
+impl Convert<bool> for i64 { fn convert(&self) -> bool { *self != 0 } }
+
+trait Container {
+    type Item                          // an associated type
+    fn first(&self) -> Option<Self.Item>
+}
+impl Container for Stack<i32> {
+    type Item = i32
+    fn first(&self) -> Option<i32> { ... }
+}
+
+fn largest<C: Container>(c: &C) -> C.Item { ... }
+
+trait Zero {
+    fn zero() -> Self                  // a static function: `T.zero()`
+}
+```
+
+* Traits take generic parameters, which may have defaults (`trait Mul<Rhs =
+  Self>`). A type can implement a generic trait several times with different
+  arguments; a call picks the implementation by its argument or expected result
+  types.
+* An associated type is declared with `type Name` (optionally `type Name =
+  Default`) and written `T.Name` or `Self.Name`.
+* Trait functions without `self` are called on the type: `T.zero()`,
+  `Self.type_name()`.
+
+### Functions returning closures and iterators
+
+`impl Trait` as a return type hides the concrete type, which is still known
+to the compiler (no allocation, no dynamic dispatch):
+
+```xero
+fn adder(n: i32) -> impl Fn(i32) -> i32 {
+    move |x| x + n
+}
+
+fn evens(limit: i32) -> impl Iterator {
+    (0..limit).filter(|x| *x % 2 == 0)
+}
+```
+
+The returned value must satisfy the bounds, and `return` is not used in such a
+function (the body's final expression is the result).
+
+### Trait objects
+
+`dyn Trait` is a value of some type that implements `Trait`, chosen at run
+time. It lives behind a pointer: `&dyn Shape`, `&mut dyn Shape` or
+`Box<dyn Shape>`. A reference or box to a concrete type converts to one
+automatically, and method calls go through a vtable (one per type and trait).
+
+```xero
+let shapes: Vec<Box<dyn Shape>> = ...
+shapes.push(Box.new(Circle { r: 1.0 }))
+shapes.push(Box.new(Rect { w: 2.0, h: 3.0 }))
+for s in &shapes {
+    println(s.area())          // dynamic dispatch
+}                              // each box runs its value's destructor
+```
+
+A trait can be used as `dyn` when its methods take `&self` or `&mut self`,
+are not generic and do not mention `Self`, and it has no generic parameters or
+associated types. Dynamic dispatch is opt-in: generics stay statically
+dispatched.
+
 ## 7. Expressions and statements
 
 * `let x = e`, `let mut x: T = e` and `let (a, b) = pair`. Every variable must
@@ -321,14 +394,26 @@ impl<T: Print> Print for Stack<T> { ... }
 * `match value { pattern => expr ... }` must be exhaustive.
 * `while cond { }`, `while x is Some(v) { }`, `loop { ... break value }`.
 * `for i in 0..n`, `for i in a..=b`, `for x in &array`, `for x in slice`,
-  `for x in array` (when the elements are copyable).
+  `for x in array` (when the elements are copyable), and `for x in it` over
+  any `Iterator`. `for x in &v`, `for x in &mut v` and `for x in v` call
+  `v.iter()`, `v.iter_mut()` and `v.into_iter()` (so they work on `Vec`).
+* `a..b` and `a..=b` outside a `for` loop are values: `Range` and
+  `RangeInclusive` iterators, as in `(1..=10).map(|x| x * x).sum()`.
 * Operators, by precedence: `||` · `&&` · comparisons (not chainable) and `is`
   · `..` · `|` · `^` · `&` · `<< >>` · `+ -` · `* / %` · `as` · unary
   `- ! * & move copy try` · calls, fields and indexing.
 * `x += 1` and the other compound assignments: `-= *= /= %= &= |= ^= <<= >>=`.
 * Slicing: `&arr[a..b]`, `&arr[a..]`, `&arr[..b]`, `&arr[a..=b]` and `&mut v[..]`
-  on arrays, slices and `&str`. The range is bounds-checked once, when the
-  slice is formed.
+  on arrays, slices, `&str`, `Vec` and `String`. The range is bounds-checked
+  once, when the slice is formed.
+* Indexing `v[i]` on your own types calls the `Index` trait (and `IndexMut`
+  when the element is assigned or borrowed mutably); `Vec` implements both.
+  ```xero
+  impl Index<(usize, usize)> for Grid {
+      type Output = i32
+      fn index(&self, p: (usize, usize)) -> &i32 { &self.cells[p.1 * self.w + p.0] }
+  }
+  ```
 * Untyped literals default to `i32` and `f64`, unless context or a later use
   gives them a type: in `let mut total = 0` followed by `total += x` with
   `x: u64`, `total` is a `u64`.
@@ -342,8 +427,9 @@ statically dispatched:
 |---|---|---|---|
 | `==` `!=` | `Eq` | `eq` (`ne` is provided) | borrowed |
 | `<` `<=` `>` `>=` | `Ord` (extends `Eq`) | `cmp` returns `Ordering.Less/Equal/Greater` (`lt`, `le`, `gt`, `ge` are provided) | borrowed |
-| `+` `-` `*` `/` `%` | `Add` `Sub` `Mul` `Div` `Rem` | `add` `sub` `mul` `div` `rem` | moved |
+| `+` `-` `*` `/` `%` | `Add<Rhs = Self>` `Sub` `Mul` `Div` `Rem` | `add` `sub` `mul` `div` `rem` | moved |
 | unary `-` | `Neg` | `neg` | moved |
+| `a[i]` | `Index<Idx>`, `IndexMut<Idx>` | `index`, `index_mut` | borrowed |
 
 ```xero
 impl Add for Vec2 {
@@ -354,8 +440,24 @@ impl Ord for Version {
 }
 ```
 
+The arithmetic traits take the right operand's type and an `Output` type,
+which default to `Self`, so different operand types can mix:
+
+```xero
+impl Mul<f64> for Vec2 {
+    fn mul(self, k: f64) -> Vec2 { Vec2 { x: self.x * k, y: self.y * k } }
+}
+impl Mul for Vec2 {
+    type Output = f64                       // the dot product
+    fn mul(self, o: Vec2) -> f64 { self.x * o.x + self.y * o.y }
+}
+let scaled = v * 2.0
+let dot: f64 = v * w
+```
+
 Built-in numbers, `bool` and `str` implement these traits too, so bounds like
-`T: Ord` and `T: Add` accept them. `compare(a, b)` returns the `Ordering` of any
+`T: Ord` and `T: Add` accept them. Comparing two references compares the
+values they point to. `compare(a, b)` returns the `Ordering` of any
 two values that support `<` and `>`. `a += b` on a copyable user type means
 `a = a + b`.
 
@@ -363,8 +465,15 @@ two values that support `<` and `>`. `a += b` on a copyable user type means
 
 `_`, bindings (`x`, `mut x`), literals (`3`, `'a'`, `true`, `-1`), ranges
 (`1..=9`, `0..10`), tuples `(a, b)`, variants `Some(x)`, `Shape.Circle(r)` and
-`Color.Red`, positional struct patterns `Point(x, y)`, and alternatives `A | B`.
-When you match through a reference, bindings become references automatically.
+`Color.Red`, struct patterns `Point { x, y: py, .. }`, and alternatives
+`A | B`. When you match through a reference, bindings become references
+automatically.
+
+* A struct pattern names fields; `x` alone is short for `x: x`, and a pattern
+  that does not list every field ends with `..`. It works in `let`, `match`,
+  `for` and `is` (in the condition of an `if` or `while`, wrap it in
+  parentheses: `if p is (Point { x: 0, .. }) { ... }`).
+* Every alternative of `A | B` binds the same names: `Ok(s) | Err(s) => s`.
 
 ### Integer semantics
 
@@ -441,9 +550,9 @@ pointers and `usize`. Pointer arithmetic: `p + n` and `p - n` advance by whole e
 
 | Module | Contents |
 |---|---|
-| prelude | `Option`, `Result`, `Print`, `print`/`println`/`eprint`/`eprintln`, `panic`, `assert`, operator traits (`Eq`, `Ord`, `Add`, `Sub`, `Mul`, `Div`, `Rem`, `Neg`), `Ordering`, `compare`, `str` methods (`as_bytes`, `is_empty`, `byte_at`) |
+| prelude | `Option`, `Result`, `Print`, `print`/`println`/`eprint`/`eprintln`, `panic`, `assert`, operator traits (`Eq`, `Ord`, `Add`, `Sub`, `Mul`, `Div`, `Rem`, `Neg`, `Index`, `IndexMut`), `Ordering`, `compare`, `str` methods (`as_bytes`, `is_empty`, `byte_at`), `Iterator` (`next`; `map filter enumerate take skip zip chain`; `fold for_each count last any all find position min max sum collect`), `Range`, `RangeInclusive`, slice `iter`/`iter_mut`, `Future`, `Poll`, `Context`, `Waker` |
 | `std.mem` | `Box<T>`, `alloc`, `realloc_array`, `dealloc`, `swap`, `replace`, `copy_values` |
-| `std.vec` | `Vec<T>`: `push pop get get_mut at at_mut set swap insert remove clear reserve as_slice as_mut_slice`, and with closures `map filter for_each any all count position sort_by sort` |
+| `std.vec` | `Vec<T>`: `push pop get get_mut at at_mut set swap insert remove clear reserve as_slice as_mut_slice iter iter_mut into_iter`, `v[i]`, and with closures `map filter for_each any all count position sort_by sort` |
 | `std.string` | `String`: `from new from_utf8 push_str push_byte push_int as_str as_bytes into_bytes len equals clear`, and `is_utf8` |
 | `std.math` | `min max clamp abs isqrt sqrt pow_int gcd PI E` |
 | `std.io` | `read_into write_all exit_process STDIN STDOUT STDERR` (errors are `errno` values) |
@@ -451,6 +560,7 @@ pointers and `usize`. Pointer arithmetic: `p + n` and `p - n` advance by whole e
 | `std.env` | `args`, `arg`, `arg_count` |
 | `std.os` | `NAME` (`"linux"`, `"macos"`, `"windows"`, `"wasm"`, `"none"`), `ARCH`, `POINTER_BITS` |
 | `std.thread` | `start` (what `spawn` calls), `Thread<T, F>` with `join`, `sleep_ms`, `yield_now` |
+| `std.task` | `block_on`, `yield_now`, `join`, `Executor` (`new`, `start`, `run`, `pending`) |
 | `std.sync` | `Mutex<T>` (`lock`, `with`, `into_inner`; guards `get`, `get_mut`, `set`), `Channel<T>` (`send`, `recv`, `try_recv`, `close`, `len`), `Atomic<T>` (`load`, `store`, `swap`, `fetch_add`, `fetch_sub`, `compare_exchange`), `AtomicBool` |
 
 The standard library is written in Xero. Code you don't call is never compiled
@@ -558,4 +668,62 @@ fn main() {
 * Threads are Xero's own (`clone` and futexes) on Linux, POSIX threads on
   macOS and `kernel32` threads on Windows. On bare-metal and wasm targets,
   starting a thread is a runtime error.
-* `async` and `await` are still reserved.
+
+## 12. Async functions
+
+```xero
+import std.task
+
+async fn fetch(id: i32) -> i32 {
+    task.yield_now().await           // let other tasks run
+    id * 10
+}
+
+async fn total() -> i32 {
+    let a = fetch(1).await
+    let b = fetch(2).await
+    a + b
+}
+
+fn main() {
+    println(task.block_on(total()))  // 30
+
+    let mut ex = task.Executor.new()
+    ex.start(fetch(3))               // tasks take turns on this thread
+    ex.start(fetch(4))
+    ex.run()
+}
+```
+
+* Calling an `async fn` runs nothing: it returns a **future**, a value that
+  holds the function's state (its locals and where it stopped). The compiler
+  turns the function into a state machine; there is no hidden allocation and
+  no required runtime.
+* `future.await` (inside an `async fn`) waits for another future. While it is
+  not ready, the enclosing function stops there, and continues when it is next
+  polled.
+* A future does nothing until something polls it: `task.block_on(f)` runs one
+  to completion on the current thread, and `task.Executor` runs many,
+  interleaved, polling each when it is woken. `task.join(a, b)` waits for two
+  at once, and `task.yield_now()` gives other tasks a turn.
+* Write your own leaf futures by implementing `Future`:
+
+  ```xero
+  impl Future for Countdown {
+      type Output = i32
+      unsafe fn poll(&mut self, cx: &mut Context) -> Poll<i32> {
+          if self.n == 0 { return Poll.Ready(42) }
+          self.n -= 1
+          cx.waker().wake()            // ask to be polled again
+          Poll.Pending
+      }
+  }
+  ```
+
+* `poll` is unsafe to call directly, because an `async fn`'s locals may borrow
+  each other: once a future has been polled, it must not move. `.await` and
+  the executors in `std.task` never move a future after polling it.
+* The borrow checker treats a future like a struct holding the function's
+  arguments: `fetch_into(&mut v)` keeps `v` borrowed until the future is gone.
+* An `async fn` cannot call itself (its future would contain itself), and
+  `.await` is not allowed in closures or `async { }` blocks, which are reserved.

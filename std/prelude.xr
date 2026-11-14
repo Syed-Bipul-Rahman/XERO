@@ -172,28 +172,45 @@ pub trait Ord extends Eq {
     }
 }
 
-pub trait Add {
-    fn add(self, other: Self) -> Self
+pub trait Add<Rhs = Self> {
+    type Output = Self
+    fn add(self, other: Rhs) -> Self.Output
 }
 
-pub trait Sub {
-    fn sub(self, other: Self) -> Self
+pub trait Sub<Rhs = Self> {
+    type Output = Self
+    fn sub(self, other: Rhs) -> Self.Output
 }
 
-pub trait Mul {
-    fn mul(self, other: Self) -> Self
+pub trait Mul<Rhs = Self> {
+    type Output = Self
+    fn mul(self, other: Rhs) -> Self.Output
 }
 
-pub trait Div {
-    fn div(self, other: Self) -> Self
+pub trait Div<Rhs = Self> {
+    type Output = Self
+    fn div(self, other: Rhs) -> Self.Output
 }
 
-pub trait Rem {
-    fn rem(self, other: Self) -> Self
+pub trait Rem<Rhs = Self> {
+    type Output = Self
+    fn rem(self, other: Rhs) -> Self.Output
+}
+
+/// `a[i]`: reading through an index.
+pub trait Index<Idx> {
+    type Output
+    fn index(&self, i: Idx) -> &Self.Output
+}
+
+/// `a[i] = v`, `a[i] += v`, `&mut a[i]`: writing through an index.
+pub trait IndexMut<Idx> extends Index<Idx> {
+    fn index_mut(&mut self, i: Idx) -> &mut Self.Output
 }
 
 pub trait Neg {
-    fn neg(self) -> Self
+    type Output = Self
+    fn neg(self) -> Self.Output
 }
 
 /// Three-way comparison of anything with `<` and `>`: numbers or `Ord` types.
@@ -820,4 +837,451 @@ impl str {
     pub fn byte_at(&self, index: usize) -> u8 {
         self.as_bytes()[index]
     }
+}
+
+// ------------------------------------------------------------ iterators
+
+/// A sequence of values, produced one at a time by `next`. `for x in it`
+/// works on any iterator. Adapters such as `map` and `filter` are lazy and
+/// compile to the same loop you would write by hand.
+pub trait Iterator {
+    type Item
+    fn next(&mut self) -> Option<Self.Item>
+
+    /// Apply `f` to each item.
+    fn map<U, F: FnMut(Self.Item) -> U>(self, f: F) -> Map<Self, F, U> {
+        Map { inner: self, f: f, out: None }
+    }
+
+    /// Keep the items for which `keep` returns true.
+    fn filter<F: FnMut(&Self.Item) -> bool>(self, keep: F) -> Filter<Self, F> {
+        Filter { inner: self, keep: keep }
+    }
+
+    /// Pair each item with its index: `(0, a), (1, b), ...`.
+    fn enumerate(self) -> Enumerate<Self> {
+        Enumerate { inner: self, index: 0 }
+    }
+
+    /// At most the first `n` items.
+    fn take(self, n: usize) -> Take<Self> {
+        Take { inner: self, left: n }
+    }
+
+    /// Everything after the first `n` items.
+    fn skip(self, n: usize) -> Skip<Self> {
+        Skip { inner: self, n: n }
+    }
+
+    /// Pairs of items from this iterator and `other`, until either ends.
+    fn zip<B: Iterator>(self, other: B) -> Zip<Self, B> {
+        Zip { a: self, b: other }
+    }
+
+    /// This iterator's items, then `other`'s.
+    fn chain<B: Iterator>(self, other: B) -> Chain<Self, B> {
+        Chain { a: self, b: other, first: true }
+    }
+
+    /// Combine the items into one value: `fold(0, |sum, x| sum + x)`.
+    fn fold<A, F: FnMut(A, Self.Item) -> A>(mut self, init: A, mut f: F) -> A {
+        let mut acc = init
+        while self.next() is Some(x) {
+            acc = f(acc, x)
+        }
+        acc
+    }
+
+    /// Call `f` on each item.
+    fn for_each<F: FnMut(Self.Item)>(mut self, mut f: F) {
+        while self.next() is Some(x) {
+            f(x)
+        }
+    }
+
+    /// The number of items.
+    fn count(mut self) -> usize {
+        let mut n: usize = 0
+        while self.next() is Some(_) {
+            n += 1
+        }
+        n
+    }
+
+    /// The last item, if any.
+    fn last(mut self) -> Option<Self.Item> {
+        let mut last: Option<Self.Item> = None
+        while self.next() is Some(x) {
+            last = Some(x)
+        }
+        last
+    }
+
+    /// Does any item satisfy `f`? Stops at the first that does.
+    fn any<F: FnMut(&Self.Item) -> bool>(&mut self, mut f: F) -> bool {
+        while self.next() is Some(x) {
+            if f(&x) {
+                return true
+            }
+        }
+        false
+    }
+
+    /// Do all items satisfy `f`? Stops at the first that does not.
+    fn all<F: FnMut(&Self.Item) -> bool>(&mut self, mut f: F) -> bool {
+        while self.next() is Some(x) {
+            if !f(&x) {
+                return false
+            }
+        }
+        true
+    }
+
+    /// The first item satisfying `f`.
+    fn find<F: FnMut(&Self.Item) -> bool>(&mut self, mut f: F) -> Option<Self.Item> {
+        while self.next() is Some(x) {
+            if f(&x) {
+                return Some(x)
+            }
+        }
+        None
+    }
+
+    /// The index of the first item satisfying `f`.
+    fn position<F: FnMut(&Self.Item) -> bool>(&mut self, mut f: F) -> Option<usize> {
+        let mut i: usize = 0
+        while self.next() is Some(x) {
+            if f(&x) {
+                return Some(i)
+            }
+            i += 1
+        }
+        None
+    }
+
+    /// The smallest item (by `<`), if any.
+    fn min(mut self) -> Option<Self.Item> {
+        let mut best: Option<Self.Item> = None
+        while self.next() is Some(x) {
+            best = match best {
+                Some(b) => Some(if x < b { x } else { b })
+                None => Some(x)
+            }
+        }
+        best
+    }
+
+    /// The largest item (by `>`), if any.
+    fn max(mut self) -> Option<Self.Item> {
+        let mut best: Option<Self.Item> = None
+        while self.next() is Some(x) {
+            best = match best {
+                Some(b) => Some(if x > b { x } else { b })
+                None => Some(x)
+            }
+        }
+        best
+    }
+
+    /// The sum of the items (`0` for none).
+    fn sum(mut self) -> Self.Item {
+        let mut total = self.next() catch { return zero_of(self) }
+        while self.next() is Some(x) {
+            total = total + x
+        }
+        total
+    }
+
+    /// Collect the items into a `Vec`.
+    fn collect(mut self) -> Vec<Self.Item> {
+        let mut v: Vec<Self.Item> = Vec.new()
+        while self.next() is Some(x) {
+            v.push(x)
+        }
+        v
+    }
+}
+
+/// Zero of an iterator's (numeric) item type, for `sum` of nothing.
+fn zero_of<I: Iterator>(it: I) -> I.Item {
+    let z: I.Item = 0
+    z
+}
+
+pub struct Map<I, F, U> {
+    inner: I
+    f: F
+    out: Option<U>
+}
+
+impl<I: Iterator, F, U> Iterator for Map<I, F, U> {
+    type Item = U
+    fn next(&mut self) -> Option<U> {
+        match self.inner.next() {
+            Some(x) => Some(self.f(x))
+            None => None
+        }
+    }
+}
+
+pub struct Filter<I, F> {
+    inner: I
+    keep: F
+}
+
+impl<I: Iterator, F> Iterator for Filter<I, F> {
+    type Item = I.Item
+    fn next(&mut self) -> Option<I.Item> {
+        while self.inner.next() is Some(x) {
+            if self.keep(&x) {
+                return Some(x)
+            }
+        }
+        None
+    }
+}
+
+pub struct Enumerate<I> {
+    inner: I
+    index: usize
+}
+
+impl<I: Iterator> Iterator for Enumerate<I> {
+    type Item = (usize, I.Item)
+    fn next(&mut self) -> Option<(usize, I.Item)> {
+        match self.inner.next() {
+            Some(x) => {
+                let i = self.index
+                self.index += 1
+                Some((i, x))
+            }
+            None => None
+        }
+    }
+}
+
+pub struct Take<I> {
+    inner: I
+    left: usize
+}
+
+impl<I: Iterator> Iterator for Take<I> {
+    type Item = I.Item
+    fn next(&mut self) -> Option<I.Item> {
+        if self.left == 0 {
+            return None
+        }
+        self.left -= 1
+        self.inner.next()
+    }
+}
+
+pub struct Skip<I> {
+    inner: I
+    n: usize
+}
+
+impl<I: Iterator> Iterator for Skip<I> {
+    type Item = I.Item
+    fn next(&mut self) -> Option<I.Item> {
+        while self.n > 0 {
+            self.n -= 1
+            if self.inner.next() is None {
+                return None
+            }
+        }
+        self.inner.next()
+    }
+}
+
+pub struct Zip<A, B> {
+    a: A
+    b: B
+}
+
+impl<A: Iterator, B: Iterator> Iterator for Zip<A, B> {
+    type Item = (A.Item, B.Item)
+    fn next(&mut self) -> Option<(A.Item, B.Item)> {
+        let x = self.a.next() catch { return None }
+        let y = self.b.next() catch { return None }
+        Some((x, y))
+    }
+}
+
+pub struct Chain<A, B> {
+    a: A
+    b: B
+    first: bool
+}
+
+impl<A: Iterator, B: Iterator> Iterator for Chain<A, B> {
+    type Item = A.Item
+    fn next(&mut self) -> Option<A.Item> {
+        if self.first {
+            if self.a.next() is Some(x) {
+                return Some(x)
+            }
+            self.first = false
+        }
+        self.b.next()
+    }
+}
+
+/// `a..b` as a value: the integers from `start` up to, not including, `end`.
+pub copy struct Range<T> {
+    pub start: T
+    pub end: T
+}
+
+impl<T> Iterator for Range<T> {
+    type Item = T
+    fn next(&mut self) -> Option<T> {
+        if self.start < self.end {
+            let v = self.start
+            self.start += 1
+            Some(v)
+        } else {
+            None
+        }
+    }
+}
+
+/// `a..=b` as a value: the integers from `start` up to and including `end`.
+pub copy struct RangeInclusive<T> {
+    pub start: T
+    pub end: T
+    pub done: bool
+}
+
+impl<T> Iterator for RangeInclusive<T> {
+    type Item = T
+    fn next(&mut self) -> Option<T> {
+        if self.done || self.start > self.end {
+            return None
+        }
+        let v = self.start
+        if self.start == self.end {
+            self.done = true
+        } else {
+            self.start += 1
+        }
+        Some(v)
+    }
+}
+
+/// Iterates a slice by reference: `slice.iter()`, `for x in &v`.
+pub struct SliceIter<T> {
+    s: &[T]
+    i: usize
+}
+
+impl<T> Iterator for SliceIter<T> {
+    type Item = &T
+    fn next(&mut self) -> Option<&T> {
+        if self.i < self.s.len() {
+            let r = &self.s[self.i]
+            self.i += 1
+            Some(r)
+        } else {
+            None
+        }
+    }
+}
+
+/// Iterates a slice by mutable reference: `slice.iter_mut()`, `for x in &mut v`.
+pub struct SliceIterMut<T> {
+    s: &mut [T]
+    i: usize
+}
+
+impl<T> Iterator for SliceIterMut<T> {
+    type Item = &mut T
+    fn next(&mut self) -> Option<&mut T> {
+        let i = self.i
+        if i < self.s.len() {
+            self.i = i + 1
+            let p = (&mut *self.s) as *T
+            Some(unsafe { &mut *(p + i) })
+        } else {
+            None
+        }
+    }
+}
+
+impl<T> [T] {
+    pub fn iter(&self) -> SliceIter<T> {
+        SliceIter { s: self, i: 0 }
+    }
+
+    pub fn iter_mut(&mut self) -> SliceIterMut<T> {
+        SliceIterMut { s: self, i: 0 }
+    }
+}
+
+// ------------------------------------------------------------ futures
+
+/// The result of polling a future: its value, or not yet.
+pub enum Poll<T> {
+    Ready(T)
+    Pending
+}
+
+impl<T> Poll<T> {
+    pub fn is_ready(&self) -> bool {
+        match self {
+            Poll.Ready(_) => true
+            Poll.Pending => false
+        }
+    }
+}
+
+/// Tells an executor that a task can make progress: `waker.wake()`.
+pub copy struct Waker {
+    data: *u8
+    wake_fn: fn(*u8)
+}
+
+fn wake_nothing(data: *u8) {}
+
+impl Waker {
+    /// A waker that calls `wake_fn(data)`.
+    pub fn new(data: *u8, wake_fn: fn(*u8)) -> Waker {
+        Waker { data: data, wake_fn: wake_fn }
+    }
+
+    /// A waker that does nothing (for futures that never wait).
+    pub fn noop() -> Waker {
+        Waker { data: 0 as *u8, wake_fn: wake_nothing }
+    }
+
+    pub fn wake(&self) {
+        self.wake_fn(self.data)
+    }
+}
+
+/// What a future gets when polled: the waker of the task polling it.
+pub struct Context {
+    waker: Waker
+}
+
+impl Context {
+    pub fn new(waker: Waker) -> Context {
+        Context { waker: waker }
+    }
+
+    pub fn waker(&self) -> Waker {
+        self.waker
+    }
+}
+
+/// A value that will be ready later. `async fn` returns one; `.await`
+/// waits for one. `poll` makes progress and returns `Ready(value)` or
+/// `Pending` (after arranging for `cx.waker()` to be woken).
+///
+/// `poll` is unsafe to call: once a future has been polled it must not be
+/// moved, because an `async fn`'s locals may borrow each other. `.await`
+/// and the executors in `std.task` uphold this.
+pub trait Future {
+    type Output
+    unsafe fn poll(&mut self, cx: &mut Context) -> Poll<Self.Output>
 }

@@ -51,25 +51,32 @@ and put `xeroc` (`xeroc.exe` on Windows) on your `PATH`.
 
 Or build it from source with a Rust toolchain: `cargo build --release`.
 
-### 2. Install clang (the LLVM back end)
+### 2. What else is needed
 
-`xeroc` generates LLVM IR and uses `clang` (LLVM 15 or newer) to turn it
-into machine code and link it.
+The release builds of `xeroc` have LLVM (and the lld linker) built in:
 
-| OS | Command |
+| OS | Needs |
 |---|---|
-| Ubuntu/Debian | `sudo apt install clang lld` |
-| Fedora | `sudo dnf install clang lld` |
-| macOS | `xcode-select --install` (Apple clang) or `brew install llvm` |
-| Windows | `winget install LLVM.LLVM`, plus the Visual Studio Build Tools (C++ workload) for the linker and C runtime |
+| Linux | nothing. Programs that call C functions (or use `--libc`) are linked with the system's `cc` (gcc or clang). |
+| macOS (Apple Silicon) | the Xcode Command Line Tools (`xcode-select --install`), for Apple's linker and SDK |
+| macOS (Intel) | clang: the Xcode Command Line Tools provide it |
+| Windows | the Visual Studio C++ Build Tools (linker and C runtime) |
 
-If clang isn't on your `PATH` under the name `clang`, point `XERO_CLANG` at it,
-for example `XERO_CLANG=/opt/homebrew/opt/llvm/bin/clang`.
+`xeroc --version` says `(LLVM built in)` for such a build.
 
-On Linux, `lld` is needed only to build for another architecture
-(`--target aarch64-linux` on an x86-64 machine, for example). Xero programs
-don't use the C library on Linux, so no cross-compiling toolchain or sysroot
-is needed beyond that.
+A `xeroc` built from source with plain `cargo build --release` uses `clang`
+(LLVM 15 or newer) instead: `sudo apt install clang lld`, `sudo dnf install
+clang lld`, `xcode-select --install`, or `winget install LLVM.LLVM`. Point
+`XERO_CLANG` at it if it isn't on your `PATH` as `clang` (setting `XERO_CLANG`
+also makes a built-in-LLVM `xeroc` use clang). To build `xeroc` with LLVM
+inside, install LLVM 17+ development libraries with lld (for example
+`sudo apt install llvm-18-dev liblld-18-dev libpolly-18-dev`) and run
+`cargo build --release --features llvm`; `XERO_LLVM_CONFIG` selects the
+`llvm-config` to use.
+
+Xero programs don't use the C library on Linux, so cross-compiling for
+another architecture (`--target aarch64-linux`, `--target riscv64-linux`)
+needs no cross toolchain or sysroot.
 
 ## 3. Try it
 

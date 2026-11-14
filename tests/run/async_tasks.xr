@@ -1,0 +1,64 @@
+// block_on, yield_now, join and the Executor.
+
+import std.task
+import std.task.{Executor}
+import std.sync.{Mutex}
+
+async fn add(a: i32, b: i32) -> i32 {
+    task.yield_now().await
+    a + b
+}
+
+async fn sum_to(n: i32) -> i32 {
+    let mut total = 0
+    let mut i = 1
+    while i <= n {
+        total = total + add(0, i).await
+        i += 1
+    }
+    total
+}
+
+async fn greet(name: String, times: i32) -> String {
+    let mut out = String.new()
+    for i in 0..times {
+        out.push_str(name.as_str())
+        task.yield_now().await
+    }
+    out
+}
+
+async fn worker(id: i32, log: &Mutex<Vec<i32>>) {
+    for step in 0..3 {
+        log.with(|v| v.push(id * 10 + step))
+        task.yield_now().await
+    }
+}
+
+fn main() {
+    println(task.block_on(add(2, 3)))
+    println(task.block_on(sum_to(10)))
+    let s = task.block_on(greet(String.from("ab"), 3))
+    println(&s)
+    let (x, y) = task.block_on(task.join(sum_to(4), add(1, 1)))
+    println(x + y)
+    let log: Mutex<Vec<i32>> = Mutex.new(Vec.new())
+    {
+        let mut ex = Executor.new()
+        ex.start(worker(1, &log))
+        ex.start(worker(2, &log))
+        ex.run()
+    }
+    log.with(|v| {
+        for x in &*v { print(*x)
+            print(" ") }
+    })
+    println("")
+}
+
+// output:
+// 5
+// 55
+// ababab
+// 12
+// 10 20 11 21 12 22 

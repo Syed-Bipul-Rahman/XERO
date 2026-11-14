@@ -32,6 +32,11 @@ pub struct Func {
     /// Exported with an unmangled C symbol name.
     pub export: bool,
     pub span: Span,
+    /// For an `async fn` instance: its frame type id and the local holding
+    /// the `&mut Context` of the current `poll`. The function is then the
+    /// frame's `poll`, its locals live in the frame, and `params` are the
+    /// locals the call stores its arguments in.
+    pub async_frame: Option<(u32, LocalId)>,
 }
 
 #[derive(Debug)]
@@ -185,6 +190,14 @@ pub enum Intrinsic {
     /// The program's `argc` (as `usize`) and `argv` (as `**u8`).
     OsArgc,
     OsArgv,
+    /// Address of a vtable, as `usize` (the metadata half of `&dyn T`).
+    Vtable(String),
+    /// Method `slot` of a `&dyn T` (`args[0]`), as a function pointer.
+    DynMethod(u32),
+    /// `Box<S>` (`args[0]`) to `Box<dyn T>` with the given vtable.
+    UnsizeBox(String),
+    /// Calling an `async fn`: a new frame (state 0) holding the arguments.
+    MakeFrame(u32),
 }
 
 #[derive(Clone, Debug)]
@@ -208,6 +221,9 @@ pub enum ExprKind {
     /// The address of a function, as a `fn(...)` value.
     FnRef(String),
     Intrinsic(Intrinsic, Vec<Expr>),
+    /// Inside an `async fn`: save state `k` and return the given `Pending`
+    /// value from `poll`; the next `poll` resumes right after this point.
+    Suspend(u32, Box<Expr>),
     Struct(Vec<Expr>),
     Tuple(Vec<Expr>),
     Array(Vec<Expr>),

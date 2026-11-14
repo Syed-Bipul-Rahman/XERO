@@ -1,0 +1,9 @@
+fn main() {
+    let mut v: Vec<i32> = Vec.new()
+    v.push(1)
+    let r = &mut v[0]
+    let s = &v[0]
+    *r = 3
+    println(*s)
+}
+// error: cannot borrow `v` because it is mutably borrowed

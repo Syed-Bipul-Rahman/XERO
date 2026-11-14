@@ -1,0 +1,5 @@
+trait T { fn f(&self) -> i32 }
+struct A { v: i32 }
+fn main() { let a = A { v: 1 }
+    let d: &dyn T = &a }
+// error: `A` does not implement `T`, so it cannot become `&dyn T`
