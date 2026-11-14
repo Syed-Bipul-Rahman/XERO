@@ -86,6 +86,8 @@ pub const PRELUDE_TYPES: &[(&str, &str)] = &[
     ("std.vec", "Vec"),
     ("std.string", "String"),
     ("std.mem", "Box"),
+    ("std.collections", "HashMap"),
+    ("std.collections", "HashSet"),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1305,15 +1307,14 @@ impl Checker {
             }
             // overlapping impls of the same trait for the same type
             for other in 0..iid {
-                let args_overlap = self.impls[other]
-                    .trait_args
-                    .iter()
-                    .zip(&self.impls[iid].trait_args)
-                    .all(|(a, b)| templates_overlap(a, b));
-                if self.impls[other].trait_id == Some(tid)
-                    && args_overlap
-                    && templates_overlap(&self.impls[other].self_ty, &self.impls[iid].self_ty)
-                {
+                // both impls apply to some type only if their self types and
+                // trait arguments unify together (`impl<T> Borrow<T> for T`
+                // and `impl Borrow<str> for String` do not)
+                let mut a = vec![self.impls[other].self_ty.clone()];
+                a.extend(self.impls[other].trait_args.iter().cloned());
+                let mut b = vec![self.impls[iid].self_ty.clone()];
+                b.extend(self.impls[iid].trait_args.iter().cloned());
+                if self.impls[other].trait_id == Some(tid) && templates_unify(&a, &b) {
                     let ty = self.ty_str(&self.impls[iid].self_ty);
                     let prev = self.impls[other].span;
                     self.error(
@@ -1876,6 +1877,28 @@ impl Checker {
             }
         }
         Some(args)
+    }
+
+    /// Why no inherent method `name` applies to `t` when one exists but its
+    /// impl's bounds fail: that bound's error.
+    pub fn unmet_method_bound(&mut self, t: &Ty, name: &str, span: Span) -> Option<Diagnostic> {
+        for iid in 0..self.impls.len() {
+            let imp = &self.impls[iid];
+            if imp.trait_id.is_some() || !imp.methods.contains_key(name) {
+                continue;
+            }
+            let mut slots = vec![None; imp.generics.len()];
+            if !match_template(&imp.self_ty, t, &mut slots) {
+                continue;
+            }
+            let args: Vec<Ty> = slots.into_iter().map(|s| s.unwrap_or(Ty::unit())).collect();
+            let generics = imp.generics.clone();
+            let module = imp.module;
+            if let Err(d) = self.check_bounds(&generics, &args, module, span) {
+                return Some(d);
+            }
+        }
+        None
     }
 
     /// Check `T: Bound` requirements of generic params with concrete args.
@@ -2814,6 +2837,83 @@ fn ffi_safe(t: &Ty) -> bool {
 }
 
 /// Could two impl self-type templates match the same concrete type?
+/// Can the templates `a` and `b` (each with its own `Param`s) be made equal
+/// by one substitution on each side?
+fn templates_unify(a: &[Ty], b: &[Ty]) -> bool {
+    // a variable is (side, param index)
+    fn walk(t: &Ty, side: u8, subst: &HashMap<(u8, u32), (Ty, u8)>) -> (Ty, u8) {
+        let mut cur = (t.clone(), side);
+        while let (Ty::Param(i), s) = &cur {
+            match subst.get(&(*s, *i)) {
+                Some(next) => cur = next.clone(),
+                None => break,
+            }
+        }
+        cur
+    }
+    fn unify(
+        x: &Ty,
+        xs: u8,
+        y: &Ty,
+        ys: u8,
+        subst: &mut HashMap<(u8, u32), (Ty, u8)>,
+        depth: u32,
+    ) -> bool {
+        if depth > 64 {
+            return true;
+        }
+        let (x, xs) = walk(x, xs, subst);
+        let (y, ys) = walk(y, ys, subst);
+        match (&x, &y) {
+            (Ty::Param(i), Ty::Param(j)) if xs == ys && i == j => true,
+            (Ty::Param(i), _) => {
+                subst.insert((xs, *i), (y.clone(), ys));
+                true
+            }
+            (_, Ty::Param(j)) => {
+                subst.insert((ys, *j), (x.clone(), xs));
+                true
+            }
+            (Ty::Ref(p, m1), Ty::Ref(q, m2)) => m1 == m2 && unify(p, xs, q, ys, subst, depth + 1),
+            (Ty::Ptr(p), Ty::Ptr(q)) | (Ty::Slice(p), Ty::Slice(q)) => {
+                unify(p, xs, q, ys, subst, depth + 1)
+            }
+            (Ty::Array(p, n), Ty::Array(q, m)) => n == m && unify(p, xs, q, ys, subst, depth + 1),
+            (Ty::Tuple(ps), Ty::Tuple(qs)) => {
+                ps.len() == qs.len()
+                    && ps
+                        .iter()
+                        .zip(qs)
+                        .all(|(p, q)| unify(p, xs, q, ys, subst, depth + 1))
+            }
+            (Ty::Adt(i, ps), Ty::Adt(j, qs)) => {
+                i == j
+                    && ps
+                        .iter()
+                        .zip(qs)
+                        .all(|(p, q)| unify(p, xs, q, ys, subst, depth + 1))
+            }
+            (Ty::FnPtr(ps, r), Ty::FnPtr(qs, s)) => {
+                ps.len() == qs.len()
+                    && ps
+                        .iter()
+                        .zip(qs)
+                        .all(|(p, q)| unify(p, xs, q, ys, subst, depth + 1))
+                    && unify(r, xs, s, ys, subst, depth + 1)
+            }
+            // associated types are not known here: assume they could match
+            (Ty::Assoc(_), _) | (_, Ty::Assoc(_)) => true,
+            _ => x == y,
+        }
+    }
+    let mut subst = HashMap::new();
+    a.len() == b.len()
+        && a.iter()
+            .zip(b)
+            .all(|(x, y)| unify(x, 0, y, 1, &mut subst, 0))
+}
+
+#[allow(dead_code)]
 fn templates_overlap(a: &Ty, b: &Ty) -> bool {
     match (a, b) {
         (Ty::Param(_), _) | (_, Ty::Param(_)) => true,

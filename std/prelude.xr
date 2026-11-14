@@ -1981,3 +1981,103 @@ pub fn fmt__pad(out: &mut String, start: usize, width: usize, align: u8, fill: u
         out.push_byte(fill)
     }
 }
+
+// ------------------------------------------------------------ hashing
+
+/// Accumulates the bytes of a value into a 64-bit hash (FNV-1a, then a
+/// final mix). Fast and good for hash tables; not for cryptography, and
+/// not hardened against inputs chosen to collide.
+pub struct Hasher {
+    state: u64
+}
+
+impl Hasher {
+    pub fn new() -> Hasher {
+        Hasher { state: 0xcbf29ce484222325 }
+    }
+
+    pub fn write(&mut self, bytes: &[u8]) {
+        for b in bytes {
+            self.state = (self.state ^ (*b as u64)) * 0x100000001b3
+        }
+    }
+
+    pub fn write_u64(&mut self, v: u64) {
+        self.state = (self.state ^ v) * 0x100000001b3
+    }
+
+    pub fn finish(&self) -> u64 {
+        // splitmix64's finalizer spreads every input bit over the result
+        let mut z = self.state
+        z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9
+        z = (z ^ (z >> 27)) * 0x94d049bb133111eb
+        z ^ (z >> 31)
+    }
+}
+
+/// Types usable as `HashMap` keys and `HashSet` items (with `Eq`): equal
+/// values must write the same bytes.
+pub trait Hash {
+    fn hash(&self, h: &mut Hasher)
+}
+
+impl Hash for i8 { fn hash(&self, h: &mut Hasher) { h.write_u64(*self as u64) } }
+impl Hash for i16 { fn hash(&self, h: &mut Hasher) { h.write_u64(*self as u64) } }
+impl Hash for i32 { fn hash(&self, h: &mut Hasher) { h.write_u64(*self as u64) } }
+impl Hash for i64 { fn hash(&self, h: &mut Hasher) { h.write_u64(*self as u64) } }
+impl Hash for isize { fn hash(&self, h: &mut Hasher) { h.write_u64(*self as u64) } }
+impl Hash for u8 { fn hash(&self, h: &mut Hasher) { h.write_u64(*self as u64) } }
+impl Hash for u16 { fn hash(&self, h: &mut Hasher) { h.write_u64(*self as u64) } }
+impl Hash for u32 { fn hash(&self, h: &mut Hasher) { h.write_u64(*self as u64) } }
+impl Hash for u64 { fn hash(&self, h: &mut Hasher) { h.write_u64(*self) } }
+impl Hash for usize { fn hash(&self, h: &mut Hasher) { h.write_u64(*self as u64) } }
+impl Hash for bool { fn hash(&self, h: &mut Hasher) { h.write_u64(if *self { 1 } else { 0 }) } }
+
+impl Hash for str {
+    fn hash(&self, h: &mut Hasher) {
+        h.write(self.as_bytes())
+        // a terminator, so ("ab", "c") and ("a", "bc") differ
+        h.write_u64(0xff)
+    }
+}
+
+impl<T: Hash> Hash for &T {
+    fn hash(&self, h: &mut Hasher) { (**self).hash(h) }
+}
+
+impl<A: Hash, B: Hash> Hash for (A, B) {
+    fn hash(&self, h: &mut Hasher) {
+        self.0.hash(h)
+        self.1.hash(h)
+    }
+}
+
+impl<A: Hash, B: Hash, C: Hash> Hash for (A, B, C) {
+    fn hash(&self, h: &mut Hasher) {
+        self.0.hash(h)
+        self.1.hash(h)
+        self.2.hash(h)
+    }
+}
+
+/// The hash of `value`.
+pub fn hash_of<T: Hash>(value: &T) -> u64 {
+    let mut h = Hasher.new()
+    value.hash(&mut h)
+    h.finish()
+}
+
+/// A type that can be viewed as a `T`: lets a `HashMap<String, V>` be
+/// searched with a `&str`.
+pub trait Borrow<T> {
+    fn view(&self) -> &T
+}
+
+impl<T> Borrow<T> for T {
+    fn view(&self) -> &T { self }
+}
+
+/// `k.view()` as a `&Q`.
+pub fn borrow_as<K: Borrow<Q>, Q>(k: &K) -> &Q {
+    (*k).view()
+}

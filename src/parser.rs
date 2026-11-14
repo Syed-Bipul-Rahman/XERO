@@ -373,15 +373,12 @@ impl Parser {
             }
             match g.params.iter_mut().find(|p| p.name.name == name.name) {
                 Some(p) => p.bounds.extend(bounds),
-                None => {
-                    return Err(Diagnostic::new(
-                        name.span,
-                        format!(
-                            "`where` clause names unknown type parameter `{}`",
-                            name.name
-                        ),
-                    ))
-                }
+                // a parameter of the enclosing impl (checked later)
+                None => g.outer.push(GenericParam {
+                    name,
+                    bounds,
+                    default: None,
+                }),
             }
             if !self.eat(&Tok::Comma) {
                 break;

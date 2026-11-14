@@ -57,6 +57,8 @@ pub struct FnCx<'a> {
     pub overrides: HashMap<Span, Ty>,
     /// Locals whose type came from a defaulted literal, with that literal's key.
     pub defaulted: HashMap<LocalId, Span>,
+    /// Untyped literals that took the default type (`i32`/`f64`).
+    pub default_lits: std::collections::HashSet<Span>,
     /// First defaulted literal found to need a different type.
     pub pending: Option<(Span, Ty)>,
     /// Symbol of the function being checked (names its closures).
@@ -208,6 +210,7 @@ fn check_fn_inner(
         unsafe_depth: 0,
         overrides: overrides.clone(),
         defaulted: HashMap::new(),
+        default_lits: Default::default(),
         pending: None,
         fn_name: name.clone(),
         captures: None,
@@ -809,6 +812,19 @@ impl<'a> FnCx<'a> {
                 self.defaulted_expr(a).or_else(|| self.defaulted_expr(b))
             }
             K::Unary(UnOp::Neg, a) => self.defaulted_expr(a),
+            K::Int(_) | K::Float(_) if self.default_lits.contains(&v.span) => Some(v.span),
+            K::Borrow(Place::Local(l), _) => self.defaulted.get(l).copied(),
+            // `&(expr)` of an rvalue: `{ let tmp = expr; &tmp }`
+            K::Block(b) => match (&b.stmts[..], b.tail.as_deref()) {
+                (
+                    [xir::Stmt::Let(t, inner)],
+                    Some(X {
+                        kind: K::Borrow(Place::Local(l), _),
+                        ..
+                    }),
+                ) if t == l => self.defaulted_expr(inner),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -1306,6 +1322,13 @@ impl<'a> FnCx<'a> {
                     (Some("f32"), _) => Ty::Float(FloatTy::F32),
                     (Some("f64"), _) => Ty::Float(FloatTy::F64),
                     (_, Some(Ty::Float(f))) => Ty::Float(*f),
+                    (None, _) => match self.overrides.get(&span) {
+                        Some(t @ Ty::Float(_)) => t.clone(),
+                        _ => {
+                            self.default_lits.insert(span);
+                            Ty::Float(FloatTy::F64)
+                        }
+                    },
                     _ => Ty::Float(FloatTy::F64),
                 };
                 Ok(x(K::Float(*v), ty, span))
@@ -1772,7 +1795,14 @@ impl<'a> FnCx<'a> {
             }
             (Some(s), _) => Ty::Int(IntTy::from_name(s).unwrap()),
             (None, Some(Ty::Int(it))) => Ty::Int(*it),
-            _ => Ty::Int(IntTy::I32),
+            (None, _) => match self.overrides.get(&span) {
+                Some(Ty::Float(f)) => return Ok(x(K::Float(v as f64), Ty::Float(*f), span)),
+                Some(t @ Ty::Int(_)) => t.clone(),
+                _ => {
+                    self.default_lits.insert(span);
+                    Ty::Int(IntTy::I32)
+                }
+            },
         };
         let Ty::Int(it) = ty else { unreachable!() };
         let (lo, hi) = it.range(self.ck.target.ptr_bits);
@@ -2011,16 +2041,40 @@ impl<'a> FnCx<'a> {
             return self.err(span, "indexing needs the prelude trait `Index`");
         };
         let impls = self.ck.trait_impls_for(&bty, tid);
-        let idx_tys: Vec<Ty> = impls
-            .iter()
-            .filter_map(|(iid, args)| {
-                self.ck.impls[*iid as usize]
-                    .trait_args
-                    .first()
-                    .map(|a| a.subst(args))
-            })
-            .collect();
-        if idx_tys.is_empty() {
+        // index types the impls fix (an `Index<&Q>` that leaves `Q` open
+        // takes whatever the index is)
+        fn params(t: &Ty, out: &mut Vec<u32>) {
+            match t {
+                Ty::Param(i) => out.push(*i),
+                Ty::Ref(e, _) | Ty::Ptr(e) | Ty::Slice(e) | Ty::Array(e, _) => params(e, out),
+                Ty::Tuple(ts) | Ty::Adt(_, ts) => ts.iter().for_each(|t| params(t, out)),
+                _ => {}
+            }
+        }
+        let mut open = false;
+        let mut idx_tys: Vec<Ty> = Vec::new();
+        for (iid, args) in &impls {
+            let im = &self.ck.impls[*iid as usize];
+            let Some(tpl) = im.trait_args.first() else {
+                continue;
+            };
+            let mut slots = vec![None; im.generics.len()];
+            match_template(&im.self_ty, &bty, &mut slots);
+            let mut ps = Vec::new();
+            params(tpl, &mut ps);
+            if ps
+                .iter()
+                .any(|p| slots.get(*p as usize).is_none_or(|s| s.is_none()))
+            {
+                open = true;
+            } else {
+                idx_tys.push(tpl.subst(args));
+            }
+        }
+        if open {
+            idx_tys.clear();
+        }
+        if idx_tys.is_empty() && !open {
             return self.err(span, format!("type `{}` cannot be indexed; implement `Index` for it:  impl Index<usize> for {} {{ type Output = ...  fn index(&self, i: usize) -> &Self.Output {{ ... }} }}", self.ts(&bty), self.ts(&bty)));
         }
         let i = if idx_tys.len() == 1 {
@@ -2853,6 +2907,77 @@ impl<'a> FnCx<'a> {
         )
     }
 
+    /// A `where` bound on the impl's parameters failed: if an untyped
+    /// literal argument with another numeric type satisfies it, check again.
+    #[allow(clippy::too_many_arguments)]
+    fn retry_literal_for_bounds(
+        &mut self,
+        xs: &[X],
+        slots: &[Ty],
+        n_impl: usize,
+        fn_generics: &[ast::GenericParam],
+        outer: &[ast::GenericParam],
+        module: ModId,
+        span: Span,
+        base: &Env,
+    ) {
+        for a in xs {
+            let Some(key) = self.defaulted_expr(a) else {
+                continue;
+            };
+            let lit_ty = match &a.ty {
+                Ty::Ref(t, _) => (**t).clone(),
+                t => t.clone(),
+            };
+            let Some(pos) = slots[n_impl..].iter().position(|s| *s == lit_ty) else {
+                continue;
+            };
+            let candidates: Vec<Ty> = if lit_ty.is_int() {
+                [
+                    IntTy::I64,
+                    IntTy::U64,
+                    IntTy::Usize,
+                    IntTy::Isize,
+                    IntTy::U32,
+                    IntTy::I16,
+                    IntTy::U16,
+                    IntTy::I8,
+                    IntTy::U8,
+                ]
+                .into_iter()
+                .map(Ty::Int)
+                .collect()
+            } else if lit_ty.is_float() {
+                vec![Ty::Float(FloatTy::F32)]
+            } else {
+                Vec::new()
+            };
+            for c in candidates {
+                let mut env = base.clone();
+                for (k, g) in fn_generics.iter().enumerate() {
+                    let t = if k == pos {
+                        c.clone()
+                    } else {
+                        slots[n_impl + k].clone()
+                    };
+                    env.names.insert(g.name.name.clone(), t);
+                }
+                let args: Vec<Ty> = outer
+                    .iter()
+                    .filter_map(|g| env.names.get(&g.name.name).cloned())
+                    .collect();
+                if self
+                    .ck
+                    .check_bounds_in(outer, &args, module, span, env)
+                    .is_ok()
+                {
+                    self.want_literal_type(key, &lit_ty, &c);
+                    return;
+                }
+            }
+        }
+    }
+
     /// Call function `fid` with `pre` (already lowered receiver) + `args`.
     #[allow(clippy::too_many_arguments)]
     fn invoke(
@@ -2985,8 +3110,94 @@ impl<'a> FnCx<'a> {
             }
             base.self_ty = trait_self.clone();
         }
-        self.ck
-            .check_bounds_in(&fn_generics, &slots[n_impl..], fmodule, span, base)?;
+        // `where` bounds on the impl's parameters
+        let outer = self.ck.fns[fid as usize].decl.generics.outer.clone();
+        if !outer.is_empty() {
+            let mut env = base.clone();
+            for (g, t) in fn_generics.iter().zip(&slots[n_impl..]) {
+                env.names.insert(g.name.name.clone(), t.clone());
+            }
+            let mut args = Vec::new();
+            for g in &outer {
+                match env.names.get(&g.name.name) {
+                    Some(t) => args.push(t.clone()),
+                    None => {
+                        return self.err(
+                            g.name.span,
+                            format!(
+                                "`where` clause names unknown type parameter `{}`",
+                                g.name.name
+                            ),
+                        )
+                    }
+                }
+            }
+            if let Err(d) = self.ck.check_bounds_in(&outer, &args, fmodule, span, env) {
+                self.retry_literal_for_bounds(
+                    &xs,
+                    &slots,
+                    n_impl,
+                    &fn_generics,
+                    &outer,
+                    fmodule,
+                    span,
+                    &base,
+                );
+                return Err(d);
+            }
+        }
+        if let Err(d) =
+            self.ck
+                .check_bounds_in(&fn_generics, &slots[n_impl..], fmodule, span, base.clone())
+        {
+            // an untyped literal argument (`m.get(&10)`) may just need another
+            // numeric type: if one satisfies the bounds, check again with it
+            for a in &xs {
+                let Some(key) = self.defaulted_expr(a) else {
+                    continue;
+                };
+                let lit_ty = match &a.ty {
+                    Ty::Ref(t, _) => (**t).clone(),
+                    t => t.clone(),
+                };
+                let Some(pos) = slots[n_impl..].iter().position(|s| *s == lit_ty) else {
+                    continue;
+                };
+                let candidates: Vec<Ty> = if lit_ty.is_int() {
+                    [
+                        IntTy::I64,
+                        IntTy::U64,
+                        IntTy::Usize,
+                        IntTy::Isize,
+                        IntTy::U32,
+                        IntTy::I16,
+                        IntTy::U16,
+                        IntTy::I8,
+                        IntTy::U8,
+                    ]
+                    .into_iter()
+                    .map(Ty::Int)
+                    .collect()
+                } else if lit_ty.is_float() {
+                    vec![Ty::Float(FloatTy::F32)]
+                } else {
+                    Vec::new()
+                };
+                for c in candidates {
+                    let mut trial = slots[n_impl..].to_vec();
+                    trial[pos] = c.clone();
+                    if self
+                        .ck
+                        .check_bounds_in(&fn_generics, &trial, fmodule, span, base.clone())
+                        .is_ok()
+                    {
+                        self.want_literal_type(key, &lit_ty, &c);
+                        break;
+                    }
+                }
+            }
+            return Err(d);
+        }
         let self_ty = match self.ck.fns[fid as usize].owner {
             FnOwner::Trait(_) => trait_self,
             _ => None,
@@ -3435,6 +3646,10 @@ impl<'a> FnCx<'a> {
                         format!("`{}` is a field, not a method", name.name),
                     );
                 }
+            }
+            let bare = recv_ty.deref_all().clone();
+            if let Some(d) = self.ck.unmet_method_bound(&bare, &name.name, name.span) {
+                return Err(d);
             }
             return self.err(
                 name.span,

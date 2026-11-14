@@ -62,6 +62,7 @@ pub const STD_MODULES: &[(&str, &str)] = &[
     ("std.env", include_str!("../std/env.xr")),
     ("std.fs", include_str!("../std/fs.xr")),
     ("std.task", include_str!("../std/task.xr")),
+    ("std.collections", include_str!("../std/collections.xr")),
 ];
 
 /// The OS layer `std.sys`, chosen per target.
@@ -319,6 +320,7 @@ pub fn load(
         "std.vec",
         "std.string",
         "std.thread",
+        "std.collections",
     ] {
         want(m, Span::default(), &mut modules, &mut queue, &mut fe.sm)
             .map_err(|d| FrontendError::Diags(vec![d]))?;

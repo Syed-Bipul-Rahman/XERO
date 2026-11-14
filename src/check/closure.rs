@@ -491,6 +491,7 @@ impl FnCx<'_> {
             unsafe_depth: 0,
             overrides: self.overrides.clone(),
             defaulted: HashMap::new(),
+            default_lits: Default::default(),
             pending: None,
             fn_name: fn_name.to_string(),
             captures: None,

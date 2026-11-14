@@ -1,0 +1,81 @@
+// std.collections: HashMap and HashSet
+
+copy struct P { x: i32
+    y: i32 }
+impl Eq for P { fn eq(&self, o: &P) -> bool { self.x == o.x && self.y == o.y } }
+impl Hash for P { fn hash(&self, h: &mut Hasher) { self.x.hash(h)
+        self.y.hash(h) } }
+
+fn main() {
+    let mut ages: HashMap<String, i32> = HashMap.new()
+    ages.insert(String.from("ada"), 36)
+    ages.insert(String.from("alan"), 41)
+    println(ages.len())
+    println(ages.get("ada").unwrap())
+    println(ages.contains_key("bob"))
+    println(ages.insert(String.from("ada"), 37).unwrap())
+    println(ages["ada"])
+    *ages.get_mut("alan").unwrap() += 1
+    println(ages["alan"])
+    println(ages.remove("alan").unwrap())
+    println(ages.len())
+
+    // counting words
+    let mut counts: HashMap<String, usize> = HashMap.new()
+    for w in "the cat and the hat and the bat".split_whitespace() {
+        *counts.get_or_insert_with(w.to_string(), || 0) += 1
+    }
+    println(counts["the"])
+    println(counts["and"])
+    let mut total: usize = 0
+    for (k, v) in counts.iter() { total += *v }
+    println(total)
+
+    // many entries, growth, removals
+    let mut m: HashMap<i64, i64> = HashMap.new()
+    for i in 0..10000 { m.insert(i, i * i) }
+    for i in 0..5000 { m.remove(&(i * 2)) }
+    println(m.len())
+    println(m[&9999])
+    println(m.get(&10).is_none())
+    let mut s: i64 = 0
+    for v in m.values() { s += *v }
+    println(s)
+
+    let mut seen: HashSet<P> = HashSet.new()
+    println(seen.insert(P { x: 1, y: 2 }))
+    println(seen.insert(P { x: 1, y: 2 }))
+    println(seen.insert(P { x: 2, y: 1 }))
+    println(seen.len())
+    println(seen.contains(&P { x: 2, y: 1 }))
+    let mut words: HashSet<String> = HashSet.new()
+    words.insert(String.from("x"))
+    println(words.contains("x"))
+    println(words.remove("x"))
+    println(words.is_empty())
+}
+
+// output:
+// 2
+// 36
+// false
+// 36
+// 37
+// 42
+// 42
+// 1
+// 3
+// 2
+// 8
+// 5000
+// 99980001
+// true
+// 166666665000
+// true
+// false
+// true
+// 2
+// true
+// true
+// true
+// true

@@ -175,3 +175,21 @@ impl Deref for String {
         self.as_str()
     }
 }
+
+impl Hash for String {
+    fn hash(&self, h: &mut Hasher) {
+        self.as_str().hash(h)
+    }
+}
+
+impl Eq for String {
+    fn eq(&self, other: &String) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl Borrow<str> for String {
+    fn view(&self) -> &str {
+        self.as_str()
+    }
+}

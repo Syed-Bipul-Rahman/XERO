@@ -67,6 +67,9 @@ pub struct Import {
 #[derive(Clone, Debug, Default)]
 pub struct Generics {
     pub params: Vec<GenericParam>,
+    /// `where` bounds on the enclosing impl's parameters (in a method):
+    /// `fn get<Q>(&self, k: &Q) where K: Borrow<Q>`.
+    pub outer: Vec<GenericParam>,
 }
 
 #[derive(Clone, Debug)]
