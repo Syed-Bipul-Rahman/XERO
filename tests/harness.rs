@@ -71,9 +71,16 @@ fn run_programs() {
         let exe = tmp
             .join(f.file_stem().unwrap())
             .with_extension(std::env::consts::EXE_EXTENSION);
+        // `// flags: --overflow-checks` in a test adds build flags
+        let own_flags: Vec<String> = src
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("// flags:"))
+            .flat_map(|f| f.split_whitespace().map(String::from).collect::<Vec<_>>())
+            .collect();
         let build = Command::new(xeroc())
             .arg("build")
             .args(extra_flags())
+            .args(&own_flags)
             .arg(&f)
             .arg("-o")
             .arg(&exe)
@@ -212,6 +219,57 @@ fn rejected_programs() {
             failures.join("\n")
         );
     }
+}
+
+/// With overflow checks, `+` that overflows panics with a message; without
+/// them it wraps.
+#[test]
+fn overflow_checks() {
+    let tmp = std::env::temp_dir().join(format!("xero-ovf-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let src = tmp.join("ovf.xr");
+    std::fs::write(
+        &src,
+        "fn big() -> i32 { 2147483600 }\nfn main() {\n    println(big() + 48)\n}\n",
+    )
+    .unwrap();
+    for (flag, wraps) in [
+        ("--overflow-checks", false),
+        ("--no-overflow-checks", true),
+        ("-O0", false),
+    ] {
+        let exe = tmp
+            .join("ovf")
+            .with_extension(std::env::consts::EXE_EXTENSION);
+        let build = Command::new(xeroc())
+            .args(["build", flag])
+            .arg(&src)
+            .arg("-o")
+            .arg(&exe)
+            .output()
+            .unwrap();
+        assert!(
+            build.status.success(),
+            "{}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let run = Command::new(&exe).output().unwrap();
+        let out = String::from_utf8_lossy(&run.stdout);
+        let err = String::from_utf8_lossy(&run.stderr);
+        if wraps {
+            assert!(
+                run.status.success() && out.trim() == "-2147483648",
+                "{flag}: {out} {err}"
+            );
+        } else {
+            assert!(!run.status.success(), "{flag}: should have panicked");
+            assert!(
+                err.contains("panic: attempt to add with overflow"),
+                "{flag}: {err}"
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
 }
 
 /// `fn add(a: i32, b: i32) -> i32 { a + b }` must compile to straight-line

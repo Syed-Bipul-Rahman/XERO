@@ -37,6 +37,9 @@ pub struct Func {
     /// frame's `poll`, its locals live in the frame, and `params` are the
     /// locals the call stores its arguments in.
     pub async_frame: Option<(u32, LocalId)>,
+    /// `+`, `-` and `*` on integers panic on overflow (user code built
+    /// with overflow checks).
+    pub overflow_checks: bool,
 }
 
 #[derive(Debug)]
@@ -182,6 +185,8 @@ pub enum Intrinsic {
     AtomicStore,
     /// Read-modify-write returning the old value: "xchg", "add" or "sub".
     AtomicRmw(&'static str),
+    /// `(a op b, overflowed)` for "add", "sub" or "mul".
+    Overflowing(&'static str),
     /// Compare-and-swap `(p, expected, new)` returning the old value.
     AtomicCas,
     Fence,

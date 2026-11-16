@@ -17,6 +17,9 @@ OPTIONS:
     --emit <kind>        exe | obj | asm | llvm | llvm-raw | xir   (default: exe)
     -O0 | -O1 | -O2 | -O3 | -Os
                          optimization level (default: -O2)
+    --overflow-checks    panic when +, - or * on integers overflows
+                         (the default below -O2)
+    --no-overflow-checks wrap around instead (the default at -O2 and up)
     --target <name>      cross-compile (see `xeroc targets`)
     --lib                no `main` required; build a library object
     --libc               link the C library (Linux; automatic when the
@@ -54,6 +57,7 @@ fn main() {
     let mut output = None;
     let mut emit = Emit::Exe;
     let mut opt_level = 2;
+    let mut overflow_checks = None;
     let mut target = xeroc::target::host();
     let mut lib = false;
     let mut intel = true;
@@ -108,6 +112,8 @@ fn main() {
             "-O3" => opt_level = 3,
             "-Os" => opt_level = 2,
             "--lib" => lib = true,
+            "--overflow-checks" => overflow_checks = Some(true),
+            "--no-overflow-checks" => overflow_checks = Some(false),
             "--libc" => libc = Libc::Yes,
             "--no-libc" => libc = Libc::No,
             "--att" => intel = false,
@@ -148,6 +154,7 @@ fn main() {
             lib,
             intel_syntax: intel,
             libc,
+            overflow_checks,
         };
         let mut fe = xeroc::driver::Frontend {
             sm: Default::default(),
@@ -184,6 +191,7 @@ fn main() {
         lib,
         intel_syntax: intel,
         libc,
+        overflow_checks,
     };
     match build(&opts) {
         Ok(path) => {

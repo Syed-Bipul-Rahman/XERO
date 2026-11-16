@@ -233,60 +233,680 @@ impl i8 {
     pub const MIN: i8 = -128
     pub const MAX: i8 = 127
     pub const BITS: u32 = 8
+
+    /// `self + o`, wrapping around on overflow (the same with or without
+    /// overflow checks).
+    pub fn wrapping_add(self, o: i8) -> i8 { overflowing_add(self, o).0 }
+    pub fn wrapping_sub(self, o: i8) -> i8 { overflowing_sub(self, o).0 }
+    pub fn wrapping_mul(self, o: i8) -> i8 { overflowing_mul(self, o).0 }
+
+    /// `self + o`, or `None` on overflow.
+    pub fn checked_add(self, o: i8) -> Option<i8> {
+        let r = overflowing_add(self, o)
+        if r.1 { None } else { Some(r.0) }
+    }
+
+    pub fn checked_sub(self, o: i8) -> Option<i8> {
+        let r = overflowing_sub(self, o)
+        if r.1 { None } else { Some(r.0) }
+    }
+
+    pub fn checked_mul(self, o: i8) -> Option<i8> {
+        let r = overflowing_mul(self, o)
+        if r.1 { None } else { Some(r.0) }
+    }
+
+    /// `(self + o wrapped, whether it overflowed)`.
+    pub fn overflowing_add(self, o: i8) -> (i8, bool) { overflowing_add(self, o) }
+    pub fn overflowing_sub(self, o: i8) -> (i8, bool) { overflowing_sub(self, o) }
+    pub fn overflowing_mul(self, o: i8) -> (i8, bool) { overflowing_mul(self, o) }
+
+    /// `self + o`, stopping at `MIN` or `MAX`.
+    pub fn saturating_add(self, o: i8) -> i8 {
+        let r = overflowing_add(self, o)
+        if !r.1 { return r.0 }
+        if o < 0 { i8.MIN } else { i8.MAX }
+    }
+
+    pub fn saturating_sub(self, o: i8) -> i8 {
+        let r = overflowing_sub(self, o)
+        if !r.1 { return r.0 }
+        if o > 0 { i8.MIN } else { i8.MAX }
+    }
+
+    pub fn saturating_mul(self, o: i8) -> i8 {
+        let r = overflowing_mul(self, o)
+        if !r.1 { return r.0 }
+        if (self < 0) != (o < 0) { i8.MIN } else { i8.MAX }
+    }
+
+    /// `self` to the power `e` (overflow wraps, as in std).
+    pub fn pow(self, e: u32) -> i8 {
+        let mut r: i8 = 1
+        let mut b = self
+        let mut e = e
+        while e > 0 {
+            if e & 1 == 1 { r = r * b }
+            b = b * b
+            e = e >> 1
+        }
+        r
+    }
+
+    /// The absolute value (`MIN.abs()` wraps to `MIN`).
+    pub fn abs(self) -> i8 { if self < 0 { 0 - self } else { self } }
+
+    /// -1, 0 or 1.
+    pub fn signum(self) -> i8 { if self < 0 { 0 - 1 } else if self > 0 { 1 } else { 0 } }
 }
 
 impl i16 {
     pub const MIN: i16 = -32768
     pub const MAX: i16 = 32767
     pub const BITS: u32 = 16
+
+    /// `self + o`, wrapping around on overflow (the same with or without
+    /// overflow checks).
+    pub fn wrapping_add(self, o: i16) -> i16 { overflowing_add(self, o).0 }
+    pub fn wrapping_sub(self, o: i16) -> i16 { overflowing_sub(self, o).0 }
+    pub fn wrapping_mul(self, o: i16) -> i16 { overflowing_mul(self, o).0 }
+
+    /// `self + o`, or `None` on overflow.
+    pub fn checked_add(self, o: i16) -> Option<i16> {
+        let r = overflowing_add(self, o)
+        if r.1 { None } else { Some(r.0) }
+    }
+
+    pub fn checked_sub(self, o: i16) -> Option<i16> {
+        let r = overflowing_sub(self, o)
+        if r.1 { None } else { Some(r.0) }
+    }
+
+    pub fn checked_mul(self, o: i16) -> Option<i16> {
+        let r = overflowing_mul(self, o)
+        if r.1 { None } else { Some(r.0) }
+    }
+
+    /// `(self + o wrapped, whether it overflowed)`.
+    pub fn overflowing_add(self, o: i16) -> (i16, bool) { overflowing_add(self, o) }
+    pub fn overflowing_sub(self, o: i16) -> (i16, bool) { overflowing_sub(self, o) }
+    pub fn overflowing_mul(self, o: i16) -> (i16, bool) { overflowing_mul(self, o) }
+
+    /// `self + o`, stopping at `MIN` or `MAX`.
+    pub fn saturating_add(self, o: i16) -> i16 {
+        let r = overflowing_add(self, o)
+        if !r.1 { return r.0 }
+        if o < 0 { i16.MIN } else { i16.MAX }
+    }
+
+    pub fn saturating_sub(self, o: i16) -> i16 {
+        let r = overflowing_sub(self, o)
+        if !r.1 { return r.0 }
+        if o > 0 { i16.MIN } else { i16.MAX }
+    }
+
+    pub fn saturating_mul(self, o: i16) -> i16 {
+        let r = overflowing_mul(self, o)
+        if !r.1 { return r.0 }
+        if (self < 0) != (o < 0) { i16.MIN } else { i16.MAX }
+    }
+
+    /// `self` to the power `e` (overflow wraps, as in std).
+    pub fn pow(self, e: u32) -> i16 {
+        let mut r: i16 = 1
+        let mut b = self
+        let mut e = e
+        while e > 0 {
+            if e & 1 == 1 { r = r * b }
+            b = b * b
+            e = e >> 1
+        }
+        r
+    }
+
+    /// The absolute value (`MIN.abs()` wraps to `MIN`).
+    pub fn abs(self) -> i16 { if self < 0 { 0 - self } else { self } }
+
+    /// -1, 0 or 1.
+    pub fn signum(self) -> i16 { if self < 0 { 0 - 1 } else if self > 0 { 1 } else { 0 } }
 }
 
 impl i32 {
     pub const MIN: i32 = -2147483648
     pub const MAX: i32 = 2147483647
     pub const BITS: u32 = 32
+
+    /// `self + o`, wrapping around on overflow (the same with or without
+    /// overflow checks).
+    pub fn wrapping_add(self, o: i32) -> i32 { overflowing_add(self, o).0 }
+    pub fn wrapping_sub(self, o: i32) -> i32 { overflowing_sub(self, o).0 }
+    pub fn wrapping_mul(self, o: i32) -> i32 { overflowing_mul(self, o).0 }
+
+    /// `self + o`, or `None` on overflow.
+    pub fn checked_add(self, o: i32) -> Option<i32> {
+        let r = overflowing_add(self, o)
+        if r.1 { None } else { Some(r.0) }
+    }
+
+    pub fn checked_sub(self, o: i32) -> Option<i32> {
+        let r = overflowing_sub(self, o)
+        if r.1 { None } else { Some(r.0) }
+    }
+
+    pub fn checked_mul(self, o: i32) -> Option<i32> {
+        let r = overflowing_mul(self, o)
+        if r.1 { None } else { Some(r.0) }
+    }
+
+    /// `(self + o wrapped, whether it overflowed)`.
+    pub fn overflowing_add(self, o: i32) -> (i32, bool) { overflowing_add(self, o) }
+    pub fn overflowing_sub(self, o: i32) -> (i32, bool) { overflowing_sub(self, o) }
+    pub fn overflowing_mul(self, o: i32) -> (i32, bool) { overflowing_mul(self, o) }
+
+    /// `self + o`, stopping at `MIN` or `MAX`.
+    pub fn saturating_add(self, o: i32) -> i32 {
+        let r = overflowing_add(self, o)
+        if !r.1 { return r.0 }
+        if o < 0 { i32.MIN } else { i32.MAX }
+    }
+
+    pub fn saturating_sub(self, o: i32) -> i32 {
+        let r = overflowing_sub(self, o)
+        if !r.1 { return r.0 }
+        if o > 0 { i32.MIN } else { i32.MAX }
+    }
+
+    pub fn saturating_mul(self, o: i32) -> i32 {
+        let r = overflowing_mul(self, o)
+        if !r.1 { return r.0 }
+        if (self < 0) != (o < 0) { i32.MIN } else { i32.MAX }
+    }
+
+    /// `self` to the power `e` (overflow wraps, as in std).
+    pub fn pow(self, e: u32) -> i32 {
+        let mut r: i32 = 1
+        let mut b = self
+        let mut e = e
+        while e > 0 {
+            if e & 1 == 1 { r = r * b }
+            b = b * b
+            e = e >> 1
+        }
+        r
+    }
+
+    /// The absolute value (`MIN.abs()` wraps to `MIN`).
+    pub fn abs(self) -> i32 { if self < 0 { 0 - self } else { self } }
+
+    /// -1, 0 or 1.
+    pub fn signum(self) -> i32 { if self < 0 { 0 - 1 } else if self > 0 { 1 } else { 0 } }
 }
 
 impl i64 {
     pub const MIN: i64 = -9223372036854775808
     pub const MAX: i64 = 9223372036854775807
     pub const BITS: u32 = 64
+
+    /// `self + o`, wrapping around on overflow (the same with or without
+    /// overflow checks).
+    pub fn wrapping_add(self, o: i64) -> i64 { overflowing_add(self, o).0 }
+    pub fn wrapping_sub(self, o: i64) -> i64 { overflowing_sub(self, o).0 }
+    pub fn wrapping_mul(self, o: i64) -> i64 { overflowing_mul(self, o).0 }
+
+    /// `self + o`, or `None` on overflow.
+    pub fn checked_add(self, o: i64) -> Option<i64> {
+        let r = overflowing_add(self, o)
+        if r.1 { None } else { Some(r.0) }
+    }
+
+    pub fn checked_sub(self, o: i64) -> Option<i64> {
+        let r = overflowing_sub(self, o)
+        if r.1 { None } else { Some(r.0) }
+    }
+
+    pub fn checked_mul(self, o: i64) -> Option<i64> {
+        let r = overflowing_mul(self, o)
+        if r.1 { None } else { Some(r.0) }
+    }
+
+    /// `(self + o wrapped, whether it overflowed)`.
+    pub fn overflowing_add(self, o: i64) -> (i64, bool) { overflowing_add(self, o) }
+    pub fn overflowing_sub(self, o: i64) -> (i64, bool) { overflowing_sub(self, o) }
+    pub fn overflowing_mul(self, o: i64) -> (i64, bool) { overflowing_mul(self, o) }
+
+    /// `self + o`, stopping at `MIN` or `MAX`.
+    pub fn saturating_add(self, o: i64) -> i64 {
+        let r = overflowing_add(self, o)
+        if !r.1 { return r.0 }
+        if o < 0 { i64.MIN } else { i64.MAX }
+    }
+
+    pub fn saturating_sub(self, o: i64) -> i64 {
+        let r = overflowing_sub(self, o)
+        if !r.1 { return r.0 }
+        if o > 0 { i64.MIN } else { i64.MAX }
+    }
+
+    pub fn saturating_mul(self, o: i64) -> i64 {
+        let r = overflowing_mul(self, o)
+        if !r.1 { return r.0 }
+        if (self < 0) != (o < 0) { i64.MIN } else { i64.MAX }
+    }
+
+    /// `self` to the power `e` (overflow wraps, as in std).
+    pub fn pow(self, e: u32) -> i64 {
+        let mut r: i64 = 1
+        let mut b = self
+        let mut e = e
+        while e > 0 {
+            if e & 1 == 1 { r = r * b }
+            b = b * b
+            e = e >> 1
+        }
+        r
+    }
+
+    /// The absolute value (`MIN.abs()` wraps to `MIN`).
+    pub fn abs(self) -> i64 { if self < 0 { 0 - self } else { self } }
+
+    /// -1, 0 or 1.
+    pub fn signum(self) -> i64 { if self < 0 { 0 - 1 } else if self > 0 { 1 } else { 0 } }
 }
 
 impl u8 {
     pub const MIN: u8 = 0
     pub const MAX: u8 = 255
     pub const BITS: u32 = 8
+
+    /// `self + o`, wrapping around on overflow (the same with or without
+    /// overflow checks).
+    pub fn wrapping_add(self, o: u8) -> u8 { overflowing_add(self, o).0 }
+    pub fn wrapping_sub(self, o: u8) -> u8 { overflowing_sub(self, o).0 }
+    pub fn wrapping_mul(self, o: u8) -> u8 { overflowing_mul(self, o).0 }
+
+    /// `self + o`, or `None` on overflow.
+    pub fn checked_add(self, o: u8) -> Option<u8> {
+        let r = overflowing_add(self, o)
+        if r.1 { None } else { Some(r.0) }
+    }
+
+    pub fn checked_sub(self, o: u8) -> Option<u8> {
+        let r = overflowing_sub(self, o)
+        if r.1 { None } else { Some(r.0) }
+    }
+
+    pub fn checked_mul(self, o: u8) -> Option<u8> {
+        let r = overflowing_mul(self, o)
+        if r.1 { None } else { Some(r.0) }
+    }
+
+    /// `(self + o wrapped, whether it overflowed)`.
+    pub fn overflowing_add(self, o: u8) -> (u8, bool) { overflowing_add(self, o) }
+    pub fn overflowing_sub(self, o: u8) -> (u8, bool) { overflowing_sub(self, o) }
+    pub fn overflowing_mul(self, o: u8) -> (u8, bool) { overflowing_mul(self, o) }
+
+    /// `self + o`, stopping at `MIN` or `MAX`.
+    pub fn saturating_add(self, o: u8) -> u8 {
+        let r = overflowing_add(self, o)
+        if !r.1 { return r.0 }
+        u8.MAX
+    }
+
+    pub fn saturating_sub(self, o: u8) -> u8 {
+        let r = overflowing_sub(self, o)
+        if !r.1 { return r.0 }
+        u8.MIN
+    }
+
+    pub fn saturating_mul(self, o: u8) -> u8 {
+        let r = overflowing_mul(self, o)
+        if !r.1 { return r.0 }
+        u8.MAX
+    }
+
+    /// `self` to the power `e` (overflow wraps, as in std).
+    pub fn pow(self, e: u32) -> u8 {
+        let mut r: u8 = 1
+        let mut b = self
+        let mut e = e
+        while e > 0 {
+            if e & 1 == 1 { r = r * b }
+            b = b * b
+            e = e >> 1
+        }
+        r
+    }
 }
 
 impl u16 {
     pub const MIN: u16 = 0
     pub const MAX: u16 = 65535
     pub const BITS: u32 = 16
+
+    /// `self + o`, wrapping around on overflow (the same with or without
+    /// overflow checks).
+    pub fn wrapping_add(self, o: u16) -> u16 { overflowing_add(self, o).0 }
+    pub fn wrapping_sub(self, o: u16) -> u16 { overflowing_sub(self, o).0 }
+    pub fn wrapping_mul(self, o: u16) -> u16 { overflowing_mul(self, o).0 }
+
+    /// `self + o`, or `None` on overflow.
+    pub fn checked_add(self, o: u16) -> Option<u16> {
+        let r = overflowing_add(self, o)
+        if r.1 { None } else { Some(r.0) }
+    }
+
+    pub fn checked_sub(self, o: u16) -> Option<u16> {
+        let r = overflowing_sub(self, o)
+        if r.1 { None } else { Some(r.0) }
+    }
+
+    pub fn checked_mul(self, o: u16) -> Option<u16> {
+        let r = overflowing_mul(self, o)
+        if r.1 { None } else { Some(r.0) }
+    }
+
+    /// `(self + o wrapped, whether it overflowed)`.
+    pub fn overflowing_add(self, o: u16) -> (u16, bool) { overflowing_add(self, o) }
+    pub fn overflowing_sub(self, o: u16) -> (u16, bool) { overflowing_sub(self, o) }
+    pub fn overflowing_mul(self, o: u16) -> (u16, bool) { overflowing_mul(self, o) }
+
+    /// `self + o`, stopping at `MIN` or `MAX`.
+    pub fn saturating_add(self, o: u16) -> u16 {
+        let r = overflowing_add(self, o)
+        if !r.1 { return r.0 }
+        u16.MAX
+    }
+
+    pub fn saturating_sub(self, o: u16) -> u16 {
+        let r = overflowing_sub(self, o)
+        if !r.1 { return r.0 }
+        u16.MIN
+    }
+
+    pub fn saturating_mul(self, o: u16) -> u16 {
+        let r = overflowing_mul(self, o)
+        if !r.1 { return r.0 }
+        u16.MAX
+    }
+
+    /// `self` to the power `e` (overflow wraps, as in std).
+    pub fn pow(self, e: u32) -> u16 {
+        let mut r: u16 = 1
+        let mut b = self
+        let mut e = e
+        while e > 0 {
+            if e & 1 == 1 { r = r * b }
+            b = b * b
+            e = e >> 1
+        }
+        r
+    }
 }
 
 impl u32 {
     pub const MIN: u32 = 0
     pub const MAX: u32 = 4294967295
     pub const BITS: u32 = 32
+
+    /// `self + o`, wrapping around on overflow (the same with or without
+    /// overflow checks).
+    pub fn wrapping_add(self, o: u32) -> u32 { overflowing_add(self, o).0 }
+    pub fn wrapping_sub(self, o: u32) -> u32 { overflowing_sub(self, o).0 }
+    pub fn wrapping_mul(self, o: u32) -> u32 { overflowing_mul(self, o).0 }
+
+    /// `self + o`, or `None` on overflow.
+    pub fn checked_add(self, o: u32) -> Option<u32> {
+        let r = overflowing_add(self, o)
+        if r.1 { None } else { Some(r.0) }
+    }
+
+    pub fn checked_sub(self, o: u32) -> Option<u32> {
+        let r = overflowing_sub(self, o)
+        if r.1 { None } else { Some(r.0) }
+    }
+
+    pub fn checked_mul(self, o: u32) -> Option<u32> {
+        let r = overflowing_mul(self, o)
+        if r.1 { None } else { Some(r.0) }
+    }
+
+    /// `(self + o wrapped, whether it overflowed)`.
+    pub fn overflowing_add(self, o: u32) -> (u32, bool) { overflowing_add(self, o) }
+    pub fn overflowing_sub(self, o: u32) -> (u32, bool) { overflowing_sub(self, o) }
+    pub fn overflowing_mul(self, o: u32) -> (u32, bool) { overflowing_mul(self, o) }
+
+    /// `self + o`, stopping at `MIN` or `MAX`.
+    pub fn saturating_add(self, o: u32) -> u32 {
+        let r = overflowing_add(self, o)
+        if !r.1 { return r.0 }
+        u32.MAX
+    }
+
+    pub fn saturating_sub(self, o: u32) -> u32 {
+        let r = overflowing_sub(self, o)
+        if !r.1 { return r.0 }
+        u32.MIN
+    }
+
+    pub fn saturating_mul(self, o: u32) -> u32 {
+        let r = overflowing_mul(self, o)
+        if !r.1 { return r.0 }
+        u32.MAX
+    }
+
+    /// `self` to the power `e` (overflow wraps, as in std).
+    pub fn pow(self, e: u32) -> u32 {
+        let mut r: u32 = 1
+        let mut b = self
+        let mut e = e
+        while e > 0 {
+            if e & 1 == 1 { r = r * b }
+            b = b * b
+            e = e >> 1
+        }
+        r
+    }
 }
 
 impl u64 {
     pub const MIN: u64 = 0
     pub const MAX: u64 = 18446744073709551615
     pub const BITS: u32 = 64
+
+    /// `self + o`, wrapping around on overflow (the same with or without
+    /// overflow checks).
+    pub fn wrapping_add(self, o: u64) -> u64 { overflowing_add(self, o).0 }
+    pub fn wrapping_sub(self, o: u64) -> u64 { overflowing_sub(self, o).0 }
+    pub fn wrapping_mul(self, o: u64) -> u64 { overflowing_mul(self, o).0 }
+
+    /// `self + o`, or `None` on overflow.
+    pub fn checked_add(self, o: u64) -> Option<u64> {
+        let r = overflowing_add(self, o)
+        if r.1 { None } else { Some(r.0) }
+    }
+
+    pub fn checked_sub(self, o: u64) -> Option<u64> {
+        let r = overflowing_sub(self, o)
+        if r.1 { None } else { Some(r.0) }
+    }
+
+    pub fn checked_mul(self, o: u64) -> Option<u64> {
+        let r = overflowing_mul(self, o)
+        if r.1 { None } else { Some(r.0) }
+    }
+
+    /// `(self + o wrapped, whether it overflowed)`.
+    pub fn overflowing_add(self, o: u64) -> (u64, bool) { overflowing_add(self, o) }
+    pub fn overflowing_sub(self, o: u64) -> (u64, bool) { overflowing_sub(self, o) }
+    pub fn overflowing_mul(self, o: u64) -> (u64, bool) { overflowing_mul(self, o) }
+
+    /// `self + o`, stopping at `MIN` or `MAX`.
+    pub fn saturating_add(self, o: u64) -> u64 {
+        let r = overflowing_add(self, o)
+        if !r.1 { return r.0 }
+        u64.MAX
+    }
+
+    pub fn saturating_sub(self, o: u64) -> u64 {
+        let r = overflowing_sub(self, o)
+        if !r.1 { return r.0 }
+        u64.MIN
+    }
+
+    pub fn saturating_mul(self, o: u64) -> u64 {
+        let r = overflowing_mul(self, o)
+        if !r.1 { return r.0 }
+        u64.MAX
+    }
+
+    /// `self` to the power `e` (overflow wraps, as in std).
+    pub fn pow(self, e: u32) -> u64 {
+        let mut r: u64 = 1
+        let mut b = self
+        let mut e = e
+        while e > 0 {
+            if e & 1 == 1 { r = r * b }
+            b = b * b
+            e = e >> 1
+        }
+        r
+    }
 }
 
 impl isize {
     pub const MIN: isize = 0 - isize.MAX - 1
     pub const MAX: isize = (usize.MAX >> 1) as isize
     pub const BITS: u32 = usize.BITS
+
+    /// `self + o`, wrapping around on overflow (the same with or without
+    /// overflow checks).
+    pub fn wrapping_add(self, o: isize) -> isize { overflowing_add(self, o).0 }
+    pub fn wrapping_sub(self, o: isize) -> isize { overflowing_sub(self, o).0 }
+    pub fn wrapping_mul(self, o: isize) -> isize { overflowing_mul(self, o).0 }
+
+    /// `self + o`, or `None` on overflow.
+    pub fn checked_add(self, o: isize) -> Option<isize> {
+        let r = overflowing_add(self, o)
+        if r.1 { None } else { Some(r.0) }
+    }
+
+    pub fn checked_sub(self, o: isize) -> Option<isize> {
+        let r = overflowing_sub(self, o)
+        if r.1 { None } else { Some(r.0) }
+    }
+
+    pub fn checked_mul(self, o: isize) -> Option<isize> {
+        let r = overflowing_mul(self, o)
+        if r.1 { None } else { Some(r.0) }
+    }
+
+    /// `(self + o wrapped, whether it overflowed)`.
+    pub fn overflowing_add(self, o: isize) -> (isize, bool) { overflowing_add(self, o) }
+    pub fn overflowing_sub(self, o: isize) -> (isize, bool) { overflowing_sub(self, o) }
+    pub fn overflowing_mul(self, o: isize) -> (isize, bool) { overflowing_mul(self, o) }
+
+    /// `self + o`, stopping at `MIN` or `MAX`.
+    pub fn saturating_add(self, o: isize) -> isize {
+        let r = overflowing_add(self, o)
+        if !r.1 { return r.0 }
+        if o < 0 { isize.MIN } else { isize.MAX }
+    }
+
+    pub fn saturating_sub(self, o: isize) -> isize {
+        let r = overflowing_sub(self, o)
+        if !r.1 { return r.0 }
+        if o > 0 { isize.MIN } else { isize.MAX }
+    }
+
+    pub fn saturating_mul(self, o: isize) -> isize {
+        let r = overflowing_mul(self, o)
+        if !r.1 { return r.0 }
+        if (self < 0) != (o < 0) { isize.MIN } else { isize.MAX }
+    }
+
+    /// `self` to the power `e` (overflow wraps, as in std).
+    pub fn pow(self, e: u32) -> isize {
+        let mut r: isize = 1
+        let mut b = self
+        let mut e = e
+        while e > 0 {
+            if e & 1 == 1 { r = r * b }
+            b = b * b
+            e = e >> 1
+        }
+        r
+    }
+
+    /// The absolute value (`MIN.abs()` wraps to `MIN`).
+    pub fn abs(self) -> isize { if self < 0 { 0 - self } else { self } }
+
+    /// -1, 0 or 1.
+    pub fn signum(self) -> isize { if self < 0 { 0 - 1 } else if self > 0 { 1 } else { 0 } }
 }
 
 impl usize {
     pub const MIN: usize = 0
     pub const MAX: usize = (0i64 - 1) as usize
     pub const BITS: u32 = (size_of<usize>() * 8) as u32
+
+    /// `self + o`, wrapping around on overflow (the same with or without
+    /// overflow checks).
+    pub fn wrapping_add(self, o: usize) -> usize { overflowing_add(self, o).0 }
+    pub fn wrapping_sub(self, o: usize) -> usize { overflowing_sub(self, o).0 }
+    pub fn wrapping_mul(self, o: usize) -> usize { overflowing_mul(self, o).0 }
+
+    /// `self + o`, or `None` on overflow.
+    pub fn checked_add(self, o: usize) -> Option<usize> {
+        let r = overflowing_add(self, o)
+        if r.1 { None } else { Some(r.0) }
+    }
+
+    pub fn checked_sub(self, o: usize) -> Option<usize> {
+        let r = overflowing_sub(self, o)
+        if r.1 { None } else { Some(r.0) }
+    }
+
+    pub fn checked_mul(self, o: usize) -> Option<usize> {
+        let r = overflowing_mul(self, o)
+        if r.1 { None } else { Some(r.0) }
+    }
+
+    /// `(self + o wrapped, whether it overflowed)`.
+    pub fn overflowing_add(self, o: usize) -> (usize, bool) { overflowing_add(self, o) }
+    pub fn overflowing_sub(self, o: usize) -> (usize, bool) { overflowing_sub(self, o) }
+    pub fn overflowing_mul(self, o: usize) -> (usize, bool) { overflowing_mul(self, o) }
+
+    /// `self + o`, stopping at `MIN` or `MAX`.
+    pub fn saturating_add(self, o: usize) -> usize {
+        let r = overflowing_add(self, o)
+        if !r.1 { return r.0 }
+        usize.MAX
+    }
+
+    pub fn saturating_sub(self, o: usize) -> usize {
+        let r = overflowing_sub(self, o)
+        if !r.1 { return r.0 }
+        usize.MIN
+    }
+
+    pub fn saturating_mul(self, o: usize) -> usize {
+        let r = overflowing_mul(self, o)
+        if !r.1 { return r.0 }
+        usize.MAX
+    }
+
+    /// `self` to the power `e` (overflow wraps, as in std).
+    pub fn pow(self, e: u32) -> usize {
+        let mut r: usize = 1
+        let mut b = self
+        let mut e = e
+        while e > 0 {
+            if e & 1 == 1 { r = r * b }
+            b = b * b
+            e = e >> 1
+        }
+        r
+    }
 }
 
 impl f64 {

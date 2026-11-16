@@ -317,6 +317,7 @@ fn check_fn_inner(
             export: decl.is_export,
             span: decl.span,
             async_frame: None,
+            overflow_checks: cx.ck.overflow_checks && !cx.ck.modules[cx.module as usize].is_std,
         },
         closures,
     ))
@@ -370,6 +371,7 @@ fn check_async_body(
     let mut locals = cx.locals;
     let body = spill_suspends(body, &mut locals);
     let closures = std::mem::take(&mut cx.pending_funcs);
+    let overflow_checks = cx.ck.overflow_checks && !cx.ck.modules[cx.module as usize].is_std;
     Ok((
         xir::Func {
             name,
@@ -380,6 +382,7 @@ fn check_async_body(
             export: false,
             span,
             async_frame: Some((frame, cx_local)),
+            overflow_checks,
         },
         closures,
     ))
@@ -2790,7 +2793,8 @@ impl<'a> FnCx<'a> {
         span: Span,
     ) -> Result<X> {
         if let E::Field(base, name, targs) = &callee.kind {
-            if self.path(base)?.is_none() {
+            // a value, or a constant or unit variant (`i32.MAX.checked_add(1)`)
+            if matches!(self.path(base)?, None | Some(PathRes::Member(..))) {
                 return self.method_call(base, name, targs, args, expected, span);
             }
         }
@@ -3973,6 +3977,33 @@ impl<'a> FnCx<'a> {
                 Ok(x(
                     K::Intrinsic(xir::Intrinsic::Fence, Vec::new()),
                     Ty::unit(),
+                    span,
+                ))
+            }
+            IntrinsicFn::OverflowingAdd
+            | IntrinsicFn::OverflowingSub
+            | IntrinsicFn::OverflowingMul => {
+                want(self, 2)?;
+                let a = match targs.first() {
+                    Some(t) => self.expr_as(&args[0], t)?,
+                    None => self.expr(&args[0], None)?,
+                };
+                if !a.ty.is_int() {
+                    return self.err(
+                        args[0].span,
+                        format!("expected an integer, found `{}`", self.ts(&a.ty)),
+                    );
+                }
+                let t = a.ty.clone();
+                let b = self.expr_as(&args[1], &t)?;
+                let op = match i {
+                    IntrinsicFn::OverflowingAdd => "add",
+                    IntrinsicFn::OverflowingSub => "sub",
+                    _ => "mul",
+                };
+                Ok(x(
+                    K::Intrinsic(xir::Intrinsic::Overflowing(op), vec![a, b]),
+                    Ty::Tuple(vec![t, Ty::Bool]),
                     span,
                 ))
             }

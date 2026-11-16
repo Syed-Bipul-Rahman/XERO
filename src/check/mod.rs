@@ -45,6 +45,9 @@ pub enum IntrinsicFn {
     AtomicStore,
     AtomicSwap,
     AtomicAdd,
+    OverflowingAdd,
+    OverflowingSub,
+    OverflowingMul,
     AtomicSub,
     AtomicCas,
     Fence,
@@ -72,6 +75,9 @@ const INTRINSICS: &[(&str, IntrinsicFn)] = &[
     ("atomic_store", IntrinsicFn::AtomicStore),
     ("atomic_swap", IntrinsicFn::AtomicSwap),
     ("atomic_add", IntrinsicFn::AtomicAdd),
+    ("overflowing_add", IntrinsicFn::OverflowingAdd),
+    ("overflowing_sub", IntrinsicFn::OverflowingSub),
+    ("overflowing_mul", IntrinsicFn::OverflowingMul),
     ("atomic_sub", IntrinsicFn::AtomicSub),
     ("atomic_cas", IntrinsicFn::AtomicCas),
     ("fence", IntrinsicFn::Fence),
@@ -299,6 +305,10 @@ pub struct Checker {
     pub diags: Vec<Diagnostic>,
 
     instances: HashMap<FnKey, String>,
+    /// Check `+`, `-` and `*` on integers for overflow (outside std).
+    pub overflow_checks: bool,
+    /// The symbol of the prelude's `panic`, for run-time checks that fail.
+    pub panic_fn: Option<String>,
     queue: VecDeque<(FnKey, String)>,
     pub out_funcs: Vec<xir::Func>,
     externs: HashMap<String, xir::Extern>,
@@ -366,6 +376,8 @@ impl Checker {
             target,
             diags: Vec::new(),
             instances: HashMap::new(),
+            panic_fn: None,
+            overflow_checks: false,
             queue: VecDeque::new(),
             out_funcs: Vec::new(),
             externs: HashMap::new(),
@@ -471,6 +483,16 @@ impl Checker {
                     self.error(Diagnostic::new(sp, "`main` takes no parameters"));
                 }
                 entry = Some((name, ret));
+            }
+        }
+        if let Some(p) = self.prelude {
+            if let Some(Def::Fn(fid)) = self.modules[p as usize].scope.get("panic").map(|b| b.def) {
+                let key = FnKey {
+                    fid,
+                    targs: Vec::new(),
+                    self_ty: None,
+                };
+                self.panic_fn = Some(self.instance(key));
             }
         }
         if entry.is_none() && !is_lib {

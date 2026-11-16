@@ -32,9 +32,15 @@ pub struct Options {
     pub lib: bool,
     pub intel_syntax: bool,
     pub libc: Libc,
+    /// Panic on integer overflow; `None`: only below `-O2`.
+    pub overflow_checks: Option<bool>,
 }
 
 impl Options {
+    pub fn overflow_checks_on(&self) -> bool {
+        self.overflow_checks.unwrap_or(self.opt_level < 2)
+    }
+
     /// Is the C library used, given whether the program declares C functions?
     pub fn uses_libc(&self, declares_c_fns: bool) -> bool {
         if !self.target.triple.contains("linux") {
@@ -463,9 +469,10 @@ pub fn compile_to_llvm(
     opts: &Options,
 ) -> Result<(String, String, bool), FrontendError> {
     let (modules, root, libc) = load(fe, &opts.input, opts)?;
-    let ck = Checker::new(Target {
+    let mut ck = Checker::new(Target {
         ptr_bits: opts.target.ptr_bits,
     });
+    ck.overflow_checks = opts.overflow_checks_on();
     let (prog, ck) = ck
         .run(modules, root, opts.lib)
         .map_err(FrontendError::Diags)?;

@@ -631,7 +631,8 @@ impl<'a> Codegen<'a> {
     }
 
     /// Branch to a trap if `cond` (i1) is false.
-    fn check(&mut self, cond: &str) {
+    /// Branch to a panic with `msg` if `cond` (i1) is false.
+    fn check_msg(&mut self, cond: &str, msg: &str) {
         let ok = self.new_label("ok");
         let fail = self.new_label("fail");
         self.term(&format!(
@@ -639,7 +640,21 @@ impl<'a> Codegen<'a> {
         ));
         let _ = writeln!(self.body, "{fail}:");
         self.terminated = false;
-        self.trap();
+        match self.ck.panic_fn.clone() {
+            Some(p) => {
+                let g = self.string(msg.as_bytes());
+                let st = self.llty(&Ty::reference(Ty::Str, false));
+                let us = self.usize_ty();
+                let nt = self.llty(&Ty::Never);
+                let f = quote(&p);
+                self.ins(&format!(
+                    "call {nt} {f}({st} {{ ptr {g}, {us} {} }})",
+                    msg.len()
+                ));
+                self.term("unreachable");
+            }
+            None => self.trap(),
+        }
         let _ = writeln!(self.body, "{ok}:");
         self.terminated = false;
         if !self.globals.contains("!0 = ") {
@@ -1195,7 +1210,7 @@ impl<'a> Codegen<'a> {
                     (Ty::Array(e, n), PlacePtr::Thin(bp)) => {
                         let c = self.fresh();
                         self.ins(&format!("{c} = icmp ult {us} {iv}, {n}"));
-                        self.check(&c);
+                        self.check_msg(&c, "index out of bounds");
                         let r = self.fresh();
                         let aty = self.llty(&bt);
                         let _ = e;
@@ -1212,7 +1227,7 @@ impl<'a> Codegen<'a> {
                         self.ins(&format!("{len} = extractvalue {fty} {fv}, 1"));
                         let c = self.fresh();
                         self.ins(&format!("{c} = icmp ult {us} {iv}, {len}"));
-                        self.check(&c);
+                        self.check_msg(&c, "index out of bounds");
                         let r = self.fresh();
                         let ety = self.llty(e);
                         self.ins(&format!(
@@ -1266,7 +1281,7 @@ impl<'a> Codegen<'a> {
                 self.ins(&format!("{c} = icmp ule {us} {hi}, {len}"));
                 let ok = self.fresh();
                 self.ins(&format!("{ok} = and i1 {a}, {c}"));
-                self.check(&ok);
+                self.check_msg(&ok, "slice range out of bounds");
                 let ptr = self.fresh();
                 self.ins(&format!(
                     "{ptr} = getelementptr inbounds {elem}, ptr {data}, {us} {lo}"
@@ -2065,7 +2080,7 @@ impl<'a> Codegen<'a> {
                         if !divisor_safe {
                             let nz = self.fresh();
                             self.ins(&format!("{nz} = icmp ne {t} {r}, 0"));
-                            self.check(&nz);
+                            self.check_msg(&nz, "division by zero");
                             if signed {
                                 let min = -(1i128 << (bits - 1));
                                 let a = self.fresh();
@@ -2074,7 +2089,7 @@ impl<'a> Codegen<'a> {
                                 self.ins(&format!("{b} = icmp ne {t} {r}, -1"));
                                 let c = self.fresh();
                                 self.ins(&format!("{c} = or i1 {a}, {b}"));
-                                self.check(&c);
+                                self.check_msg(&c, "division overflow");
                             }
                         }
                         let ins = match (op, signed) {
@@ -2084,6 +2099,22 @@ impl<'a> Codegen<'a> {
                             _ => "urem",
                         };
                         self.ins(&format!("{res} = {ins} {t} {l}, {r}"));
+                    }
+                    BinOp::Add | BinOp::Sub | BinOp::Mul
+                        if self.func.is_some_and(|f| f.overflow_checks) =>
+                    {
+                        let (name, verb) = match op {
+                            BinOp::Add => ("add", "add"),
+                            BinOp::Sub => ("sub", "subtract"),
+                            _ => ("mul", "multiply"),
+                        };
+                        let pair = self.with_overflow(name, signed, l, r, ty);
+                        let o = self.fresh();
+                        self.ins(&format!("{o} = extractvalue {{ {t}, i1 }} {pair}, 1"));
+                        let ok = self.fresh();
+                        self.ins(&format!("{ok} = xor i1 {o}, true"));
+                        self.check_msg(&ok, &format!("attempt to {verb} with overflow"));
+                        self.ins(&format!("{res} = extractvalue {{ {t}, i1 }} {pair}, 0"));
                     }
                     _ => {
                         let ins = match op {
@@ -2101,6 +2132,23 @@ impl<'a> Codegen<'a> {
             _ => unreachable!("arith on {:?}", ty),
         }
         res
+    }
+
+    /// `{ iN result, i1 overflowed }` from `llvm.*.with.overflow`.
+    fn with_overflow(&mut self, op: &str, signed: bool, a: &str, b: &str, ty: &Ty) -> String {
+        let t = self.llty(ty);
+        let name = format!(
+            "llvm.{}{op}.with.overflow.{t}",
+            if signed { "s" } else { "u" }
+        );
+        self.intrinsics.insert(format!(
+            "declare {{ {t}, i1 }} @{name}({t}, {t}) nounwind readnone"
+        ));
+        let r = self.fresh();
+        self.ins(&format!(
+            "{r} = call {{ {t}, i1 }} @{name}({t} {a}, {t} {b})"
+        ));
+        r
     }
 
     fn cast(&mut self, a: &Expr, to: &Ty) -> String {
@@ -2181,6 +2229,12 @@ impl<'a> Codegen<'a> {
 
     fn intrinsic(&mut self, i: &Intrinsic, args: &[Expr], ty: &Ty) -> String {
         match i {
+            Intrinsic::Overflowing(op) => {
+                let a = self.expr(&args[0]);
+                let b = self.expr(&args[1]);
+                let signed = matches!(&args[0].ty, Ty::Int(it) if it.signed());
+                self.with_overflow(op, signed, &a, &b, &args[0].ty)
+            }
             Intrinsic::SizeOf(t) => self.layout(t).0.to_string(),
             Intrinsic::AlignOf(t) => self.layout(t).1.to_string(),
             Intrinsic::Trap => {
