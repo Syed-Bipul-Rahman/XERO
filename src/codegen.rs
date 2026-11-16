@@ -388,6 +388,9 @@ impl<'a> Codegen<'a> {
             Ty::FnPtr(..) => "ptr".into(),
             Ty::Adt(id, args) => {
                 let a = &self.ck.adts[*id as usize];
+                if let Some((_, _, p)) = self.niche(t) {
+                    return self.llty(&p);
+                }
                 if a.is_enum() {
                     let (tag, payload) = self.enum_layout(t);
                     match payload {
@@ -465,6 +468,9 @@ impl<'a> Codegen<'a> {
             ),
             Ty::FnPtr(..) => (p, p),
             Ty::Adt(id, args) => {
+                if let Some((_, _, p)) = self.niche(t) {
+                    return self.layout(&p);
+                }
                 if self.ck.adts[*id as usize].is_enum() {
                     let (tag, payload) = self.enum_layout(t);
                     let tag_l = match tag.as_str() {
@@ -550,6 +556,93 @@ impl<'a> Codegen<'a> {
         };
         let ua = align.min(8);
         (tag.into(), Some((size.div_ceil(ua), unit.into())))
+    }
+
+    /// An enum stored as its one pointer field, null meaning the other
+    /// (fieldless) variant: `Option<&T>`, `Option<Box<T>>`, `Option<fn()>`.
+    /// Returns (fieldless variant, pointer variant, pointer type).
+    fn niche(&self, t: &Ty) -> Option<(u32, u32, Ty)> {
+        let Ty::Adt(id, args) = t else { return None };
+        let a = &self.ck.adts[*id as usize];
+        if !a.is_enum() || a.variants.len() != 2 {
+            return None;
+        }
+        let vs = self.ck.enum_variants(*id, args);
+        let (empty, full) = match (vs[0].len(), vs[1].len()) {
+            (0, 1) => (0, 1),
+            (1, 0) => (1, 0),
+            _ => return None,
+        };
+        let f = &vs[full as usize][0];
+        let non_null = match f {
+            Ty::Ref(inner, _) => !inner.is_unsized(),
+            Ty::FnPtr(..) => true,
+            Ty::Adt(bid, _) => {
+                let b = &self.ck.adts[*bid as usize];
+                b.name == "Box" && self.ck.modules[b.module as usize].path == "std.mem"
+            }
+            _ => false,
+        };
+        non_null.then(|| (empty, full, f.clone()))
+    }
+
+    /// The tag of the enum at `ptr`, as a value of `tag_ty(t)`.
+    fn load_tag(&mut self, t: &Ty, ptr: &str) -> String {
+        let Ty::Adt(id, _) = t else { unreachable!() };
+        let tag_ty = self.tag_ty(t);
+        if let Some((empty, full, _)) = self.niche(t) {
+            let d = &self.ck.adts[*id as usize].discriminants;
+            let (de, df) = (d[empty as usize], d[full as usize]);
+            let p = self.fresh();
+            self.ins(&format!("{p} = load ptr, ptr {ptr}"));
+            let z = self.fresh();
+            self.ins(&format!("{z} = icmp eq ptr {p}, null"));
+            let r = self.fresh();
+            self.ins(&format!(
+                "{r} = select i1 {z}, {tag_ty} {de}, {tag_ty} {df}"
+            ));
+            return r;
+        }
+        let lt = self.llty(t);
+        let tp = self.fresh();
+        self.ins(&format!(
+            "{tp} = getelementptr inbounds {lt}, ptr {ptr}, i32 0, i32 0"
+        ));
+        let tag = self.fresh();
+        self.ins(&format!("{tag} = load {tag_ty}, ptr {tp}"));
+        tag
+    }
+
+    /// Mark the enum at `ptr` as variant `idx` (before its fields are stored).
+    fn store_tag(&mut self, t: &Ty, ptr: &str, idx: u32) {
+        let Ty::Adt(id, _) = t else { unreachable!() };
+        if let Some((empty, _, _)) = self.niche(t) {
+            if idx == empty {
+                self.ins(&format!("store ptr null, ptr {ptr}"));
+            }
+            return;
+        }
+        let disc = self.ck.adts[*id as usize].discriminants[idx as usize];
+        let lt = self.llty(t);
+        let tag_ty = self.tag_ty(t);
+        let tp = self.fresh();
+        self.ins(&format!(
+            "{tp} = getelementptr inbounds {lt}, ptr {ptr}, i32 0, i32 0"
+        ));
+        self.ins(&format!("store {tag_ty} {disc}, ptr {tp}"));
+    }
+
+    /// Where the fields of the enum at `ptr` are.
+    fn payload_ptr(&mut self, t: &Ty, ptr: &str) -> String {
+        if self.niche(t).is_some() {
+            return ptr.to_string();
+        }
+        let lt = self.llty(t);
+        let pp = self.fresh();
+        self.ins(&format!(
+            "{pp} = getelementptr inbounds {lt}, ptr {ptr}, i32 0, i32 1"
+        ));
+        pp
     }
 
     fn variant_llty(&self, t: &Ty, idx: u32) -> String {
@@ -999,14 +1092,8 @@ impl<'a> Codegen<'a> {
                 let a = &self.ck.adts[*id as usize];
                 if a.is_enum() {
                     let variants = self.ck.enum_variants(*id, args);
-                    let ety = self.llty(t);
                     let tag_ty = self.tag_ty(t);
-                    let tp = self.fresh();
-                    self.ins(&format!(
-                        "{tp} = getelementptr inbounds {ety}, ptr %p, i32 0, i32 0"
-                    ));
-                    let tag = self.fresh();
-                    self.ins(&format!("{tag} = load {tag_ty}, ptr {tp}"));
+                    let tag = self.load_tag(t, "%p");
                     let end = self.new_label("end");
                     for (vi, fields) in variants.iter().enumerate() {
                         if !fields.iter().any(|f| self.needs_drop(f)) {
@@ -1020,10 +1107,7 @@ impl<'a> Codegen<'a> {
                         self.term(&format!("br i1 {c}, label %{yes}, label %{no}"));
                         self.start(&yes);
                         let vty = self.struct_llty(fields);
-                        let pp = self.fresh();
-                        self.ins(&format!(
-                            "{pp} = getelementptr inbounds {ety}, ptr %p, i32 0, i32 1"
-                        ));
+                        let pp = self.payload_ptr(t, "%p");
                         for (fi, ft) in fields.iter().enumerate() {
                             if self.needs_drop(ft) {
                                 let fp = self.fresh();
@@ -1564,19 +1648,11 @@ impl<'a> Codegen<'a> {
                 let Ty::Adt(id, _) = &e.ty else {
                     unreachable!()
                 };
-                let disc = self.ck.adts[*id as usize].discriminants[*idx as usize];
-                let tag_ty = self.tag_ty(&e.ty);
-                let tp = self.fresh();
-                self.ins(&format!(
-                    "{tp} = getelementptr inbounds {lt}, ptr {tmp}, i32 0, i32 0"
-                ));
-                self.ins(&format!("store {tag_ty} {disc}, ptr {tp}"));
+                let _ = id;
+                self.store_tag(&e.ty, &tmp, *idx);
                 if !vals.is_empty() {
                     let vty = self.variant_llty(&e.ty, *idx);
-                    let pp = self.fresh();
-                    self.ins(&format!(
-                        "{pp} = getelementptr inbounds {lt}, ptr {tmp}, i32 0, i32 1"
-                    ));
+                    let pp = self.payload_ptr(&e.ty, &tmp);
                     for (i, (v, t)) in vals.iter().enumerate() {
                         let fp = self.fresh();
                         self.ins(&format!(
@@ -2618,22 +2694,14 @@ impl<'a> Codegen<'a> {
                 if a.is_enum() {
                     let disc = a.discriminants[*idx as usize];
                     let tag_ty = self.tag_ty(ty);
-                    let tp = self.fresh();
-                    self.ins(&format!(
-                        "{tp} = getelementptr inbounds {lt}, ptr {ptr}, i32 0, i32 0"
-                    ));
-                    let tag = self.fresh();
-                    self.ins(&format!("{tag} = load {tag_ty}, ptr {tp}"));
+                    let tag = self.load_tag(ty, ptr);
                     let c = self.fresh();
                     self.ins(&format!("{c} = icmp eq {tag_ty} {tag}, {disc}"));
                     self.cond_br(&c, fail);
                     if ps.iter().any(|p| !matches!(p, Pat::Wild | Pat::Bind(..))) {
                         let fields = self.ck.enum_variants(*id, args)[*idx as usize].clone();
                         let vty = self.struct_llty(&fields);
-                        let pp = self.fresh();
-                        self.ins(&format!(
-                            "{pp} = getelementptr inbounds {lt}, ptr {ptr}, i32 0, i32 1"
-                        ));
+                        let pp = self.payload_ptr(ty, ptr);
                         for (i, (p, t)) in ps.iter().zip(&fields).enumerate() {
                             if matches!(p, Pat::Wild | Pat::Bind(..)) {
                                 continue;
@@ -2729,10 +2797,7 @@ impl<'a> Codegen<'a> {
                 let lt = self.llty(ty);
                 let (base, fields, sty) = if self.ck.adts[*id as usize].is_enum() {
                     let fields = self.ck.enum_variants(*id, args)[*idx as usize].clone();
-                    let pp = self.fresh();
-                    self.ins(&format!(
-                        "{pp} = getelementptr inbounds {lt}, ptr {ptr}, i32 0, i32 1"
-                    ));
+                    let pp = self.payload_ptr(ty, ptr);
                     let vty = self.struct_llty(&fields);
                     (pp, fields, vty)
                 } else {
@@ -2821,10 +2886,7 @@ impl<'a> Codegen<'a> {
                 let lt = self.llty(ty);
                 let (base, fields, sty) = if self.ck.adts[*id as usize].is_enum() {
                     let fields = self.ck.enum_variants(*id, args)[*idx as usize].clone();
-                    let pp = self.fresh();
-                    self.ins(&format!(
-                        "{pp} = getelementptr inbounds {lt}, ptr {ptr}, i32 0, i32 1"
-                    ));
+                    let pp = self.payload_ptr(ty, ptr);
                     let vty = self.struct_llty(&fields);
                     (pp, fields, vty)
                 } else {

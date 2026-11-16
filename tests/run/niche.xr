@@ -1,0 +1,56 @@
+// Niche layout: Option<&T>, Option<Box<T>> and Option<fn> are the size
+// of a pointer (null is None).
+
+import std.mem.{Box}
+
+struct Node { v: i32
+    next: Option<Box<Node>> }
+
+fn find(xs: &[i32], want: i32) -> Option<&i32> {
+    for x in xs { if *x == want { return Some(x) } }
+    None
+}
+
+fn twice(x: i32) -> i32 { x * 2 }
+
+fn main() {
+    println(size_of<Option<&i32>>())
+    println(size_of<Option<Box<i32>>>())
+    println(size_of<Option<fn(i32) -> i32>>())
+    println(size_of<Option<i32>>())
+    println(size_of<Option<&str>>())
+    let a = [1, 5, 9]
+    match find(&a, 5) { Some(r) => println(*r), None => println("none") }
+    println(find(&a, 4).is_none())
+    // a linked list owned through Option<Box<..>>
+    let mut head: Option<Box<Node>> = None
+    for i in 0..5 {
+        head = Some(Box.new(Node { v: i, next: head.take() }))
+    }
+    let mut sum = 0
+    let mut cur = &head
+    while cur is Some(n) {
+        sum += n.get().v
+        cur = &n.get().next
+    }
+    println(sum)
+    let f: Option<fn(i32) -> i32> = Some(twice)
+    if f is Some(g) { println(g(21)) }
+    let s: Option<String> = Some(String.from("kept"))
+    println(s.unwrap())
+    let r: Option<&String> = None
+    println(r.is_some())
+}
+
+// output:
+// 8
+// 8
+// 8
+// 8
+// 24
+// 5
+// true
+// 10
+// 42
+// kept
+// false
