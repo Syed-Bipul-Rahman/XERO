@@ -2669,7 +2669,8 @@ impl<'a> FnCx<'a> {
                 Some(s)
             }
         };
-        if let Some(exp) = expected {
+        // a result that is thrown away (`()` expected) says nothing about it
+        if let Some(exp) = expected.filter(|e| !e.is_unit() && !e.is_never()) {
             if ret_tpl.has_params() && *ret_tpl != OPAQUE_RET {
                 let mut trial = slots.clone();
                 // `Box.new(c)` where `Box<dyn T>` is expected: `T` is still the

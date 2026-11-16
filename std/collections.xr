@@ -322,3 +322,25 @@ impl<T: Hash + Eq> HashSet<T> {
         self.map.keys()
     }
 }
+
+impl<K: Clone, V: Clone> Clone for Slot<K, V> {
+    fn clone(&self) -> Slot<K, V> {
+        match self {
+            Slot.Empty => Slot.Empty
+            Slot.Removed => Slot.Removed
+            Slot.Full(k, v) => Slot.Full(k.clone(), v.clone())
+        }
+    }
+}
+
+impl<K: Clone, V: Clone> Clone for HashMap<K, V> {
+    fn clone(&self) -> HashMap<K, V> {
+        HashMap { slots: self.slots.clone(), len: self.len, used: self.used }
+    }
+}
+
+impl<T: Clone> Clone for HashSet<T> {
+    fn clone(&self) -> HashSet<T> {
+        HashSet { map: self.map.clone() }
+    }
+}

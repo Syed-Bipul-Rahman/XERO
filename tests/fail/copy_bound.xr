@@ -1,0 +1,5 @@
+fn dup<T: Copy>(x: T) -> T { x }
+fn main() {
+    dup(String.from("s"))
+}
+// error: the trait `Copy` is not implemented for `String` (required by `T: Copy`)

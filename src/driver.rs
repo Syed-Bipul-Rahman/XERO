@@ -253,9 +253,70 @@ fn parse_file(
     path: String,
     text: String,
 ) -> Result<crate::ast::Module, Diagnostic> {
-    let file = sm.add(path, text);
+    let file = sm.add(path.clone(), text);
     let toks = crate::lexer::lex(file, &sm.file(file).text)?;
-    crate::parser::parse_module(file, toks)
+    let mut m = crate::parser::parse_module(file, toks)?;
+    derive_clone(sm, &path, &mut m)?;
+    Ok(m)
+}
+
+/// Every `copy` struct and enum gets `Clone` (a copy), unless the module
+/// implements it already.
+fn derive_clone(
+    sm: &mut SourceMap,
+    path: &str,
+    m: &mut crate::ast::Module,
+) -> Result<(), Diagnostic> {
+    use crate::ast::{ItemKind, TypeKind};
+    let implemented: Vec<String> = m
+        .items
+        .iter()
+        .filter_map(|it| match &it.kind {
+            ItemKind::Impl(i) => match (&i.trait_ref, &i.self_ty.kind) {
+                (Some(t), TypeKind::Path(p, _)) if matches!(&t.kind, TypeKind::Path(tp, _) if tp.last().is_some_and(|x| x.name == "Clone")) => {
+                    p.last().map(|x| x.name.clone())
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    let mut text = String::new();
+    for it in &m.items {
+        let (name, generics, copy) = match &it.kind {
+            ItemKind::Struct(d) => (&d.name, &d.generics, d.is_copy),
+            ItemKind::Enum(d) => (&d.name, &d.generics, d.is_copy),
+            _ => continue,
+        };
+        if !copy || implemented.contains(&name.name) {
+            continue;
+        }
+        let params: Vec<&str> = generics
+            .params
+            .iter()
+            .map(|g| g.name.name.as_str())
+            .collect();
+        let (g, a) = if params.is_empty() {
+            (String::new(), String::new())
+        } else {
+            (
+                format!("<{}>", params.join(", ")),
+                format!("<{}>", params.join(", ")),
+            )
+        };
+        let n = &name.name;
+        text.push_str(&format!(
+            "impl{g} Clone for {n}{a} {{\n    fn clone(&self) -> {n}{a} {{\n        *self\n    }}\n}}\n"
+        ));
+    }
+    if text.is_empty() {
+        return Ok(());
+    }
+    let file = sm.add(format!("{path} (derived Clone)"), text);
+    let toks = crate::lexer::lex(file, &sm.file(file).text)?;
+    let extra = crate::parser::parse_module(file, toks)?;
+    m.items.extend(extra.items);
+    Ok(())
 }
 
 /// Load the root file and everything it (transitively) imports.

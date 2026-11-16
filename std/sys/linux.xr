@@ -726,12 +726,6 @@ pub unsafe fn dir_close(h: isize) {
 
 // --------------------------------------------------------------- processes
 
-fn push_all(v: &mut Vec<u8>, s: &[u8]) {
-    for b in s {
-        v.push(*b)
-    }
-}
-
 /// The paths to try for `prog`: itself if it has a `/`, else each
 /// directory of `PATH` joined with it (all NUL-terminated).
 unsafe fn exec_candidates(prog: *u8) -> Vec<Vec<u8>> {
@@ -747,7 +741,7 @@ unsafe fn exec_candidates(prog: *u8) -> Vec<Vec<u8>> {
     let mut out: Vec<Vec<u8>> = Vec.new()
     if slash || n == 0 {
         let mut v: Vec<u8> = Vec.new()
-        push_all(&mut v, name)
+        v.extend_from_slice(name)
         v.push(0)
         out.push(v)
         return out
@@ -771,10 +765,10 @@ unsafe fn exec_candidates(prog: *u8) -> Vec<Vec<u8>> {
         if dir.is_empty() {
             v.push(46)
         } else {
-            push_all(&mut v, dir.as_bytes())
+            v.extend_from_slice(dir.as_bytes())
         }
         v.push(47)
-        push_all(&mut v, name)
+        v.extend_from_slice(name)
         v.push(0)
         out.push(v)
     }

@@ -391,19 +391,11 @@ pub fn read_dir(path: &str) -> Result<Vec<String>, Error> {
         let s = unsafe { str_from_raw(&name as *u8, n as usize) }
         if s != "." && s != ".." {
             // names that are not UTF-8 are skipped
-            if String.from_utf8(copy_bytes(s.as_bytes())) is Some(t) {
+            if String.from_utf8(s.as_bytes().to_vec()) is Some(t) {
                 names.push(t)
             }
         }
     }
     unsafe { sys.dir_close(h) }
     Ok(names)
-}
-
-fn copy_bytes(b: &[u8]) -> Vec<u8> {
-    let mut v: Vec<u8> = Vec.with_capacity(b.len())
-    for c in b {
-        v.push(*c)
-    }
-    v
 }

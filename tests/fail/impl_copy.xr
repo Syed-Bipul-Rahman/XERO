@@ -1,0 +1,4 @@
+struct S { a: i32 }
+impl Copy for S {}
+fn main() {}
+// error: `Copy` cannot be implemented: declare the type with `copy struct` or `copy enum`

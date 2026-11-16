@@ -227,6 +227,69 @@ pub copy enum Ordering {
     Greater
 }
 
+/// Types whose values are copied by assignment: declared with `copy struct`
+/// or `copy enum`, and numbers, `bool`, shared references and raw pointers.
+/// The compiler implements it; use it as a bound: `fn twice<T: Copy>(x: T)`.
+pub trait Copy {}
+
+/// Types that can make an independent copy of a value: `v.clone()`.
+/// Every `copy` type has it.
+pub trait Clone {
+    fn clone(&self) -> Self
+}
+
+impl Clone for i8 { fn clone(&self) -> i8 { *self } }
+impl Clone for i16 { fn clone(&self) -> i16 { *self } }
+impl Clone for i32 { fn clone(&self) -> i32 { *self } }
+impl Clone for i64 { fn clone(&self) -> i64 { *self } }
+impl Clone for isize { fn clone(&self) -> isize { *self } }
+impl Clone for u8 { fn clone(&self) -> u8 { *self } }
+impl Clone for u16 { fn clone(&self) -> u16 { *self } }
+impl Clone for u32 { fn clone(&self) -> u32 { *self } }
+impl Clone for u64 { fn clone(&self) -> u64 { *self } }
+impl Clone for usize { fn clone(&self) -> usize { *self } }
+impl Clone for f32 { fn clone(&self) -> f32 { *self } }
+impl Clone for f64 { fn clone(&self) -> f64 { *self } }
+impl Clone for bool { fn clone(&self) -> bool { *self } }
+
+impl<T> Clone for &T {
+    fn clone(&self) -> &T { *self }
+}
+
+impl<T> Clone for *T {
+    fn clone(&self) -> *T { *self }
+}
+
+impl Clone for () {
+    fn clone(&self) -> () { () }
+}
+
+impl<A: Clone, B: Clone> Clone for (A, B) {
+    fn clone(&self) -> (A, B) { (self.0.clone(), self.1.clone()) }
+}
+
+impl<A: Clone, B: Clone, C: Clone> Clone for (A, B, C) {
+    fn clone(&self) -> (A, B, C) { (self.0.clone(), self.1.clone(), self.2.clone()) }
+}
+
+impl<T: Clone> Clone for Option<T> {
+    fn clone(&self) -> Option<T> {
+        match self {
+            Some(v) => Some(v.clone())
+            None => None
+        }
+    }
+}
+
+impl<T: Clone, E: Clone> Clone for Result<T, E> {
+    fn clone(&self) -> Result<T, E> {
+        match self {
+            Ok(v) => Ok(v.clone())
+            Err(e) => Err(e.clone())
+        }
+    }
+}
+
 pub trait Eq {
     fn eq(&self, other: &Self) -> bool
 
@@ -1719,6 +1782,15 @@ impl<T> Iterator for SliceIterMut<T> {
         } else {
             None
         }
+    }
+}
+
+impl<T: Clone> [T] {
+    /// A `Vec` holding a copy of each element.
+    pub fn to_vec(&self) -> Vec<T> {
+        let mut v: Vec<T> = Vec.with_capacity(self.len())
+        v.extend_from_slice(self)
+        v
     }
 }
 

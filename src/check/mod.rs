@@ -1231,6 +1231,10 @@ impl Checker {
             };
             let span = self.impls[iid].span;
             let tname = self.traits[tid as usize].name.clone();
+            if self.prelude_trait("Copy") == Some(tid) {
+                self.error(Diagnostic::new(span, "`Copy` cannot be implemented: declare the type with `copy struct` or `copy enum`"));
+                continue;
+            }
             // methods must match the trait
             let required: Vec<(String, bool, Option<SelfKind>, usize)> = self.traits[tid as usize]
                 .decl
@@ -2674,8 +2678,11 @@ impl Checker {
         }
     }
 
+    /// Traits the compiler implements itself: `Future` for the futures of
+    /// `async fn`s, and `Copy` for the copy types.
     fn is_future_frame(&self, t: &Ty, tid: TraitId) -> bool {
-        matches!(t, Ty::Frame(_)) && self.prelude_trait("Future") == Some(tid)
+        (matches!(t, Ty::Frame(_)) && self.prelude_trait("Future") == Some(tid))
+            || (self.prelude_trait("Copy") == Some(tid) && self.is_copy(t))
     }
 
     // ------------------------------------------------------- trait objects
