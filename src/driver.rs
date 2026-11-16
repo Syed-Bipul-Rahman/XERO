@@ -34,6 +34,14 @@ pub struct Options {
     pub libc: Libc,
     /// Panic on integer overflow; `None`: only below `-O2`.
     pub overflow_checks: Option<bool>,
+    /// More directories to look for imported modules in (after the root
+    /// file's own), e.g. a project's `src` for its tests.
+    pub module_dirs: Vec<PathBuf>,
+    /// Packages (dependencies): `import name` is `<dir>/lib.xr` and
+    /// `import name.a.b` is `<dir>/a/b.xr`.
+    pub packages: Vec<(String, PathBuf)>,
+    /// Source appended to the root file (the test runner's `main`).
+    pub root_suffix: Option<String>,
 }
 
 impl Options {
@@ -325,6 +333,46 @@ fn derive_clone(
     Ok(())
 }
 
+/// The file of module `name`: in a package (dependency) if its first part
+/// names one, else next to the root file, else in `opts.module_dirs`.
+fn find_module(name: &str, root_dir: &Path, opts: &Options) -> PathBuf {
+    // (a test file `tests/greeting.xr` importing `greeting` means the
+    // project's module, not itself)
+    let is_root = |p: &Path| p.canonicalize().ok() == opts.input.canonicalize().ok();
+    let segs: Vec<&str> = name.split('.').collect();
+    if let Some((_, dir)) = opts.packages.iter().find(|(n, _)| n == segs[0]) {
+        let mut p = dir.clone();
+        if segs.len() == 1 {
+            p.push("lib");
+        } else {
+            for seg in &segs[1..] {
+                p.push(seg);
+            }
+        }
+        p.set_extension("xr");
+        return p;
+    }
+    let in_dir = |d: &Path| {
+        let mut p = d.to_path_buf();
+        for seg in &segs {
+            p.push(seg);
+        }
+        p.set_extension("xr");
+        p
+    };
+    let first = in_dir(root_dir);
+    if first.exists() && !is_root(&first) {
+        return first;
+    }
+    for d in &opts.module_dirs {
+        let p = in_dir(d);
+        if p.exists() {
+            return p;
+        }
+    }
+    first
+}
+
 /// Load the root file and everything it (transitively) imports.
 pub fn load(
     fe: &mut Frontend,
@@ -335,8 +383,12 @@ pub fn load(
     // std.sys depends on whether libc is used, which depends on the
     // program's own C declarations: load it after everything else.
     let libc_choice: std::cell::Cell<Option<bool>> = std::cell::Cell::new(None);
-    let text = std::fs::read_to_string(root)
+    let mut text = std::fs::read_to_string(root)
         .map_err(|e| FrontendError::Io(format!("cannot read `{}`: {e}", root.display())))?;
+    if let Some(extra) = &opts.root_suffix {
+        text.push('\n');
+        text.push_str(extra);
+    }
     let root_dir = root.parent().map(|p| p.to_path_buf()).unwrap_or_default();
     let ast = parse_file(&mut fe.sm, root.display().to_string(), text)
         .map_err(|d| FrontendError::Diags(vec![d]))?;
@@ -385,11 +437,7 @@ pub fn load(
                 format!("unknown standard library module `{name}`"),
             ));
         } else {
-            let mut p = root_dir.clone();
-            for seg in name.split('.') {
-                p.push(seg);
-            }
-            p.set_extension("xr");
+            let p = find_module(name, &root_dir, opts);
             let text = std::fs::read_to_string(&p).map_err(|_| {
                 Diagnostic::new(
                     span,

@@ -14,6 +14,7 @@ pub mod lexer;
 #[cfg(feature = "llvm")]
 pub mod llvm;
 pub mod parser;
+pub mod project;
 pub mod target;
 pub mod types;
 pub mod xir;

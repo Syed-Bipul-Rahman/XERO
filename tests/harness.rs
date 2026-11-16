@@ -221,6 +221,76 @@ fn rejected_programs() {
     }
 }
 
+/// `xeroc new`, then `build`, `run` and `test` in the project, with a
+/// library it depends on by path.
+#[test]
+fn project_workflow() {
+    let tmp = std::env::temp_dir().join(format!("xero-proj-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let x = |dir: &Path, args: &[&str]| {
+        Command::new(xeroc())
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap()
+    };
+    let ok = |o: &std::process::Output, what: &str| {
+        assert!(
+            o.status.success(),
+            "{what} failed:\n{}{}",
+            String::from_utf8_lossy(&o.stdout),
+            String::from_utf8_lossy(&o.stderr)
+        );
+        String::from_utf8_lossy(&o.stdout).replace("\r\n", "\n")
+    };
+    ok(&x(&tmp, &["new", "app"]), "new app");
+    ok(&x(&tmp, &["new", "--lib", "mathlib"]), "new --lib");
+    std::fs::write(
+        tmp.join("mathlib/src/lib.xr"),
+        "module mathlib\n\npub fn triple(x: i32) -> i32 {\n    x * 3\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.join("mathlib/tests/basics.xr"),
+        "import mathlib\n\nfn test_triple() {\n    assert_eq(mathlib.triple(2), 6)\n}\n\nfn test_broken() {\n    assert_eq(mathlib.triple(2), 7)\n}\n",
+    )
+    .unwrap();
+    let app = tmp.join("app");
+    let mut manifest = std::fs::read_to_string(app.join("xero.toml")).unwrap();
+    manifest.push_str("mathlib = { path = \"../mathlib\" }\n");
+    std::fs::write(app.join("xero.toml"), manifest).unwrap();
+    std::fs::write(
+        app.join("src/main.xr"),
+        "import greeting\nimport mathlib\n\nfn main() {\n    println(greeting.hello(\"Xero\"))\n    println(mathlib.triple(14))\n}\n",
+    )
+    .unwrap();
+    let out = ok(&x(&app, &["run"]), "run");
+    assert_eq!(out, "Hello, Xero!\n42\n");
+    ok(&x(&app, &["build"]), "build");
+    let exe = app
+        .join("build/app")
+        .with_extension(std::env::consts::EXE_EXTENSION);
+    let built = Command::new(&exe).output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&built.stdout).replace("\r\n", "\n"),
+        "Hello, Xero!\n42\n"
+    );
+    let t = ok(&x(&app, &["test"]), "test");
+    assert!(t.contains("test greeting::test_hello ... ok"), "{t}");
+    // one test passes, one fails: exit code 1 and the assertion shown
+    let lib = x(&tmp.join("mathlib"), &["test"]);
+    assert!(!lib.status.success());
+    let lt = String::from_utf8_lossy(&lib.stdout);
+    assert!(lt.contains("test basics::test_triple ... ok"), "{lt}");
+    assert!(lt.contains("test basics::test_broken ... FAILED"), "{lt}");
+    assert!(lt.contains("left: 6"), "{lt}");
+    assert!(lt.contains("1 passed, 1 failed"), "{lt}");
+    let only = ok(&x(&tmp.join("mathlib"), &["test", "triple"]), "test filter");
+    assert!(only.contains("1 passed, 0 failed"), "{only}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 /// With overflow checks, `+` that overflows panics with a message; without
 /// them it wraps.
 #[test]

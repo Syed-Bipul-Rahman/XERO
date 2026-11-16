@@ -1534,6 +1534,26 @@ pub fn panic(message: &str) -> ! {
     sys.abort_process()
 }
 
+/// Panic unless `left == right`, showing both values.
+pub fn assert_eq<T: Eq + Display>(left: T, right: T) {
+    if !(left == right) {
+        let mut m = String.from("assertion failed: left == right\n  left: ")
+        left.fmt(&mut m)
+        m.push_str("\n right: ")
+        right.fmt(&mut m)
+        panic(m.as_str())
+    }
+}
+
+/// Panic unless `left != right`.
+pub fn assert_ne<T: Eq + Display>(left: T, right: T) {
+    if left == right {
+        let mut m = String.from("assertion failed: left != right\n  both: ")
+        left.fmt(&mut m)
+        panic(m.as_str())
+    }
+}
+
 pub fn assert(condition: bool, message: &str) {
     if !condition {
         panic(message)
