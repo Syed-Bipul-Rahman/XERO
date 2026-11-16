@@ -1,0 +1,49 @@
+// Moving fields out of a struct or tuple one at a time; the rest is
+// destroyed at the end of the scope.
+
+struct Out { status: i32
+    stdout: String
+    stderr: String }
+
+struct Pair { a: Out
+    b: String }
+
+fn take(s: String) { println(s) }
+
+fn main() {
+    let o = Out { status: 3, stdout: String.from("out"), stderr: String.from("err") }
+    take(o.stdout)
+    take(o.stderr)
+    println(o.status)
+
+    let p = Out { status: 1, stdout: String.from("only out"), stderr: String.from("left behind") }
+    take(p.stdout)
+
+    let mut q = Pair { a: Out { status: 2, stdout: String.from("deep"), stderr: String.from("deep err") }, b: String.from("b") }
+    take(q.a.stdout)
+    println(q.b)
+    q = Pair { a: Out { status: 4, stdout: String.from("new"), stderr: String.from("new err") }, b: String.from("nb") }
+    take(q.a.stderr)
+
+    let t = (String.from("t0"), String.from("t1"))
+    take(t.1)
+    println(t.0)
+    let mut n = 0
+    while n < 3 {
+        let r = Out { status: n, stdout: String.from("loop"), stderr: String.from("loop err") }
+        if n == 1 { take(r.stdout) }
+        n += 1
+    }
+}
+
+// output:
+// out
+// err
+// 3
+// only out
+// deep
+// b
+// new err
+// t1
+// t0
+// loop

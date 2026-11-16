@@ -1,0 +1,9 @@
+struct S { a: String
+    b: String }
+fn take(s: String) {}
+fn main() {
+    let mut o = S { a: String.from("a"), b: String.from("b") }
+    take(o.a)
+    o.a = String.from("z")
+}
+// error: cannot assign to `a` of `o`, which was moved out

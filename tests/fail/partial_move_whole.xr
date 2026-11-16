@@ -1,0 +1,9 @@
+struct S { a: String
+    b: String }
+fn take(s: String) {}
+fn main() {
+    let mut o = S { a: String.from("a"), b: String.from("b") }
+    take(o.a)
+    let x = o
+}
+// error: use of partly moved value `o`: `a` was moved out

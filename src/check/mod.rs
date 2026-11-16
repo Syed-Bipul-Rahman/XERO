@@ -160,6 +160,13 @@ impl AdtDef {
         matches!(self.kind, AdtKind::Enum(_))
     }
 
+    pub fn field_names(&self) -> Vec<String> {
+        match &self.kind {
+            AdtKind::Struct(fs) => fs.iter().map(|f| f.name.name.clone()).collect(),
+            AdtKind::Enum(_) => Vec::new(),
+        }
+    }
+
     pub fn field_index(&self, name: &str) -> Option<usize> {
         match &self.kind {
             AdtKind::Struct(fs) => fs.iter().position(|f| f.name.name == name),
@@ -1602,6 +1609,19 @@ impl Checker {
     }
 
     /// Field types of a struct, tuple or closure environment.
+    /// Can one field of a value of type `t` be moved out, leaving the others
+    /// usable? (A struct without a `drop` block, or a tuple.)
+    pub fn partial_move_ok(&self, t: &Ty) -> bool {
+        match t {
+            Ty::Adt(id, _) => {
+                let a = &self.adts[*id as usize];
+                !a.is_enum() && a.drop_impl.is_none()
+            }
+            Ty::Tuple(_) => true,
+            _ => false,
+        }
+    }
+
     pub fn fields_of(&self, t: &Ty) -> Option<Vec<Ty>> {
         match t {
             Ty::Adt(id, args) if !self.adts[*id as usize].is_enum() => {

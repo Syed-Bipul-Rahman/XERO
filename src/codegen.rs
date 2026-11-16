@@ -32,6 +32,9 @@ pub struct Codegen<'a> {
     out: String,
     strings: HashMap<Vec<u8>, String>,
     glue_done: HashSet<Ty>,
+    /// Flags for fields moved out of a local (the rest is still owned):
+    /// (local, field) -> the flag's alloca.
+    field_moved: HashMap<(LocalId, u32), String>,
     glue_queue: Vec<Ty>,
     intrinsics: BTreeSet<String>,
     externs: HashMap<String, (Vec<Ty>, Ty, bool)>,
@@ -71,6 +74,7 @@ pub fn generate(
         out: String::new(),
         strings: HashMap::new(),
         glue_done: HashSet::new(),
+        field_moved: HashMap::new(),
         glue_queue: Vec::new(),
         intrinsics: BTreeSet::new(),
         externs: prog
@@ -650,6 +654,7 @@ impl<'a> Codegen<'a> {
         self.func = Some(f);
         self.body.clear();
         self.allocas.clear();
+        self.field_moved.clear();
         self.tmp = 0;
         self.label = 0;
         self.terminated = false;
@@ -852,9 +857,79 @@ impl<'a> Codegen<'a> {
         self.ins(&format!("call void {g}(ptr {ptr})"));
     }
 
+    /// `p` is a local whose fields can be moved out one at a time.
+    fn partial_local(&self, p: &Place) -> Option<LocalId> {
+        let Place::Local(l) = p else { return None };
+        let f = self.func?;
+        if f.async_frame.is_some() || !self.ck.partial_move_ok(&self.local_ty(*l)) {
+            return None;
+        }
+        Some(*l)
+    }
+
+    /// The "moved out" flag of field `i` of local `l`, made on first use.
+    fn field_flag(&mut self, l: LocalId, i: u32) -> String {
+        if let Some(f) = self.field_moved.get(&(l, i)) {
+            return f.clone();
+        }
+        let n = format!("%fm{l}.{i}");
+        let _ = writeln!(self.allocas, "  {n} = alloca i1");
+        let _ = writeln!(self.allocas, "  store i1 false, ptr {n}");
+        self.field_moved.insert((l, i), n.clone());
+        n
+    }
+
     fn drop_local(&mut self, l: LocalId) {
         let t = self.local_ty(l);
         if !self.needs_drop(&t) {
+            return;
+        }
+        let mut moved: Vec<(u32, String)> = self
+            .field_moved
+            .iter()
+            .filter(|((x, _), _)| *x == l)
+            .map(|((_, i), f)| (*i, f.clone()))
+            .collect();
+        if !moved.is_empty() {
+            moved.sort();
+            // drop the fields still owned, then clear the flags
+            let f = self.flag_ptr(l);
+            let c = self.fresh();
+            self.ins(&format!("{c} = load i1, ptr {f}"));
+            let yes = self.new_label("drop");
+            let no = self.new_label("dropped");
+            self.term(&format!("br i1 {c}, label %{yes}, label %{no}"));
+            self.start(&yes);
+            self.ins(&format!("store i1 false, ptr {f}"));
+            let p = self.local_ptr(l);
+            let sty = self.llty(&t);
+            let fields = self.ck.fields_of(&t).unwrap_or_default();
+            for (j, ft) in fields.iter().enumerate() {
+                if !self.needs_drop(ft) {
+                    continue;
+                }
+                let fp = self.fresh();
+                self.ins(&format!(
+                    "{fp} = getelementptr inbounds {sty}, ptr {p}, i32 0, i32 {j}"
+                ));
+                match moved.iter().find(|(i, _)| *i == j as u32) {
+                    Some((_, flag)) => {
+                        let m = self.fresh();
+                        self.ins(&format!("{m} = load i1, ptr {flag}"));
+                        let dropf = self.new_label("dropfield");
+                        let skip = self.new_label("keptfield");
+                        self.term(&format!("br i1 {m}, label %{skip}, label %{dropf}"));
+                        self.start(&dropf);
+                        self.drop_at(&fp, ft);
+                        self.start(&skip);
+                    }
+                    None => self.drop_at(&fp, ft),
+                }
+            }
+            self.start(&no);
+            for (_, flag) in &moved {
+                self.ins(&format!("store i1 false, ptr {flag}"));
+            }
             return;
         }
         let f = self.flag_ptr(l);
@@ -889,6 +964,7 @@ impl<'a> Codegen<'a> {
 
     fn drop_glue(&mut self, t: &Ty) {
         // generated as a separate function; save per-function state
+        let saved_fields = std::mem::take(&mut self.field_moved);
         let saved = (
             std::mem::take(&mut self.body),
             std::mem::take(&mut self.allocas),
@@ -1034,6 +1110,7 @@ impl<'a> Codegen<'a> {
             self.label,
             self.terminated,
         ) = saved;
+        self.field_moved = saved_fields;
     }
 
     fn drop_fields(&mut self, t: &Ty, fields: &[Ty]) {
@@ -1217,6 +1294,12 @@ impl<'a> Codegen<'a> {
     fn consume_path(&mut self, p: &Place) {
         match p {
             Place::Local(l) => self.set_flag(*l, false),
+            Place::Field(b, i) if self.partial_local(b).is_some() => {
+                // the other fields stay owned by the local
+                let l = self.partial_local(b).unwrap();
+                let f = self.field_flag(l, *i);
+                self.ins(&format!("store i1 true, ptr {f}"));
+            }
             Place::Field(b, i) => {
                 let bt = self.place_ty_ctx(b);
                 let fields = self.ck.fields_of(&bt).unwrap_or_default();
