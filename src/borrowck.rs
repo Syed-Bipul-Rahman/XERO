@@ -977,6 +977,12 @@ impl<'a> Ck<'a> {
                     let is_cx = matches!(&args[*j].ty, Ty::Ref(t, _) if matches!(&**t, Ty::Adt(id, _) if Some(*id) == ctx));
                     !is_cx || holds_ctx
                 })
+                // a `&U` (whose `U` holds no references) can only be stored
+                // where references into a `U` fit
+                .filter(|(j, _)| match &args[*j].ty {
+                    Ty::Ref(u, _) if !self.ck.has_refs(u) => self.ck.may_hold_ref_into(inner, u),
+                    _ => true,
+                })
                 .flat_map(|(_, l)| l.iter().copied())
                 .collect();
             let deep = self.inner_loans(&others);

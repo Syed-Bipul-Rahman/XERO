@@ -866,6 +866,15 @@ impl Print for str {
     }
 }
 
+/// References compare the values they point to.
+impl<T: Eq> Eq for &T {
+    fn eq(&self, other: &&T) -> bool { (**self).eq(*other) }
+}
+
+impl<T: Ord> Ord for &T {
+    fn cmp(&self, other: &&T) -> Ordering { (**self).cmp(*other) }
+}
+
 impl<T: Print> Print for &T {
     fn write_to(&self, fd: i32) {
         (**self).write_to(fd)

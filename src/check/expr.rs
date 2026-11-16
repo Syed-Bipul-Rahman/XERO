@@ -3621,6 +3621,21 @@ impl<'a> FnCx<'a> {
         let mut depth = 0;
         self.method_expected = expected.cloned();
         let found = loop {
+            // a reference receiver is first `&Self` itself, for `&self` and
+            // `&mut self` methods of what it refers to (no auto-ref needed),
+            // then `Self` for methods of the reference type
+            if let Ty::Ref(inner, m) = &cand {
+                let inner = (**inner).clone();
+                let m = *m;
+                if let Some(f) = self.find_method(&inner, &name.name) {
+                    let kind = self.ck.fns[f.0 as usize].decl.self_param.map(|s| s.0);
+                    if kind == Some(SelfKind::Ref) || (m && kind == Some(SelfKind::RefMut)) {
+                        cand = inner;
+                        depth += 1;
+                        break Some(f);
+                    }
+                }
+            }
             if let Some(m) = self.find_method(&cand, &name.name) {
                 break Some(m);
             }

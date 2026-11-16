@@ -1647,6 +1647,74 @@ impl Checker {
 
     /// Can a value of type `t` hold references (and so keep borrows alive)?
     /// Looks through struct/enum fields and closure captures.
+    /// Could a value of type `container` hold a reference into a value of
+    /// type `t` (to `t` itself or to anything it owns)? False only when
+    /// that is certain, e.g. a `Vec<&String>` and a closure.
+    pub fn may_hold_ref_into(&self, container: &Ty, t: &Ty) -> bool {
+        let mut targets = Vec::new();
+        let mut owned = Vec::new();
+        if !self.walk_owned(container, &mut owned, Some(&mut targets), 0) {
+            return true;
+        }
+        let mut inside = Vec::new();
+        if !self.walk_owned(t, &mut inside, None, 0) {
+            return true;
+        }
+        targets
+            .iter()
+            .any(|w| inside.contains(w) || matches!(w, Ty::Str | Ty::Slice(_)))
+    }
+
+    /// Collect `t` and every type it owns (through fields, elements and raw
+    /// pointers) into `out`, and the types it holds references to into
+    /// `refs` (followed too). False if some part is unknown (a generic
+    /// parameter, a trait object, a future).
+    fn walk_owned(
+        &self,
+        t: &Ty,
+        out: &mut Vec<Ty>,
+        mut refs: Option<&mut Vec<Ty>>,
+        depth: u32,
+    ) -> bool {
+        if depth > 64 {
+            return false;
+        }
+        if out.contains(t) {
+            return true;
+        }
+        out.push(t.clone());
+        match t {
+            Ty::Ref(w, _) => match refs {
+                Some(r) => {
+                    if !r.contains(w) {
+                        r.push((**w).clone());
+                    }
+                    let mut inner = Vec::new();
+                    self.walk_owned(w, &mut inner, Some(r), depth + 1)
+                }
+                // what a reference points to is not owned
+                None => true,
+            },
+            Ty::Param(_) | Ty::Assoc(_) | Ty::Dyn(_) | Ty::Frame(_) => false,
+            Ty::Array(e, _) | Ty::Slice(e) | Ty::Ptr(e) => self.walk_owned(e, out, refs, depth + 1),
+            Ty::Tuple(ts) => ts
+                .iter()
+                .all(|e| self.walk_owned(e, out, refs.as_deref_mut(), depth + 1)),
+            Ty::Closure(id) => self.closures[*id as usize]
+                .fields
+                .iter()
+                .all(|e| self.walk_owned(e, out, refs.as_deref_mut(), depth + 1)),
+            Ty::Adt(id, args) => {
+                let a = &self.adts[*id as usize];
+                a.fields
+                    .iter()
+                    .chain(a.variants.iter().flatten())
+                    .all(|f| self.walk_owned(&f.subst(args), out, refs.as_deref_mut(), depth + 1))
+            }
+            _ => true,
+        }
+    }
+
     pub fn has_refs(&self, t: &Ty) -> bool {
         self.has_refs_depth(t, 0)
     }
