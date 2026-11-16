@@ -521,6 +521,7 @@ pub fn compile_to_llvm(
         ptr_bits: opts.target.ptr_bits,
     });
     ck.overflow_checks = opts.overflow_checks_on();
+    ck.panic_on_checks = opts.target.hosted;
     let (prog, ck) = ck
         .run(modules, root, opts.lib)
         .map_err(FrontendError::Diags)?;

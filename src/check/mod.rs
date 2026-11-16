@@ -307,6 +307,9 @@ pub struct Checker {
     pub diags: Vec<Diagnostic>,
 
     instances: HashMap<FnKey, String>,
+    /// Run-time checks report failures with `panic` (not on bare metal or
+    /// wasm, where they trap: there may be nowhere to print).
+    pub panic_on_checks: bool,
     /// Check `+`, `-` and `*` on integers for overflow (outside std).
     pub overflow_checks: bool,
     /// The symbol of the prelude's `panic`, for run-time checks that fail.
@@ -380,6 +383,7 @@ impl Checker {
             instances: HashMap::new(),
             panic_fn: None,
             overflow_checks: false,
+            panic_on_checks: true,
             queue: VecDeque::new(),
             out_funcs: Vec::new(),
             externs: HashMap::new(),
@@ -487,7 +491,7 @@ impl Checker {
                 entry = Some((name, ret));
             }
         }
-        if let Some(p) = self.prelude {
+        if let (Some(p), true) = (self.prelude, self.panic_on_checks) {
             if let Some(Def::Fn(fid)) = self.modules[p as usize].scope.get("panic").map(|b| b.def) {
                 let key = FnKey {
                     fid,

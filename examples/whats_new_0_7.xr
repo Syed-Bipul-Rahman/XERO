@@ -1,0 +1,109 @@
+// What's new in Xero 0.7: partial moves, Copy and Clone, associated
+// constants, checked arithmetic, compact Options, TreeMap and VecDeque.
+// (Projects and `xeroc test` are in the README.)
+//
+//   xeroc run examples/whats_new_0_7.xr
+
+struct Output {
+    status: i32
+    stdout: String
+    stderr: String
+}
+
+copy struct Point {
+    x: i32
+    y: i32
+}
+
+impl Point {
+    pub const ORIGIN: Point = Point { x: 0, y: 0 }
+}
+
+trait Shape {
+    const SIDES: u32
+    const NAME: &str = "a shape"
+}
+
+struct Square {}
+impl Shape for Square {
+    const SIDES: u32 = 4
+    const NAME: &str = "a square"
+}
+
+struct Triangle {}
+impl Shape for Triangle {
+    const SIDES: u32 = 3
+}
+
+fn describe<S: Shape>() -> String {
+    format("{} has {} sides", S.NAME, S.SIDES)
+}
+
+fn twice<T: Copy>(x: T) -> (T, T) {
+    (x, x)
+}
+
+fn show(s: String) {
+    print(s)
+}
+
+fn main() {
+    // ---- move fields out one at a time
+    let out = Output { status: 0, stdout: String.from("out\n"), stderr: String.from("") }
+    show(out.stdout)
+    println("exit status {}", out.status)
+
+    // ---- Copy bounds and clone()
+    let p = twice(Point { x: 1, y: 2 }).1
+    println("({}, {})", p.x, p.y)
+    let names = vec_of(&["pear", "apple", "fig"])
+    let mut sorted = names.clone()
+    sorted.sort()
+    println("{} -> {}", names[0], sorted[0])
+    let mut refs: Vec<&String> = Vec.new()
+    for n in &names {
+        refs.push(n)
+    }
+    refs.sort()
+    println("first by reference: {}", refs[0])
+
+    // ---- associated constants
+    println(Point.ORIGIN.x)
+    println(describe<Square>())
+    println(describe<Triangle>())
+    println("{} {}", i32.MAX, u8.MAX)
+
+    // ---- arithmetic that says what happens on overflow
+    println(i32.MAX.checked_add(1).is_none())
+    println(250u8.saturating_add(10))
+    println(i32.MAX.wrapping_add(1))
+    println(2i64.pow(40))
+
+    // ---- Option<&T> and Option<Box<T>> are one pointer
+    println(size_of<Option<&Point>>() == size_of<&Point>())
+
+    // ---- ordered maps and double-ended queues
+    let mut ages: TreeMap<String, i32> = TreeMap.new()
+    ages.insert(String.from("lin"), 31)
+    ages.insert(String.from("ada"), 36)
+    ages.insert(String.from("max"), 28)
+    for (name, age) in ages.iter() {
+        println("{:<4}{}", name, age)
+    }
+    let mut q: VecDeque<i32> = VecDeque.new()
+    q.push_back(2)
+    q.push_back(3)
+    q.push_front(1)
+    while q.pop_front() is Some(x) {
+        print("{} ", x)
+    }
+    println("")
+}
+
+fn vec_of(xs: &[&str]) -> Vec<String> {
+    let mut v: Vec<String> = Vec.new()
+    for x in xs {
+        v.push(x.to_string())
+    }
+    v
+}

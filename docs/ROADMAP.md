@@ -57,6 +57,16 @@
 - [x] `std.time`, `std.process`, directories in `std.fs`, environment variables in `std.env`
 - [x] `async` blocks, `+=` on move-only types, bounds on associated types, items from `iter_mut()` that outlive the next call
 
+## Done in v0.7
+
+- [x] Moving fields out of a struct one at a time
+- [x] `Copy` and `Clone`; traits implemented for references (`Vec<&String>.sort()`)
+- [x] Associated constants, integer limits and checked/wrapping/saturating arithmetic
+- [x] Overflow checks in debug builds; panic messages for failed run-time checks
+- [x] `Option<&T>` and `Option<Box<T>>` the size of a pointer
+- [x] Projects: `xeroc new`, `xero.toml` with path and git dependencies, `xeroc test`
+- [x] `TreeMap` and `VecDeque`
+
 ## Next
 
 ### Concurrency
@@ -66,31 +76,28 @@
 - Thread pools and parallel iterators in the standard library.
 
 ### Standard library
-- `BTreeMap`, `VecDeque`; `Clone`; iterating a directory lazily; file
-  modification times; setting environment variables; piping input to a
-  process.
+- Piping input to a process; setting environment variables; file
+  modification times; iterating a directory lazily; range queries on
+  `TreeMap`.
 
 ### Self-contained programs
 - No C runtime on Windows: call `kernel32` directly.
 
 ### Type system
-- Associated constants; `Copy` and `Clone` traits.
-- Method lookup that tries a reference receiver as `Self` first, so traits
-  can be implemented for `&T` (`Vec<&String>.sort()`).
-- Moving fields out of a struct one at a time.
+- Moving out of fields in `async fn`s one at a time (moving a field there
+  still consumes the whole value).
+- Constants usable in array lengths when they come from an impl.
 
 ### Toolchain
 - LLVM built in on Intel Macs too.
 
 ### Performance and the hardware
 - SIMD vector types (`f32x4`, `i32x8`, ...) mapped to LLVM vectors.
-- Niche layout optimization (`Option<Box<T>>` and `Option<&T>` the size of a pointer).
-- Overflow-checked arithmetic in debug builds.
 - Attributes for packed or aligned layout, `#[inline]` and `#[cold]`.
 - Allocator interface and arena allocators.
 
 ### Tooling
-- Package manager and build tool.
+- A package registry, lock files, and workspaces with several packages.
 - Formatter and language server.
 - Debug info (DWARF) and source maps.
 - Incremental compilation; a self-hosted compiler written in Xero.
