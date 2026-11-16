@@ -75,7 +75,7 @@ fn main() {
         consume(f)
     }
 
-    // moving a field out consumes the struct, destroying the siblings now
+    // moving a field out leaves the others, destroyed with the struct
     let p = Pair { left: Resource.new(9), right: Resource.new(10) }
     let l = p.left
     println("took left")
@@ -108,7 +108,6 @@ fn main() {
 // acquire 8
 // acquire 9
 // acquire 10
-// release 10
 // took left
 // 9
 // acquire 11
@@ -116,6 +115,7 @@ fn main() {
 // end of main
 // release 11
 // release 9
+// release 10
 // release 8
 // release 6
 // release 7

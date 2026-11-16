@@ -1,6 +1,6 @@
-# The Xero Language Reference (v0.6)
+# The Xero Language Reference (v0.7)
 
-This document describes the language as implemented by `xeroc` 0.3. Features
+This document describes the language as implemented by `xeroc` 0.7. Features
 that are reserved but not implemented yet are marked **(reserved)**.
 
 ## 1. Lexical structure
@@ -150,6 +150,26 @@ types are **copied**. Everything else is **moved**. Declare a struct or enum wit
 `Option<T>` is copyable only when its fields are. A `copy` type cannot have a
 `drop` block.
 
+`Copy` is also a trait, for bounds: `fn twice<T: Copy>(x: T) -> (T, T)`. The
+compiler implements it for exactly the copy types; it cannot be implemented by
+hand. `Clone` makes an independent copy of a value with `v.clone()`. Every copy
+type has it, and so do `String`, `Vec<T>`, `Box<T>`, `Option<T>`, `Result`,
+tuples, `HashMap`, `HashSet` and `VecDeque` when their contents do. Implement it
+for your own move types:
+
+```xero
+impl Clone for Account {
+    fn clone(&self) -> Account { Account { name: self.name.clone(), balance: self.balance } }
+}
+```
+
+### Layout
+
+Structs, tuples and arrays are laid out like C's. An enum is a tag followed by
+room for its largest variant, except that `Option<&T>`, `Option<Box<T>>`,
+`Option<fn(...)>` (and any two-variant enum of that shape) are a single pointer,
+with null meaning `None`.
+
 ## 4. Ownership and borrowing
 
 Xero's safety model checks everything at compile time and adds nothing at run time.
@@ -168,6 +188,10 @@ Xero's safety model checks everything at compile time and adds nothing at run ti
    parameter.
 5. **Mutation must be visible**: you can mutate a value only through a `let mut`
    binding or a `&mut` reference.
+6. **Fields move one at a time.** Moving a field out of a local struct or tuple
+   (`take(out.stdout)`) leaves its other fields usable; they are destroyed with
+   it at the end of its scope. The moved field, and the value as a whole, can't
+   be used again (a struct with a `drop` block can't have fields moved out).
 
 ```xero
 struct Resource { id: i32 }
@@ -346,6 +370,30 @@ trait Zero {
 * Trait functions without `self` are called on the type: `T.zero()`,
   `Self.type_name()`.
 
+### Associated constants
+
+```xero
+impl Point {
+    pub const ORIGIN: Point = Point { x: 0, y: 0 }
+}
+
+trait Bounded {
+    const MIN: Self
+    const NAME: &str = "a bounded type"     // a default
+}
+impl Bounded for u8 {
+    const MIN: u8 = 0
+}
+
+fn lowest<T: Bounded>() -> T { T.MIN }
+
+println(Point.ORIGIN.x)
+println(i32.MAX)                            // also MIN and BITS on every integer type
+```
+
+An associated constant can have any type, structs included, and is written
+`Type.NAME`, `Self.NAME` or `T.NAME` for a generic parameter.
+
 ### Functions returning closures and iterators
 
 `impl Trait` as a return type hides the concrete type, which is still known
@@ -477,10 +525,21 @@ automatically.
 
 ### Integer semantics
 
-Arithmetic wraps on overflow (two's complement), so it is never undefined
-behavior. Division by zero and `MIN / -1` stop the program. Shift amounts are
-masked to the bit width. Float-to-int casts saturate. Array and slice indexing
-is bounds-checked, and an out-of-range index stops the program.
+Overflow is never undefined behavior. With **overflow checks**, `+`, `-` and
+`*` on integers that overflow stop the program with `panic: attempt to add with
+overflow`; without them they wrap (two's complement). Checks are on below `-O2`
+(and in `xeroc test`), off at `-O2` and above; `--overflow-checks` and
+`--no-overflow-checks` choose explicitly. The standard library always wraps.
+
+To pick the behavior in the code itself, use the integer methods:
+`a.wrapping_add(b)`, `a.checked_add(b)` (an `Option`), `a.overflowing_add(b)`
+(the result and whether it overflowed) and `a.saturating_add(b)`, and the same
+for `sub` and `mul`, plus `pow`, `abs` and `signum`.
+
+Division by zero and `MIN / -1` stop the program. Shift amounts are masked to
+the bit width. Float-to-int casts saturate. Array and slice indexing is
+bounds-checked, and an out-of-range index stops the program with `panic: index
+out of bounds`.
 
 ## 8. Error handling
 
@@ -554,12 +613,12 @@ pointers and `usize`. Pointer arithmetic: `p + n` and `p - n` advance by whole e
 
 | Module | Contents |
 |---|---|
-| prelude | `Option` and `Result` (with `map`, `and_then`, `unwrap_or`, `unwrap_or_else`, `ok_or`, `map_err`, `as_ref`, `take`, ...), `Print`, `print`/`println`/`eprint`/`eprintln`, `format`, `Display`, `panic`, `assert`, operator traits (`Eq`, `Ord`, `Add`, `Sub`, `Mul`, `Div`, `Rem`, `Neg`, `AddAssign`..., `Index`, `IndexMut`, `Deref`, `DerefMut`), `Ordering`, `compare`, `Hash`, `Hasher`, `Borrow`, `str` methods (below), `Iterator` (`next`; `map filter enumerate take skip zip chain`; `fold for_each count last any all find position min max sum collect`), `Range`, `RangeInclusive`, slice `iter`/`iter_mut`, `Future`, `Poll`, `Context`, `Waker` |
+| prelude | `Option` and `Result` (with `map`, `and_then`, `unwrap_or`, `unwrap_or_else`, `ok_or`, `map_err`, `as_ref`, `take`, ...), `Print`, `print`/`println`/`eprint`/`eprintln`, `format`, `Display`, `panic`, `assert`, `assert_eq`, `assert_ne`, `Copy`, `Clone`, operator traits (`Eq`, `Ord`, `Add`, `Sub`, `Mul`, `Div`, `Rem`, `Neg`, `AddAssign`..., `Index`, `IndexMut`, `Deref`, `DerefMut`), `Ordering`, `compare`, `Hash`, `Hasher`, `Borrow`, `str` methods (below), `Iterator` (`next`; `map filter enumerate take skip zip chain`; `fold for_each count last any all find position min max sum collect`), `Range`, `RangeInclusive`, slice `iter`/`iter_mut`, `Future`, `Poll`, `Context`, `Waker` |
 | `str` | `len is_empty as_bytes byte_at find rfind contains starts_with ends_with trim trim_start trim_end split split_once split_whitespace lines bytes replace repeat to_upper to_lower to_string parse_int parse_float` |
 | `std.mem` | `Box<T>`, `alloc`, `realloc_array`, `dealloc`, `swap`, `replace`, `copy_values` |
 | `std.vec` | `Vec<T>`: `push pop get get_mut at at_mut set swap insert remove clear reserve as_slice as_mut_slice iter iter_mut into_iter`, `v[i]`, and with closures `map filter for_each any all count position sort_by sort` |
 | `std.string` | `String`: `from new from_utf8 push_str push_byte push_int as_str as_bytes into_bytes len truncate equals clear`, `+` and `+=` with a `&str`, every `str` method, and `is_utf8` |
-| `std.collections` | `HashMap<K, V>` (`new with_capacity len is_empty insert get get_mut contains_key remove get_or_insert_with clear iter keys values`, `map[&key]`), `HashSet<T>` (`new len is_empty insert contains remove clear iter`) |
+| `std.collections` | `HashMap<K, V>` (`new with_capacity len is_empty insert get get_mut contains_key remove get_or_insert_with clear iter keys values`, `map[&key]`), `HashSet<T>` (`new len is_empty insert contains remove clear iter`), `TreeMap<K, V>` in key order (`new len is_empty insert get get_mut contains_key remove first last clear iter keys values`), `VecDeque<T>` (`new len is_empty push_back push_front pop_back pop_front front back get get_mut clear iter`, `d[i]`) |
 | `std.math` | `min max clamp abs isqrt sqrt pow_int gcd PI E` |
 | `std.io` | `read_into write_all exit_process STDIN STDOUT STDERR` (errors are `errno` values) |
 | `std.fs` | `File` (`open`, `create`, `append`, `read`, `read_all`, `read_to_string`, `write`, `write_str`; closed when destroyed), `read_to_string`, `read`, `write`, `remove`, `rename`, `create_dir`, `create_dir_all`, `remove_dir`, `remove_dir_all`, `read_dir`, `metadata` (`is_file`, `is_dir`, `len`), `exists`, `is_file`, `is_dir`, `parent`, `join`, `Error` (`code`, `message`, printable) |
@@ -639,7 +698,9 @@ if counts.get("xero") is Some(n) { println(n) }
 ```
 
 Keys need `Hash` and `Eq`. Implement both for your own key types (`Hash`
-feeds the fields to a `Hasher`: `self.x.hash(h)`).
+feeds the fields to a `Hasher`: `self.x.hash(h)`). A `TreeMap` needs `Ord`
+keys instead, and visits them in order; a `VecDeque` is a queue open at both
+ends. `HashMap`, `HashSet`, `TreeMap` and `VecDeque` are in the prelude.
 
 ### Processes, time and the environment
 
@@ -814,3 +875,54 @@ fn main() {
   compile error, since it would never do anything.
 * An `async fn` cannot call itself (its future would contain itself), and
   `.await` is not allowed in plain closures.
+
+## 13. Projects and tests
+
+A project is a directory with a `xero.toml`. `xeroc new hello` creates one
+(`--lib` for a library):
+
+```text
+hello/
+  xero.toml          the manifest
+  src/main.xr        the program (a library has src/lib.xr)
+  src/greeting.xr    module `greeting`: `import greeting`
+  tests/greeting.xr  tests
+```
+
+```toml
+[package]
+name = "hello"
+version = "0.1.0"
+
+[dependencies]
+geometry = { path = "../geometry" }
+textutil = { git = "https://github.com/someone/textutil", rev = "v1.2.0" }
+```
+
+Inside a project, `xeroc build`, `xeroc run`, `xeroc check` and `xeroc test`
+take no file name. `build` writes `build/<name>` (a library builds
+`build/<name>.o`). A dependency is imported by its name, which loads its
+`src/lib.xr`, or as `geometry.shapes` for its `src/shapes.xr`. Git
+dependencies are fetched into `build/deps` the first time, at the given tag or
+branch; dependencies of dependencies are included.
+
+`xeroc test` builds each `tests/*.xr` and runs each of its `fn test_...()`
+functions in a separate process, with overflow checks on. A test passes when it
+returns, and fails when it panics, which `assert`, `assert_eq` and `assert_ne`
+do with a message showing the values. `xeroc test name` runs only the tests
+whose name, or file name, contains `name`.
+
+```xero
+import greeting
+
+fn test_hello() {
+    assert_eq(greeting.hello("Xero").as_str(), "Hello, Xero!")
+}
+```
+
+```console
+$ xeroc test
+test greeting::test_hello ... ok
+
+1 passed, 0 failed
+```

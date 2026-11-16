@@ -1,0 +1,80 @@
+// std.collections: TreeMap (ordered) and VecDeque (ring buffer).
+
+fn main() {
+    let mut m: TreeMap<i64, String> = TreeMap.new()
+    for k in [50, 20, 80, 10, 30, 70, 90, 60] {
+        m.insert(k, format("v{}", k))
+    }
+    println(m.len())
+    for (k, v) in m.iter() { print("{}={} ", k, v) }
+    println("")
+    println(m.get(&30).unwrap())
+    println(m.insert(30, String.from("thirty")).unwrap())
+    println(m.remove(&50).unwrap())
+    println(m.remove(&55).is_none())
+    println(m.len())
+    println(*m.first().unwrap().0)
+    println(*m.last().unwrap().0)
+    m.get_mut(&10).unwrap().push_str("!")
+    for k in m.keys() { print("{} ", k) }
+    println("")
+    let mut big: TreeMap<i64, i64> = TreeMap.new()
+    for i in 0..20000 { big.insert((i * 7919) % 20000, i) }
+    for i in 0..10000 { big.remove(&(i * 2)) }
+    println(big.len())
+    let mut prev: i64 = -1
+    let mut sorted = true
+    for k in big.keys() { if *k <= prev { sorted = false }
+        prev = *k }
+    println(sorted)
+    let mut words: TreeMap<String, usize> = TreeMap.new()
+    for w in "pear apple fig apple".split(" ") {
+        let n = match words.get(&w.to_string()) { Some(c) => *c, None => 0 }
+        words.insert(w.to_string(), n + 1)
+    }
+    for (w, n) in words.iter() { print("{}:{} ", w, n) }
+    println("")
+
+    let mut d: VecDeque<i32> = VecDeque.new()
+    for i in 0..5 { d.push_back(i) }
+    d.push_front(-1)
+    d.push_front(-2)
+    println(d.len())
+    println(d.pop_front().unwrap())
+    println(d.pop_back().unwrap())
+    println(d[0])
+    println(*d.back().unwrap())
+    for x in d.iter() { print("{} ", x) }
+    println("")
+    let mut q: VecDeque<String> = VecDeque.new()
+    for i in 0..100 { q.push_back(format("job{}", i))
+        if i % 3 == 0 { q.pop_front() } }
+    println(q.len())
+    println(q.front().unwrap())
+    let q2 = q.clone()
+    println(q2.len())
+}
+
+// output:
+// 8
+// 10=v10 20=v20 30=v30 50=v50 60=v60 70=v70 80=v80 90=v90 
+// v30
+// v30
+// v50
+// true
+// 7
+// 10
+// 90
+// 10 20 30 60 70 80 90 
+// 10000
+// true
+// apple:2 fig:1 pear:1 
+// 7
+// -2
+// 4
+// -1
+// 3
+// -1 0 1 2 3 
+// 66
+// job34
+// 66

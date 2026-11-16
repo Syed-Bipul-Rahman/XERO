@@ -8,7 +8,7 @@ export fn checksum(data: *u8, len: usize) -> u32 {
     let bytes = unsafe { slice_from_raw(data, len) }
     let mut h: u32 = 2166136261
     for b in bytes {
-        h = (h ^ *b as u32) * 16777619
+        h = (h ^ *b as u32).wrapping_mul(16777619)
     }
     h
 }

@@ -115,3 +115,9 @@ impl<T> DerefMut for Box<T> {
         self.get_mut()
     }
 }
+
+impl<T: Clone> Clone for Box<T> {
+    fn clone(&self) -> Box<T> {
+        Box.new(self.get().clone())
+    }
+}

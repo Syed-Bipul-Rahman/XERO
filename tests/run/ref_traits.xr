@@ -1,0 +1,37 @@
+// Traits implemented for references: sorting and comparing Vec<&T>.
+
+import std.collections.{HashMap}
+fn main() {
+    let a = String.from("pear")
+    let b = String.from("apple")
+    let c = String.from("fig")
+    let mut v: Vec<&String> = Vec.new()
+    v.push(&a)
+    v.push(&b)
+    v.push(&c)
+    v.sort()
+    for s in &v { println(*s) }
+    let x = &a
+    let y = &b
+    println(x == y)
+    println(x.cmp(y) == Ordering.Greater)
+    let mut m: HashMap<String, i32> = HashMap.new()
+    m.insert(String.from("k"), 1)
+    let mut keys: Vec<&String> = m.keys().collect()
+    keys.sort()
+    println(keys.len())
+    let mut nums = [3, 1, 2]
+    let mut refs: Vec<&i32> = Vec.new()
+    for n in &nums { refs.push(n) }
+    refs.sort()
+    println(*refs[0])
+}
+
+// output:
+// apple
+// fig
+// pear
+// false
+// true
+// 1
+// 1

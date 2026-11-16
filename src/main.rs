@@ -12,11 +12,21 @@ USAGE:
     xeroc check <file.xr>               type- and borrow-check only
     xeroc targets                       list supported targets
 
+PROJECTS (a directory with a xero.toml):
+    xeroc new <name> [--lib]            create a project
+    xeroc build                         build the project into build/<name>
+    xeroc run [-- args...]              build and run it
+    xeroc check                         check it
+    xeroc test [filter]                 run the fn test_...() functions in tests/*.xr
+
 OPTIONS:
     -o <path>            output path
     --emit <kind>        exe | obj | asm | llvm | llvm-raw | xir   (default: exe)
     -O0 | -O1 | -O2 | -O3 | -Os
                          optimization level (default: -O2)
+    --overflow-checks    panic when +, - or * on integers overflows
+                         (the default below -O2)
+    --no-overflow-checks wrap around instead (the default at -O2 and up)
     --target <name>      cross-compile (see `xeroc targets`)
     --lib                no `main` required; build a library object
     --libc               link the C library (Linux; automatic when the
@@ -46,7 +56,31 @@ fn main() {
         }
         return;
     }
-    if !matches!(cmd, "build" | "run" | "check") {
+    if cmd == "new" {
+        let lib = args.iter().any(|a| a == "--lib");
+        let Some(name) = args[1..].iter().find(|a| !a.starts_with('-')) else {
+            eprintln!("error: `xeroc new` needs a name: `xeroc new hello`");
+            exit(2);
+        };
+        match xeroc::project::new_project(&PathBuf::from(name), lib) {
+            Ok(n) => {
+                println!(
+                    "created {} `{n}` in {name}/",
+                    if lib { "library" } else { "program" }
+                );
+                println!(
+                    "    cd {name} && xeroc {}",
+                    if lib { "test" } else { "run" }
+                );
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                exit(1);
+            }
+        }
+        return;
+    }
+    if !matches!(cmd, "build" | "run" | "check" | "test") {
         eprintln!("error: unknown command `{cmd}`\n\n{USAGE}");
         exit(2);
     }
@@ -54,6 +88,7 @@ fn main() {
     let mut output = None;
     let mut emit = Emit::Exe;
     let mut opt_level = 2;
+    let mut overflow_checks = None;
     let mut target = xeroc::target::host();
     let mut lib = false;
     let mut intel = true;
@@ -108,6 +143,8 @@ fn main() {
             "-O3" => opt_level = 3,
             "-Os" => opt_level = 2,
             "--lib" => lib = true,
+            "--overflow-checks" => overflow_checks = Some(true),
+            "--no-overflow-checks" => overflow_checks = Some(false),
             "--libc" => libc = Libc::Yes,
             "--no-libc" => libc = Libc::No,
             "--att" => intel = false,
@@ -134,10 +171,80 @@ fn main() {
         }
         i += 1;
     }
-    let Some(input) = input else {
-        eprintln!("error: no input file\n\n{USAGE}");
-        exit(2);
+    // no file: the project in this directory (or a parent)
+    let mut project = None;
+    let mut module_dirs = Vec::new();
+    let mut packages = Vec::new();
+    let mut test_filter = None;
+    if cmd == "test" {
+        test_filter = input.take().map(|p: PathBuf| p.display().to_string());
+    }
+    let input = match input {
+        Some(i) => i,
+        None => {
+            let cwd = std::env::current_dir().unwrap_or_default();
+            let p = xeroc::project::Project::find(&cwd).unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                exit(2);
+            });
+            packages = p.packages().unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                exit(1);
+            });
+            let (root, is_lib) = p.root().unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                exit(1);
+            });
+            module_dirs.push(p.src());
+            // a library's tests import it by its name
+            if is_lib {
+                packages.push((p.manifest.name.clone(), p.src()));
+            }
+            if is_lib && matches!(cmd, "build" | "run") {
+                if cmd == "run" {
+                    eprintln!("error: `{}` is a library (src/lib.xr): there is nothing to run; try `xeroc test`", p.manifest.name);
+                    exit(1);
+                }
+                lib = true;
+            }
+            if output.is_none() && cmd == "build" {
+                let b = p.build_dir();
+                let _ = std::fs::create_dir_all(&b);
+                output = Some(if is_lib {
+                    b.join(&p.manifest.name).with_extension("o")
+                } else {
+                    b.join(&p.manifest.name)
+                        .with_extension(std::env::consts::EXE_EXTENSION)
+                });
+                if is_lib {
+                    emit = Emit::Obj;
+                }
+            }
+            project = Some(p);
+            root
+        }
     };
+    if cmd == "test" {
+        let Some(p) = project else {
+            eprintln!("error: `xeroc test` runs a project's tests; run it in a directory with a xero.toml");
+            exit(2);
+        };
+        let base = Options {
+            input: input.clone(),
+            output: None,
+            emit: Emit::Exe,
+            opt_level,
+            target,
+            lib: false,
+            intel_syntax: intel,
+            libc,
+            overflow_checks: Some(overflow_checks.unwrap_or(true)),
+            module_dirs,
+            packages,
+            root_suffix: None,
+        };
+        exit(run_tests(&p, &base, test_filter.as_deref()));
+    }
     if cmd == "check" {
         let opts = Options {
             input,
@@ -148,6 +255,10 @@ fn main() {
             lib,
             intel_syntax: intel,
             libc,
+            overflow_checks,
+            module_dirs,
+            packages,
+            root_suffix: None,
         };
         let mut fe = xeroc::driver::Frontend {
             sm: Default::default(),
@@ -184,6 +295,10 @@ fn main() {
         lib,
         intel_syntax: intel,
         libc,
+        overflow_checks,
+        module_dirs,
+        packages,
+        root_suffix: None,
     };
     match build(&opts) {
         Ok(path) => {
@@ -203,6 +318,89 @@ fn main() {
             eprint!("{msg}");
             exit(1);
         }
+    }
+}
+
+/// Build each `tests/*.xr` with a generated `main`, then run each of its
+/// `fn test_...()` in its own process. Returns the exit code.
+fn run_tests(p: &xeroc::project::Project, base: &Options, filter: Option<&str>) -> i32 {
+    let dir = p.dir.join("tests");
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|f| f.extension().is_some_and(|e| e == "xr"))
+                .collect()
+        })
+        .unwrap_or_default();
+    files.sort();
+    let out_dir = p.build_dir().join("tests");
+    let _ = std::fs::create_dir_all(&out_dir);
+    let (mut passed, mut failed, mut broken) = (0, Vec::new(), 0);
+    for f in &files {
+        let stem = f.file_stem().unwrap().to_string_lossy().to_string();
+        let src = std::fs::read_to_string(f).unwrap_or_default();
+        let names: Vec<String> = xeroc::project::test_names(&src)
+            .into_iter()
+            .filter(|n| filter.is_none_or(|w| n.contains(w) || stem.contains(w)))
+            .collect();
+        if names.is_empty() {
+            continue;
+        }
+        let mut opts = base.clone();
+        opts.input = f.clone();
+        opts.root_suffix = Some(xeroc::project::test_main(&names));
+        let exe = out_dir
+            .join(&stem)
+            .with_extension(std::env::consts::EXE_EXTENSION);
+        opts.output = Some(exe.clone());
+        if let Err(msg) = build(&opts) {
+            eprint!("{msg}");
+            eprintln!("error: tests/{stem}.xr does not compile");
+            broken += 1;
+            continue;
+        }
+        for n in &names {
+            let r = Command::new(&exe).arg(n).output();
+            match r {
+                Ok(o) if o.status.success() => {
+                    println!("test {stem}::{n} ... ok");
+                    passed += 1;
+                }
+                Ok(o) => {
+                    println!("test {stem}::{n} ... FAILED");
+                    let out = String::from_utf8_lossy(&o.stdout);
+                    let err = String::from_utf8_lossy(&o.stderr);
+                    failed.push((format!("{stem}::{n}"), format!("{out}{err}")));
+                }
+                Err(e) => {
+                    println!("test {stem}::{n} ... FAILED");
+                    failed.push((format!("{stem}::{n}"), format!("cannot run: {e}\n")));
+                }
+            }
+        }
+    }
+    for (n, out) in &failed {
+        println!("\n---- {n} ----\n{}", out.trim_end());
+    }
+    let total = passed + failed.len();
+    if total == 0 && broken == 0 {
+        println!("no tests found (write `fn test_something()` in tests/*.xr)");
+        return 0;
+    }
+    println!(
+        "\n{} passed, {} failed{}",
+        passed,
+        failed.len(),
+        if broken > 0 {
+            format!(", {broken} test file(s) did not compile")
+        } else {
+            String::new()
+        }
+    );
+    if failed.is_empty() && broken == 0 {
+        0
+    } else {
+        1
     }
 }
 

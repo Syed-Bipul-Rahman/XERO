@@ -317,6 +317,7 @@ fn check_fn_inner(
             export: decl.is_export,
             span: decl.span,
             async_frame: None,
+            overflow_checks: cx.ck.overflow_checks && !cx.ck.modules[cx.module as usize].is_std,
         },
         closures,
     ))
@@ -370,6 +371,7 @@ fn check_async_body(
     let mut locals = cx.locals;
     let body = spill_suspends(body, &mut locals);
     let closures = std::mem::take(&mut cx.pending_funcs);
+    let overflow_checks = cx.ck.overflow_checks && !cx.ck.modules[cx.module as usize].is_std;
     Ok((
         xir::Func {
             name,
@@ -380,6 +382,7 @@ fn check_async_body(
             export: false,
             span,
             async_frame: Some((frame, cx_local)),
+            overflow_checks,
         },
         closures,
     ))
@@ -1846,7 +1849,9 @@ impl<'a> FnCx<'a> {
                 },
             },
             E::Field(base, name, targs) => {
-                if self.path(base)?.is_some() {
+                // `Type.CONST.field` takes the field of the constant's value
+                let base_is_const = matches!(self.path(base)?, Some(PathRes::Member(..)));
+                if !base_is_const && self.path(base)?.is_some() {
                     // `module.STATIC`
                     if let Some(PathRes::Module(m)) = self.path(base)? {
                         if let Def::Static(sid) =
@@ -2410,6 +2415,20 @@ impl<'a> FnCx<'a> {
                     let targs = if eargs.is_empty() { targs } else { eargs };
                     return self.variant_ctor(aid, idx, targs, &[], expected, span, false);
                 }
+                // an associated constant: `T.ZERO`
+                let cname = Ident {
+                    name: format!("const#{}", name.name),
+                    span: name.span,
+                };
+                if self.has_assoc_fn(&ty, gen, &cname.name) {
+                    return self.assoc_call(ty, gen, &cname, targs, &[], expected, span);
+                }
+                if !self.has_assoc_fn(&ty, gen, &name.name) {
+                    return self.err(
+                        name.span,
+                        format!("no associated constant or function named `{}`", name.name),
+                    );
+                }
                 self.err(
                     name.span,
                     format!(
@@ -2669,7 +2688,8 @@ impl<'a> FnCx<'a> {
                 Some(s)
             }
         };
-        if let Some(exp) = expected {
+        // a result that is thrown away (`()` expected) says nothing about it
+        if let Some(exp) = expected.filter(|e| !e.is_unit() && !e.is_never()) {
             if ret_tpl.has_params() && *ret_tpl != OPAQUE_RET {
                 let mut trial = slots.clone();
                 // `Box.new(c)` where `Box<dyn T>` is expected: `T` is still the
@@ -2773,7 +2793,8 @@ impl<'a> FnCx<'a> {
         span: Span,
     ) -> Result<X> {
         if let E::Field(base, name, targs) = &callee.kind {
-            if self.path(base)?.is_none() {
+            // a value, or a constant or unit variant (`i32.MAX.checked_add(1)`)
+            if matches!(self.path(base)?, None | Some(PathRes::Member(..))) {
                 return self.method_call(base, name, targs, args, expected, span);
             }
         }
@@ -3229,6 +3250,17 @@ impl<'a> FnCx<'a> {
 
     /// `Type.function(...)`
     #[allow(clippy::too_many_arguments)]
+    /// Is `name` an associated function of some impl or trait (so that
+    /// `Type.name` can mean it)?
+    fn has_assoc_fn(&self, _ty: &Ty, _gen: Option<AdtId>, name: &str) -> bool {
+        self.ck.impls.iter().any(|im| im.methods.contains_key(name))
+            || self
+                .ck
+                .traits
+                .iter()
+                .any(|t| t.decl.methods.iter().any(|m| m.name.name == name))
+    }
+
     fn assoc_call(
         &mut self,
         ty: Ty,
@@ -3621,6 +3653,21 @@ impl<'a> FnCx<'a> {
         let mut depth = 0;
         self.method_expected = expected.cloned();
         let found = loop {
+            // a reference receiver is first `&Self` itself, for `&self` and
+            // `&mut self` methods of what it refers to (no auto-ref needed),
+            // then `Self` for methods of the reference type
+            if let Ty::Ref(inner, m) = &cand {
+                let inner = (**inner).clone();
+                let m = *m;
+                if let Some(f) = self.find_method(&inner, &name.name) {
+                    let kind = self.ck.fns[f.0 as usize].decl.self_param.map(|s| s.0);
+                    if kind == Some(SelfKind::Ref) || (m && kind == Some(SelfKind::RefMut)) {
+                        cand = inner;
+                        depth += 1;
+                        break Some(f);
+                    }
+                }
+            }
             if let Some(m) = self.find_method(&cand, &name.name) {
                 break Some(m);
             }
@@ -3930,6 +3977,33 @@ impl<'a> FnCx<'a> {
                 Ok(x(
                     K::Intrinsic(xir::Intrinsic::Fence, Vec::new()),
                     Ty::unit(),
+                    span,
+                ))
+            }
+            IntrinsicFn::OverflowingAdd
+            | IntrinsicFn::OverflowingSub
+            | IntrinsicFn::OverflowingMul => {
+                want(self, 2)?;
+                let a = match targs.first() {
+                    Some(t) => self.expr_as(&args[0], t)?,
+                    None => self.expr(&args[0], None)?,
+                };
+                if !a.ty.is_int() {
+                    return self.err(
+                        args[0].span,
+                        format!("expected an integer, found `{}`", self.ts(&a.ty)),
+                    );
+                }
+                let t = a.ty.clone();
+                let b = self.expr_as(&args[1], &t)?;
+                let op = match i {
+                    IntrinsicFn::OverflowingAdd => "add",
+                    IntrinsicFn::OverflowingSub => "sub",
+                    _ => "mul",
+                };
+                Ok(x(
+                    K::Intrinsic(xir::Intrinsic::Overflowing(op), vec![a, b]),
+                    Ty::Tuple(vec![t, Ty::Bool]),
                     span,
                 ))
             }

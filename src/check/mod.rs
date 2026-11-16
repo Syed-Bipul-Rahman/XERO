@@ -45,6 +45,9 @@ pub enum IntrinsicFn {
     AtomicStore,
     AtomicSwap,
     AtomicAdd,
+    OverflowingAdd,
+    OverflowingSub,
+    OverflowingMul,
     AtomicSub,
     AtomicCas,
     Fence,
@@ -72,6 +75,9 @@ const INTRINSICS: &[(&str, IntrinsicFn)] = &[
     ("atomic_store", IntrinsicFn::AtomicStore),
     ("atomic_swap", IntrinsicFn::AtomicSwap),
     ("atomic_add", IntrinsicFn::AtomicAdd),
+    ("overflowing_add", IntrinsicFn::OverflowingAdd),
+    ("overflowing_sub", IntrinsicFn::OverflowingSub),
+    ("overflowing_mul", IntrinsicFn::OverflowingMul),
     ("atomic_sub", IntrinsicFn::AtomicSub),
     ("atomic_cas", IntrinsicFn::AtomicCas),
     ("fence", IntrinsicFn::Fence),
@@ -88,6 +94,8 @@ pub const PRELUDE_TYPES: &[(&str, &str)] = &[
     ("std.mem", "Box"),
     ("std.collections", "HashMap"),
     ("std.collections", "HashSet"),
+    ("std.collections", "VecDeque"),
+    ("std.collections", "TreeMap"),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -158,6 +166,13 @@ pub struct AdtDef {
 impl AdtDef {
     pub fn is_enum(&self) -> bool {
         matches!(self.kind, AdtKind::Enum(_))
+    }
+
+    pub fn field_names(&self) -> Vec<String> {
+        match &self.kind {
+            AdtKind::Struct(fs) => fs.iter().map(|f| f.name.name.clone()).collect(),
+            AdtKind::Enum(_) => Vec::new(),
+        }
     }
 
     pub fn field_index(&self, name: &str) -> Option<usize> {
@@ -292,6 +307,13 @@ pub struct Checker {
     pub diags: Vec<Diagnostic>,
 
     instances: HashMap<FnKey, String>,
+    /// Run-time checks report failures with `panic` (not on bare metal or
+    /// wasm, where they trap: there may be nowhere to print).
+    pub panic_on_checks: bool,
+    /// Check `+`, `-` and `*` on integers for overflow (outside std).
+    pub overflow_checks: bool,
+    /// The symbol of the prelude's `panic`, for run-time checks that fail.
+    pub panic_fn: Option<String>,
     queue: VecDeque<(FnKey, String)>,
     pub out_funcs: Vec<xir::Func>,
     externs: HashMap<String, xir::Extern>,
@@ -359,6 +381,9 @@ impl Checker {
             target,
             diags: Vec::new(),
             instances: HashMap::new(),
+            panic_fn: None,
+            overflow_checks: false,
+            panic_on_checks: true,
             queue: VecDeque::new(),
             out_funcs: Vec::new(),
             externs: HashMap::new(),
@@ -464,6 +489,16 @@ impl Checker {
                     self.error(Diagnostic::new(sp, "`main` takes no parameters"));
                 }
                 entry = Some((name, ret));
+            }
+        }
+        if let (Some(p), true) = (self.prelude, self.panic_on_checks) {
+            if let Some(Def::Fn(fid)) = self.modules[p as usize].scope.get("panic").map(|b| b.def) {
+                let key = FnKey {
+                    fid,
+                    targs: Vec::new(),
+                    self_ty: None,
+                };
+                self.panic_fn = Some(self.instance(key));
             }
         }
         if entry.is_none() && !is_lib {
@@ -1224,6 +1259,10 @@ impl Checker {
             };
             let span = self.impls[iid].span;
             let tname = self.traits[tid as usize].name.clone();
+            if self.prelude_trait("Copy") == Some(tid) {
+                self.error(Diagnostic::new(span, "`Copy` cannot be implemented: declare the type with `copy struct` or `copy enum`"));
+                continue;
+            }
             // methods must match the trait
             let required: Vec<(String, bool, Option<SelfKind>, usize)> = self.traits[tid as usize]
                 .decl
@@ -1248,10 +1287,15 @@ impl Checker {
                         }
                     }
                     None if !has_default => {
-                        self.error(Diagnostic::new(
-                            span,
-                            format!("missing method `{name}` in implementation of trait `{tname}`"),
-                        ));
+                        let msg = match name.strip_prefix("const#") {
+                            Some(c) => format!(
+                                "missing constant `{c}` in implementation of trait `{tname}`"
+                            ),
+                            None => format!(
+                                "missing method `{name}` in implementation of trait `{tname}`"
+                            ),
+                        };
+                        self.error(Diagnostic::new(span, msg));
                     }
                     None => {}
                 }
@@ -1263,10 +1307,11 @@ impl Checker {
                 .collect();
             for (n, sp) in names {
                 if !required.iter().any(|r| r.0 == n) {
-                    self.error(Diagnostic::new(
-                        sp,
-                        format!("method `{n}` is not a member of trait `{tname}`"),
-                    ));
+                    let msg = match n.strip_prefix("const#") {
+                        Some(c) => format!("constant `{c}` is not a member of trait `{tname}`"),
+                        None => format!("method `{n}` is not a member of trait `{tname}`"),
+                    };
+                    self.error(Diagnostic::new(sp, msg));
                 }
             }
             // associated types: every one the trait declares, and no others
@@ -1602,6 +1647,19 @@ impl Checker {
     }
 
     /// Field types of a struct, tuple or closure environment.
+    /// Can one field of a value of type `t` be moved out, leaving the others
+    /// usable? (A struct without a `drop` block, or a tuple.)
+    pub fn partial_move_ok(&self, t: &Ty) -> bool {
+        match t {
+            Ty::Adt(id, _) => {
+                let a = &self.adts[*id as usize];
+                !a.is_enum() && a.drop_impl.is_none()
+            }
+            Ty::Tuple(_) => true,
+            _ => false,
+        }
+    }
+
     pub fn fields_of(&self, t: &Ty) -> Option<Vec<Ty>> {
         match t {
             Ty::Adt(id, args) if !self.adts[*id as usize].is_enum() => {
@@ -1627,6 +1685,74 @@ impl Checker {
 
     /// Can a value of type `t` hold references (and so keep borrows alive)?
     /// Looks through struct/enum fields and closure captures.
+    /// Could a value of type `container` hold a reference into a value of
+    /// type `t` (to `t` itself or to anything it owns)? False only when
+    /// that is certain, e.g. a `Vec<&String>` and a closure.
+    pub fn may_hold_ref_into(&self, container: &Ty, t: &Ty) -> bool {
+        let mut targets = Vec::new();
+        let mut owned = Vec::new();
+        if !self.walk_owned(container, &mut owned, Some(&mut targets), 0) {
+            return true;
+        }
+        let mut inside = Vec::new();
+        if !self.walk_owned(t, &mut inside, None, 0) {
+            return true;
+        }
+        targets
+            .iter()
+            .any(|w| inside.contains(w) || matches!(w, Ty::Str | Ty::Slice(_)))
+    }
+
+    /// Collect `t` and every type it owns (through fields, elements and raw
+    /// pointers) into `out`, and the types it holds references to into
+    /// `refs` (followed too). False if some part is unknown (a generic
+    /// parameter, a trait object, a future).
+    fn walk_owned(
+        &self,
+        t: &Ty,
+        out: &mut Vec<Ty>,
+        mut refs: Option<&mut Vec<Ty>>,
+        depth: u32,
+    ) -> bool {
+        if depth > 64 {
+            return false;
+        }
+        if out.contains(t) {
+            return true;
+        }
+        out.push(t.clone());
+        match t {
+            Ty::Ref(w, _) => match refs {
+                Some(r) => {
+                    if !r.contains(w) {
+                        r.push((**w).clone());
+                    }
+                    let mut inner = Vec::new();
+                    self.walk_owned(w, &mut inner, Some(r), depth + 1)
+                }
+                // what a reference points to is not owned
+                None => true,
+            },
+            Ty::Param(_) | Ty::Assoc(_) | Ty::Dyn(_) | Ty::Frame(_) => false,
+            Ty::Array(e, _) | Ty::Slice(e) | Ty::Ptr(e) => self.walk_owned(e, out, refs, depth + 1),
+            Ty::Tuple(ts) => ts
+                .iter()
+                .all(|e| self.walk_owned(e, out, refs.as_deref_mut(), depth + 1)),
+            Ty::Closure(id) => self.closures[*id as usize]
+                .fields
+                .iter()
+                .all(|e| self.walk_owned(e, out, refs.as_deref_mut(), depth + 1)),
+            Ty::Adt(id, args) => {
+                let a = &self.adts[*id as usize];
+                a.fields
+                    .iter()
+                    .chain(a.variants.iter().flatten())
+                    .all(|f| self.walk_owned(&f.subst(args), out, refs.as_deref_mut(), depth + 1))
+            }
+            _ => true,
+        }
+    }
+
     pub fn has_refs(&self, t: &Ty) -> bool {
         self.has_refs_depth(t, 0)
     }
@@ -2586,8 +2712,11 @@ impl Checker {
         }
     }
 
+    /// Traits the compiler implements itself: `Future` for the futures of
+    /// `async fn`s, and `Copy` for the copy types.
     fn is_future_frame(&self, t: &Ty, tid: TraitId) -> bool {
-        matches!(t, Ty::Frame(_)) && self.prelude_trait("Future") == Some(tid)
+        (matches!(t, Ty::Frame(_)) && self.prelude_trait("Future") == Some(tid))
+            || (self.prelude_trait("Copy") == Some(tid) && self.is_copy(t))
     }
 
     // ------------------------------------------------------- trait objects

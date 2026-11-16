@@ -32,9 +32,23 @@ pub struct Options {
     pub lib: bool,
     pub intel_syntax: bool,
     pub libc: Libc,
+    /// Panic on integer overflow; `None`: only below `-O2`.
+    pub overflow_checks: Option<bool>,
+    /// More directories to look for imported modules in (after the root
+    /// file's own), e.g. a project's `src` for its tests.
+    pub module_dirs: Vec<PathBuf>,
+    /// Packages (dependencies): `import name` is `<dir>/lib.xr` and
+    /// `import name.a.b` is `<dir>/a/b.xr`.
+    pub packages: Vec<(String, PathBuf)>,
+    /// Source appended to the root file (the test runner's `main`).
+    pub root_suffix: Option<String>,
 }
 
 impl Options {
+    pub fn overflow_checks_on(&self) -> bool {
+        self.overflow_checks.unwrap_or(self.opt_level < 2)
+    }
+
     /// Is the C library used, given whether the program declares C functions?
     pub fn uses_libc(&self, declares_c_fns: bool) -> bool {
         if !self.target.triple.contains("linux") {
@@ -253,9 +267,110 @@ fn parse_file(
     path: String,
     text: String,
 ) -> Result<crate::ast::Module, Diagnostic> {
-    let file = sm.add(path, text);
+    let file = sm.add(path.clone(), text);
     let toks = crate::lexer::lex(file, &sm.file(file).text)?;
-    crate::parser::parse_module(file, toks)
+    let mut m = crate::parser::parse_module(file, toks)?;
+    derive_clone(sm, &path, &mut m)?;
+    Ok(m)
+}
+
+/// Every `copy` struct and enum gets `Clone` (a copy), unless the module
+/// implements it already.
+fn derive_clone(
+    sm: &mut SourceMap,
+    path: &str,
+    m: &mut crate::ast::Module,
+) -> Result<(), Diagnostic> {
+    use crate::ast::{ItemKind, TypeKind};
+    let implemented: Vec<String> = m
+        .items
+        .iter()
+        .filter_map(|it| match &it.kind {
+            ItemKind::Impl(i) => match (&i.trait_ref, &i.self_ty.kind) {
+                (Some(t), TypeKind::Path(p, _)) if matches!(&t.kind, TypeKind::Path(tp, _) if tp.last().is_some_and(|x| x.name == "Clone")) => {
+                    p.last().map(|x| x.name.clone())
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    let mut text = String::new();
+    for it in &m.items {
+        let (name, generics, copy) = match &it.kind {
+            ItemKind::Struct(d) => (&d.name, &d.generics, d.is_copy),
+            ItemKind::Enum(d) => (&d.name, &d.generics, d.is_copy),
+            _ => continue,
+        };
+        if !copy || implemented.contains(&name.name) {
+            continue;
+        }
+        let params: Vec<&str> = generics
+            .params
+            .iter()
+            .map(|g| g.name.name.as_str())
+            .collect();
+        let (g, a) = if params.is_empty() {
+            (String::new(), String::new())
+        } else {
+            (
+                format!("<{}>", params.join(", ")),
+                format!("<{}>", params.join(", ")),
+            )
+        };
+        let n = &name.name;
+        text.push_str(&format!(
+            "impl{g} Clone for {n}{a} {{\n    fn clone(&self) -> {n}{a} {{\n        *self\n    }}\n}}\n"
+        ));
+    }
+    if text.is_empty() {
+        return Ok(());
+    }
+    let file = sm.add(format!("{path} (derived Clone)"), text);
+    let toks = crate::lexer::lex(file, &sm.file(file).text)?;
+    let extra = crate::parser::parse_module(file, toks)?;
+    m.items.extend(extra.items);
+    Ok(())
+}
+
+/// The file of module `name`: in a package (dependency) if its first part
+/// names one, else next to the root file, else in `opts.module_dirs`.
+fn find_module(name: &str, root_dir: &Path, opts: &Options) -> PathBuf {
+    // (a test file `tests/greeting.xr` importing `greeting` means the
+    // project's module, not itself)
+    let is_root = |p: &Path| p.canonicalize().ok() == opts.input.canonicalize().ok();
+    let segs: Vec<&str> = name.split('.').collect();
+    if let Some((_, dir)) = opts.packages.iter().find(|(n, _)| n == segs[0]) {
+        let mut p = dir.clone();
+        if segs.len() == 1 {
+            p.push("lib");
+        } else {
+            for seg in &segs[1..] {
+                p.push(seg);
+            }
+        }
+        p.set_extension("xr");
+        return p;
+    }
+    let in_dir = |d: &Path| {
+        let mut p = d.to_path_buf();
+        for seg in &segs {
+            p.push(seg);
+        }
+        p.set_extension("xr");
+        p
+    };
+    let first = in_dir(root_dir);
+    if first.exists() && !is_root(&first) {
+        return first;
+    }
+    for d in &opts.module_dirs {
+        let p = in_dir(d);
+        if p.exists() {
+            return p;
+        }
+    }
+    first
 }
 
 /// Load the root file and everything it (transitively) imports.
@@ -268,8 +383,12 @@ pub fn load(
     // std.sys depends on whether libc is used, which depends on the
     // program's own C declarations: load it after everything else.
     let libc_choice: std::cell::Cell<Option<bool>> = std::cell::Cell::new(None);
-    let text = std::fs::read_to_string(root)
+    let mut text = std::fs::read_to_string(root)
         .map_err(|e| FrontendError::Io(format!("cannot read `{}`: {e}", root.display())))?;
+    if let Some(extra) = &opts.root_suffix {
+        text.push('\n');
+        text.push_str(extra);
+    }
     let root_dir = root.parent().map(|p| p.to_path_buf()).unwrap_or_default();
     let ast = parse_file(&mut fe.sm, root.display().to_string(), text)
         .map_err(|d| FrontendError::Diags(vec![d]))?;
@@ -318,11 +437,7 @@ pub fn load(
                 format!("unknown standard library module `{name}`"),
             ));
         } else {
-            let mut p = root_dir.clone();
-            for seg in name.split('.') {
-                p.push(seg);
-            }
-            p.set_extension("xr");
+            let p = find_module(name, &root_dir, opts);
             let text = std::fs::read_to_string(&p).map_err(|_| {
                 Diagnostic::new(
                     span,
@@ -402,9 +517,11 @@ pub fn compile_to_llvm(
     opts: &Options,
 ) -> Result<(String, String, bool), FrontendError> {
     let (modules, root, libc) = load(fe, &opts.input, opts)?;
-    let ck = Checker::new(Target {
+    let mut ck = Checker::new(Target {
         ptr_bits: opts.target.ptr_bits,
     });
+    ck.overflow_checks = opts.overflow_checks_on();
+    ck.panic_on_checks = opts.target.hosted;
     let (prog, ck) = ck
         .run(modules, root, opts.lib)
         .map_err(FrontendError::Diags)?;

@@ -1,0 +1,6 @@
+trait Z {
+    const ZERO: Self
+}
+impl Z for i32 {}
+fn main() {}
+// error: missing constant `ZERO` in implementation of trait `Z`

@@ -594,6 +594,10 @@ impl Parser {
                 });
                 return Ok(());
             }
+            if p.eat_kw(Kw::Const) {
+                methods.push(p.assoc_const()?);
+                return Ok(());
+            }
             methods.push(p.fn_decl()?);
             Ok(())
         })?;
@@ -603,6 +607,42 @@ impl Parser {
             supertraits,
             methods,
             assoc_types,
+        })
+    }
+
+    /// `const NAME: Type = value` in an impl or trait (the value is optional
+    /// in a trait). It becomes the function `const#NAME() -> Type`, which
+    /// `T.NAME` calls.
+    fn assoc_const(&mut self) -> Result<FnDecl> {
+        let start = self.prev_span();
+        let name = self.ident()?;
+        self.expect(&Tok::Colon)?;
+        let ty = self.ty()?;
+        let body = if self.eat(&Tok::Eq) {
+            let value = self.expr()?;
+            let span = value.span;
+            Some(Block {
+                stmts: vec![Stmt::Expr(value, false)],
+                span,
+            })
+        } else {
+            None
+        };
+        Ok(FnDecl {
+            name: Ident {
+                name: format!("const#{}", name.name),
+                span: name.span,
+            },
+            generics: Generics::default(),
+            self_param: None,
+            params: Vec::new(),
+            variadic: false,
+            ret: Some(ty),
+            body,
+            is_unsafe: false,
+            is_export: false,
+            is_async: false,
+            span: start.to(self.prev_span()),
         })
     }
 
@@ -639,6 +679,10 @@ impl Parser {
             } else {
                 Vis::Private
             };
+            if p.eat_kw(Kw::Const) {
+                methods.push((vis, p.assoc_const()?));
+                return Ok(());
+            }
             methods.push((vis, p.fn_decl()?));
             Ok(())
         })?;

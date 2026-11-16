@@ -251,6 +251,14 @@ impl<T> Vec<T> {
         None
     }
 
+    /// Append a copy of every element of `items`.
+    pub fn extend_from_slice(&mut self, items: &[T]) where T: Clone {
+        self.reserve(items.len())
+        for x in items {
+            self.push(x.clone())
+        }
+    }
+
     /// Sort in place by `cmp` (heap sort: O(n log n), no allocation, not stable).
     pub fn sort_by<F: Fn(&T, &T) -> Ordering>(&mut self, cmp: F) {
         let n = self.len
@@ -355,5 +363,13 @@ impl<T> Deref for Vec<T> {
 impl<T> DerefMut for Vec<T> {
     fn deref_mut(&mut self) -> &mut [T] {
         self.as_mut_slice()
+    }
+}
+
+impl<T: Clone> Clone for Vec<T> {
+    fn clone(&self) -> Vec<T> {
+        let mut v: Vec<T> = Vec.with_capacity(self.len())
+        v.extend_from_slice(self.as_slice())
+        v
     }
 }

@@ -1,0 +1,6 @@
+fn need<T: Eq>(x: T) -> T { x }
+struct Z {}
+fn main() {
+    need(Z {})
+}
+// error: the trait `Eq` is not implemented for `Z` (required by `T: Eq`)

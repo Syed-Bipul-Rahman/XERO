@@ -32,6 +32,9 @@ pub struct Codegen<'a> {
     out: String,
     strings: HashMap<Vec<u8>, String>,
     glue_done: HashSet<Ty>,
+    /// Flags for fields moved out of a local (the rest is still owned):
+    /// (local, field) -> the flag's alloca.
+    field_moved: HashMap<(LocalId, u32), String>,
     glue_queue: Vec<Ty>,
     intrinsics: BTreeSet<String>,
     externs: HashMap<String, (Vec<Ty>, Ty, bool)>,
@@ -71,6 +74,7 @@ pub fn generate(
         out: String::new(),
         strings: HashMap::new(),
         glue_done: HashSet::new(),
+        field_moved: HashMap::new(),
         glue_queue: Vec::new(),
         intrinsics: BTreeSet::new(),
         externs: prog
@@ -384,6 +388,9 @@ impl<'a> Codegen<'a> {
             Ty::FnPtr(..) => "ptr".into(),
             Ty::Adt(id, args) => {
                 let a = &self.ck.adts[*id as usize];
+                if let Some((_, _, p)) = self.niche(t) {
+                    return self.llty(&p);
+                }
                 if a.is_enum() {
                     let (tag, payload) = self.enum_layout(t);
                     match payload {
@@ -461,6 +468,9 @@ impl<'a> Codegen<'a> {
             ),
             Ty::FnPtr(..) => (p, p),
             Ty::Adt(id, args) => {
+                if let Some((_, _, p)) = self.niche(t) {
+                    return self.layout(&p);
+                }
                 if self.ck.adts[*id as usize].is_enum() {
                     let (tag, payload) = self.enum_layout(t);
                     let tag_l = match tag.as_str() {
@@ -548,6 +558,93 @@ impl<'a> Codegen<'a> {
         (tag.into(), Some((size.div_ceil(ua), unit.into())))
     }
 
+    /// An enum stored as its one pointer field, null meaning the other
+    /// (fieldless) variant: `Option<&T>`, `Option<Box<T>>`, `Option<fn()>`.
+    /// Returns (fieldless variant, pointer variant, pointer type).
+    fn niche(&self, t: &Ty) -> Option<(u32, u32, Ty)> {
+        let Ty::Adt(id, args) = t else { return None };
+        let a = &self.ck.adts[*id as usize];
+        if !a.is_enum() || a.variants.len() != 2 {
+            return None;
+        }
+        let vs = self.ck.enum_variants(*id, args);
+        let (empty, full) = match (vs[0].len(), vs[1].len()) {
+            (0, 1) => (0, 1),
+            (1, 0) => (1, 0),
+            _ => return None,
+        };
+        let f = &vs[full as usize][0];
+        let non_null = match f {
+            Ty::Ref(inner, _) => !inner.is_unsized(),
+            Ty::FnPtr(..) => true,
+            Ty::Adt(bid, _) => {
+                let b = &self.ck.adts[*bid as usize];
+                b.name == "Box" && self.ck.modules[b.module as usize].path == "std.mem"
+            }
+            _ => false,
+        };
+        non_null.then(|| (empty, full, f.clone()))
+    }
+
+    /// The tag of the enum at `ptr`, as a value of `tag_ty(t)`.
+    fn load_tag(&mut self, t: &Ty, ptr: &str) -> String {
+        let Ty::Adt(id, _) = t else { unreachable!() };
+        let tag_ty = self.tag_ty(t);
+        if let Some((empty, full, _)) = self.niche(t) {
+            let d = &self.ck.adts[*id as usize].discriminants;
+            let (de, df) = (d[empty as usize], d[full as usize]);
+            let p = self.fresh();
+            self.ins(&format!("{p} = load ptr, ptr {ptr}"));
+            let z = self.fresh();
+            self.ins(&format!("{z} = icmp eq ptr {p}, null"));
+            let r = self.fresh();
+            self.ins(&format!(
+                "{r} = select i1 {z}, {tag_ty} {de}, {tag_ty} {df}"
+            ));
+            return r;
+        }
+        let lt = self.llty(t);
+        let tp = self.fresh();
+        self.ins(&format!(
+            "{tp} = getelementptr inbounds {lt}, ptr {ptr}, i32 0, i32 0"
+        ));
+        let tag = self.fresh();
+        self.ins(&format!("{tag} = load {tag_ty}, ptr {tp}"));
+        tag
+    }
+
+    /// Mark the enum at `ptr` as variant `idx` (before its fields are stored).
+    fn store_tag(&mut self, t: &Ty, ptr: &str, idx: u32) {
+        let Ty::Adt(id, _) = t else { unreachable!() };
+        if let Some((empty, _, _)) = self.niche(t) {
+            if idx == empty {
+                self.ins(&format!("store ptr null, ptr {ptr}"));
+            }
+            return;
+        }
+        let disc = self.ck.adts[*id as usize].discriminants[idx as usize];
+        let lt = self.llty(t);
+        let tag_ty = self.tag_ty(t);
+        let tp = self.fresh();
+        self.ins(&format!(
+            "{tp} = getelementptr inbounds {lt}, ptr {ptr}, i32 0, i32 0"
+        ));
+        self.ins(&format!("store {tag_ty} {disc}, ptr {tp}"));
+    }
+
+    /// Where the fields of the enum at `ptr` are.
+    fn payload_ptr(&mut self, t: &Ty, ptr: &str) -> String {
+        if self.niche(t).is_some() {
+            return ptr.to_string();
+        }
+        let lt = self.llty(t);
+        let pp = self.fresh();
+        self.ins(&format!(
+            "{pp} = getelementptr inbounds {lt}, ptr {ptr}, i32 0, i32 1"
+        ));
+        pp
+    }
+
     fn variant_llty(&self, t: &Ty, idx: u32) -> String {
         let Ty::Adt(id, args) = t else { unreachable!() };
         let fields = &self.ck.enum_variants(*id, args)[idx as usize];
@@ -627,7 +724,8 @@ impl<'a> Codegen<'a> {
     }
 
     /// Branch to a trap if `cond` (i1) is false.
-    fn check(&mut self, cond: &str) {
+    /// Branch to a panic with `msg` if `cond` (i1) is false.
+    fn check_msg(&mut self, cond: &str, msg: &str) {
         let ok = self.new_label("ok");
         let fail = self.new_label("fail");
         self.term(&format!(
@@ -635,7 +733,21 @@ impl<'a> Codegen<'a> {
         ));
         let _ = writeln!(self.body, "{fail}:");
         self.terminated = false;
-        self.trap();
+        match self.ck.panic_fn.clone() {
+            Some(p) => {
+                let g = self.string(msg.as_bytes());
+                let st = self.llty(&Ty::reference(Ty::Str, false));
+                let us = self.usize_ty();
+                let nt = self.llty(&Ty::Never);
+                let f = quote(&p);
+                self.ins(&format!(
+                    "call {nt} {f}({st} {{ ptr {g}, {us} {} }})",
+                    msg.len()
+                ));
+                self.term("unreachable");
+            }
+            None => self.trap(),
+        }
         let _ = writeln!(self.body, "{ok}:");
         self.terminated = false;
         if !self.globals.contains("!0 = ") {
@@ -650,6 +762,7 @@ impl<'a> Codegen<'a> {
         self.func = Some(f);
         self.body.clear();
         self.allocas.clear();
+        self.field_moved.clear();
         self.tmp = 0;
         self.label = 0;
         self.terminated = false;
@@ -852,9 +965,79 @@ impl<'a> Codegen<'a> {
         self.ins(&format!("call void {g}(ptr {ptr})"));
     }
 
+    /// `p` is a local whose fields can be moved out one at a time.
+    fn partial_local(&self, p: &Place) -> Option<LocalId> {
+        let Place::Local(l) = p else { return None };
+        let f = self.func?;
+        if f.async_frame.is_some() || !self.ck.partial_move_ok(&self.local_ty(*l)) {
+            return None;
+        }
+        Some(*l)
+    }
+
+    /// The "moved out" flag of field `i` of local `l`, made on first use.
+    fn field_flag(&mut self, l: LocalId, i: u32) -> String {
+        if let Some(f) = self.field_moved.get(&(l, i)) {
+            return f.clone();
+        }
+        let n = format!("%fm{l}.{i}");
+        let _ = writeln!(self.allocas, "  {n} = alloca i1");
+        let _ = writeln!(self.allocas, "  store i1 false, ptr {n}");
+        self.field_moved.insert((l, i), n.clone());
+        n
+    }
+
     fn drop_local(&mut self, l: LocalId) {
         let t = self.local_ty(l);
         if !self.needs_drop(&t) {
+            return;
+        }
+        let mut moved: Vec<(u32, String)> = self
+            .field_moved
+            .iter()
+            .filter(|((x, _), _)| *x == l)
+            .map(|((_, i), f)| (*i, f.clone()))
+            .collect();
+        if !moved.is_empty() {
+            moved.sort();
+            // drop the fields still owned, then clear the flags
+            let f = self.flag_ptr(l);
+            let c = self.fresh();
+            self.ins(&format!("{c} = load i1, ptr {f}"));
+            let yes = self.new_label("drop");
+            let no = self.new_label("dropped");
+            self.term(&format!("br i1 {c}, label %{yes}, label %{no}"));
+            self.start(&yes);
+            self.ins(&format!("store i1 false, ptr {f}"));
+            let p = self.local_ptr(l);
+            let sty = self.llty(&t);
+            let fields = self.ck.fields_of(&t).unwrap_or_default();
+            for (j, ft) in fields.iter().enumerate() {
+                if !self.needs_drop(ft) {
+                    continue;
+                }
+                let fp = self.fresh();
+                self.ins(&format!(
+                    "{fp} = getelementptr inbounds {sty}, ptr {p}, i32 0, i32 {j}"
+                ));
+                match moved.iter().find(|(i, _)| *i == j as u32) {
+                    Some((_, flag)) => {
+                        let m = self.fresh();
+                        self.ins(&format!("{m} = load i1, ptr {flag}"));
+                        let dropf = self.new_label("dropfield");
+                        let skip = self.new_label("keptfield");
+                        self.term(&format!("br i1 {m}, label %{skip}, label %{dropf}"));
+                        self.start(&dropf);
+                        self.drop_at(&fp, ft);
+                        self.start(&skip);
+                    }
+                    None => self.drop_at(&fp, ft),
+                }
+            }
+            self.start(&no);
+            for (_, flag) in &moved {
+                self.ins(&format!("store i1 false, ptr {flag}"));
+            }
             return;
         }
         let f = self.flag_ptr(l);
@@ -889,6 +1072,7 @@ impl<'a> Codegen<'a> {
 
     fn drop_glue(&mut self, t: &Ty) {
         // generated as a separate function; save per-function state
+        let saved_fields = std::mem::take(&mut self.field_moved);
         let saved = (
             std::mem::take(&mut self.body),
             std::mem::take(&mut self.allocas),
@@ -908,14 +1092,8 @@ impl<'a> Codegen<'a> {
                 let a = &self.ck.adts[*id as usize];
                 if a.is_enum() {
                     let variants = self.ck.enum_variants(*id, args);
-                    let ety = self.llty(t);
                     let tag_ty = self.tag_ty(t);
-                    let tp = self.fresh();
-                    self.ins(&format!(
-                        "{tp} = getelementptr inbounds {ety}, ptr %p, i32 0, i32 0"
-                    ));
-                    let tag = self.fresh();
-                    self.ins(&format!("{tag} = load {tag_ty}, ptr {tp}"));
+                    let tag = self.load_tag(t, "%p");
                     let end = self.new_label("end");
                     for (vi, fields) in variants.iter().enumerate() {
                         if !fields.iter().any(|f| self.needs_drop(f)) {
@@ -929,10 +1107,7 @@ impl<'a> Codegen<'a> {
                         self.term(&format!("br i1 {c}, label %{yes}, label %{no}"));
                         self.start(&yes);
                         let vty = self.struct_llty(fields);
-                        let pp = self.fresh();
-                        self.ins(&format!(
-                            "{pp} = getelementptr inbounds {ety}, ptr %p, i32 0, i32 1"
-                        ));
+                        let pp = self.payload_ptr(t, "%p");
                         for (fi, ft) in fields.iter().enumerate() {
                             if self.needs_drop(ft) {
                                 let fp = self.fresh();
@@ -1034,6 +1209,7 @@ impl<'a> Codegen<'a> {
             self.label,
             self.terminated,
         ) = saved;
+        self.field_moved = saved_fields;
     }
 
     fn drop_fields(&mut self, t: &Ty, fields: &[Ty]) {
@@ -1118,7 +1294,7 @@ impl<'a> Codegen<'a> {
                     (Ty::Array(e, n), PlacePtr::Thin(bp)) => {
                         let c = self.fresh();
                         self.ins(&format!("{c} = icmp ult {us} {iv}, {n}"));
-                        self.check(&c);
+                        self.check_msg(&c, "index out of bounds");
                         let r = self.fresh();
                         let aty = self.llty(&bt);
                         let _ = e;
@@ -1135,7 +1311,7 @@ impl<'a> Codegen<'a> {
                         self.ins(&format!("{len} = extractvalue {fty} {fv}, 1"));
                         let c = self.fresh();
                         self.ins(&format!("{c} = icmp ult {us} {iv}, {len}"));
-                        self.check(&c);
+                        self.check_msg(&c, "index out of bounds");
                         let r = self.fresh();
                         let ety = self.llty(e);
                         self.ins(&format!(
@@ -1189,7 +1365,7 @@ impl<'a> Codegen<'a> {
                 self.ins(&format!("{c} = icmp ule {us} {hi}, {len}"));
                 let ok = self.fresh();
                 self.ins(&format!("{ok} = and i1 {a}, {c}"));
-                self.check(&ok);
+                self.check_msg(&ok, "slice range out of bounds");
                 let ptr = self.fresh();
                 self.ins(&format!(
                     "{ptr} = getelementptr inbounds {elem}, ptr {data}, {us} {lo}"
@@ -1217,6 +1393,12 @@ impl<'a> Codegen<'a> {
     fn consume_path(&mut self, p: &Place) {
         match p {
             Place::Local(l) => self.set_flag(*l, false),
+            Place::Field(b, i) if self.partial_local(b).is_some() => {
+                // the other fields stay owned by the local
+                let l = self.partial_local(b).unwrap();
+                let f = self.field_flag(l, *i);
+                self.ins(&format!("store i1 true, ptr {f}"));
+            }
             Place::Field(b, i) => {
                 let bt = self.place_ty_ctx(b);
                 let fields = self.ck.fields_of(&bt).unwrap_or_default();
@@ -1466,19 +1648,11 @@ impl<'a> Codegen<'a> {
                 let Ty::Adt(id, _) = &e.ty else {
                     unreachable!()
                 };
-                let disc = self.ck.adts[*id as usize].discriminants[*idx as usize];
-                let tag_ty = self.tag_ty(&e.ty);
-                let tp = self.fresh();
-                self.ins(&format!(
-                    "{tp} = getelementptr inbounds {lt}, ptr {tmp}, i32 0, i32 0"
-                ));
-                self.ins(&format!("store {tag_ty} {disc}, ptr {tp}"));
+                let _ = id;
+                self.store_tag(&e.ty, &tmp, *idx);
                 if !vals.is_empty() {
                     let vty = self.variant_llty(&e.ty, *idx);
-                    let pp = self.fresh();
-                    self.ins(&format!(
-                        "{pp} = getelementptr inbounds {lt}, ptr {tmp}, i32 0, i32 1"
-                    ));
+                    let pp = self.payload_ptr(&e.ty, &tmp);
                     for (i, (v, t)) in vals.iter().enumerate() {
                         let fp = self.fresh();
                         self.ins(&format!(
@@ -1982,7 +2156,7 @@ impl<'a> Codegen<'a> {
                         if !divisor_safe {
                             let nz = self.fresh();
                             self.ins(&format!("{nz} = icmp ne {t} {r}, 0"));
-                            self.check(&nz);
+                            self.check_msg(&nz, "division by zero");
                             if signed {
                                 let min = -(1i128 << (bits - 1));
                                 let a = self.fresh();
@@ -1991,7 +2165,7 @@ impl<'a> Codegen<'a> {
                                 self.ins(&format!("{b} = icmp ne {t} {r}, -1"));
                                 let c = self.fresh();
                                 self.ins(&format!("{c} = or i1 {a}, {b}"));
-                                self.check(&c);
+                                self.check_msg(&c, "division overflow");
                             }
                         }
                         let ins = match (op, signed) {
@@ -2001,6 +2175,22 @@ impl<'a> Codegen<'a> {
                             _ => "urem",
                         };
                         self.ins(&format!("{res} = {ins} {t} {l}, {r}"));
+                    }
+                    BinOp::Add | BinOp::Sub | BinOp::Mul
+                        if self.func.is_some_and(|f| f.overflow_checks) =>
+                    {
+                        let (name, verb) = match op {
+                            BinOp::Add => ("add", "add"),
+                            BinOp::Sub => ("sub", "subtract"),
+                            _ => ("mul", "multiply"),
+                        };
+                        let pair = self.with_overflow(name, signed, l, r, ty);
+                        let o = self.fresh();
+                        self.ins(&format!("{o} = extractvalue {{ {t}, i1 }} {pair}, 1"));
+                        let ok = self.fresh();
+                        self.ins(&format!("{ok} = xor i1 {o}, true"));
+                        self.check_msg(&ok, &format!("attempt to {verb} with overflow"));
+                        self.ins(&format!("{res} = extractvalue {{ {t}, i1 }} {pair}, 0"));
                     }
                     _ => {
                         let ins = match op {
@@ -2018,6 +2208,23 @@ impl<'a> Codegen<'a> {
             _ => unreachable!("arith on {:?}", ty),
         }
         res
+    }
+
+    /// `{ iN result, i1 overflowed }` from `llvm.*.with.overflow`.
+    fn with_overflow(&mut self, op: &str, signed: bool, a: &str, b: &str, ty: &Ty) -> String {
+        let t = self.llty(ty);
+        let name = format!(
+            "llvm.{}{op}.with.overflow.{t}",
+            if signed { "s" } else { "u" }
+        );
+        self.intrinsics.insert(format!(
+            "declare {{ {t}, i1 }} @{name}({t}, {t}) nounwind readnone"
+        ));
+        let r = self.fresh();
+        self.ins(&format!(
+            "{r} = call {{ {t}, i1 }} @{name}({t} {a}, {t} {b})"
+        ));
+        r
     }
 
     fn cast(&mut self, a: &Expr, to: &Ty) -> String {
@@ -2098,6 +2305,12 @@ impl<'a> Codegen<'a> {
 
     fn intrinsic(&mut self, i: &Intrinsic, args: &[Expr], ty: &Ty) -> String {
         match i {
+            Intrinsic::Overflowing(op) => {
+                let a = self.expr(&args[0]);
+                let b = self.expr(&args[1]);
+                let signed = matches!(&args[0].ty, Ty::Int(it) if it.signed());
+                self.with_overflow(op, signed, &a, &b, &args[0].ty)
+            }
             Intrinsic::SizeOf(t) => self.layout(t).0.to_string(),
             Intrinsic::AlignOf(t) => self.layout(t).1.to_string(),
             Intrinsic::Trap => {
@@ -2481,22 +2694,14 @@ impl<'a> Codegen<'a> {
                 if a.is_enum() {
                     let disc = a.discriminants[*idx as usize];
                     let tag_ty = self.tag_ty(ty);
-                    let tp = self.fresh();
-                    self.ins(&format!(
-                        "{tp} = getelementptr inbounds {lt}, ptr {ptr}, i32 0, i32 0"
-                    ));
-                    let tag = self.fresh();
-                    self.ins(&format!("{tag} = load {tag_ty}, ptr {tp}"));
+                    let tag = self.load_tag(ty, ptr);
                     let c = self.fresh();
                     self.ins(&format!("{c} = icmp eq {tag_ty} {tag}, {disc}"));
                     self.cond_br(&c, fail);
                     if ps.iter().any(|p| !matches!(p, Pat::Wild | Pat::Bind(..))) {
                         let fields = self.ck.enum_variants(*id, args)[*idx as usize].clone();
                         let vty = self.struct_llty(&fields);
-                        let pp = self.fresh();
-                        self.ins(&format!(
-                            "{pp} = getelementptr inbounds {lt}, ptr {ptr}, i32 0, i32 1"
-                        ));
+                        let pp = self.payload_ptr(ty, ptr);
                         for (i, (p, t)) in ps.iter().zip(&fields).enumerate() {
                             if matches!(p, Pat::Wild | Pat::Bind(..)) {
                                 continue;
@@ -2592,10 +2797,7 @@ impl<'a> Codegen<'a> {
                 let lt = self.llty(ty);
                 let (base, fields, sty) = if self.ck.adts[*id as usize].is_enum() {
                     let fields = self.ck.enum_variants(*id, args)[*idx as usize].clone();
-                    let pp = self.fresh();
-                    self.ins(&format!(
-                        "{pp} = getelementptr inbounds {lt}, ptr {ptr}, i32 0, i32 1"
-                    ));
+                    let pp = self.payload_ptr(ty, ptr);
                     let vty = self.struct_llty(&fields);
                     (pp, fields, vty)
                 } else {
@@ -2684,10 +2886,7 @@ impl<'a> Codegen<'a> {
                 let lt = self.llty(ty);
                 let (base, fields, sty) = if self.ck.adts[*id as usize].is_enum() {
                     let fields = self.ck.enum_variants(*id, args)[*idx as usize].clone();
-                    let pp = self.fresh();
-                    self.ins(&format!(
-                        "{pp} = getelementptr inbounds {lt}, ptr {ptr}, i32 0, i32 1"
-                    ));
+                    let pp = self.payload_ptr(ty, ptr);
                     let vty = self.struct_llty(&fields);
                     (pp, fields, vty)
                 } else {

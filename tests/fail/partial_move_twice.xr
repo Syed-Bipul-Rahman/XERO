@@ -1,0 +1,9 @@
+struct S { a: String
+    b: String }
+fn take(s: String) {}
+fn main() {
+    let mut o = S { a: String.from("a"), b: String.from("b") }
+    take(o.a)
+    take(o.a)
+}
+// error: use of moved field `a` of `o`

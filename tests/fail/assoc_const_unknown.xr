@@ -1,0 +1,4 @@
+fn main() {
+    let x = i32.LARGEST
+}
+// error: no associated constant or function named `LARGEST`

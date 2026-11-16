@@ -188,6 +188,12 @@ impl Eq for String {
     }
 }
 
+impl Clone for String {
+    fn clone(&self) -> String {
+        String.from(self.as_str())
+    }
+}
+
 impl Ord for String {
     fn cmp(&self, other: &String) -> Ordering {
         self.as_str().cmp(other.as_str())

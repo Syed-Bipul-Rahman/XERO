@@ -1,3 +1,20 @@
+## 0.7.0
+
+* Adds projects: `xeroc new <name>` (or `--lib`) creates a directory with a `xero.toml` manifest, `src/` and `tests/`; inside it `xeroc build`, `run`, `check` and `test` need no file name, and `build` writes `build/<name>`.
+* Adds dependencies in `xero.toml`, by path or by git URL and tag (fetched into `build/deps`), imported by the package's name (`import geometry`, `import geometry.shapes`).
+* Adds `xeroc test`: every `fn test_...()` in `tests/*.xr` runs in its own process with overflow checks and is reported as ok or FAILED with its output; `xeroc test name` filters. Adds `assert_eq` and `assert_ne`, which show both values.
+* Adds moving fields out of a struct or tuple one at a time: after `take(out.stdout)` the other fields stay usable and are destroyed at the end of the scope.
+* Adds the `Copy` trait (for bounds; implemented by the compiler for copy types) and the `Clone` trait with `clone()`, implemented for the standard types and derived for every `copy` type, plus `Vec.extend_from_slice` and slice `to_vec`.
+* Adds associated constants: `const NAME: Type = value` in impls and traits (with optional defaults), used as `Type.NAME`, `Self.NAME` or `T.NAME`; any type, structs included.
+* Adds `MIN`, `MAX` and `BITS` to the integer types, `MAX`, `MIN_POSITIVE` and `EPSILON` to the float types, and the integer methods `wrapping_*`, `checked_*`, `overflowing_*` and `saturating_*` (add, sub, mul), `pow`, `abs` and `signum`.
+* Adds overflow checks: integer `+`, `-` and `*` panic on overflow below `-O2` (and in tests); `--overflow-checks` and `--no-overflow-checks` choose explicitly. The standard library always wraps.
+* Adds `TreeMap<K, V>`, an ordered map, and `VecDeque<T>`, a double-ended queue, to `std.collections` and the prelude.
+* Changes method lookup on a reference receiver to try `&self` methods of the referenced type first, so traits can be implemented for references; adds `Eq` and `Ord` for `&T`, so `Vec<&String>.sort()` works.
+* Changes `Option<&T>`, `Option<Box<T>>` and `Option<fn(...)>` to the size of one pointer.
+* Changes failed bounds, slice and division checks to print a panic message (`panic: index out of bounds`) instead of exiting silently.
+* Fixes a generic call whose result is discarded inferring its type parameters as `()`, which let calls skip their trait bounds.
+* Fixes calls that pass a `&mut` collection holding references, plus other references, being rejected when those other references could not be stored in it (sorting a `Vec<&String>`).
+
 ## 0.6.0
 
 * Adds format strings: `format("{} of {}", a, b)` returns a `String`, and `print`, `println`, `eprint` and `eprintln` take arguments too. The string is checked at compile time: `{}`, `{0}`, width and alignment (`{:>8}`, `{:-^20}`, `{:05}`), precision (`{:.2}`) and `{:x}`, `{:X}`, `{:b}`, `{:o}`. A wrong number of arguments is a compile error.

@@ -51,6 +51,8 @@ type Loans = BTreeSet<usize>;
 #[derive(Clone, Default)]
 struct State {
     moved: HashMap<LocalId, Span>,
+    /// Fields moved out of locals whose other fields stay usable.
+    moved_fields: HashMap<LocalId, Vec<(u32, Span)>>,
     holders: HashMap<LocalId, Loans>,
     diverged: bool,
 }
@@ -66,6 +68,14 @@ impl State {
         }
         for (k, v) in &other.moved {
             self.moved.entry(*k).or_insert(*v);
+        }
+        for (k, fs) in &other.moved_fields {
+            let mine = self.moved_fields.entry(*k).or_default();
+            for (i, sp) in fs {
+                if !mine.iter().any(|(j, _)| j == i) {
+                    mine.push((*i, *sp));
+                }
+            }
         }
         for (k, v) in &other.holders {
             self.holders
@@ -231,6 +241,7 @@ impl<'a> Ck<'a> {
             self.decl_pos.insert(l, p);
         }
         self.st.moved.remove(&l);
+        self.st.moved_fields.remove(&l);
         self.st.holders.remove(&l);
     }
 
@@ -379,6 +390,32 @@ impl<'a> Ck<'a> {
                 self.error_note(span, msg, mspan, "value moved here");
                 return;
             }
+            // a field moved out: that field, or the whole value, is gone
+            if let Some(fs) = self.st.moved_fields.get(&l) {
+                let hit = match path.first() {
+                    Some(Proj::Field(i)) => fs.iter().find(|(j, _)| j == i),
+                    _ if kind == Access::Write && path.is_empty() => None,
+                    _ => fs.first(),
+                };
+                if let Some(&(i, mspan)) = hit {
+                    let field = self.field_name(l, i);
+                    let msg = if kind == Access::Write {
+                        format!(
+                            "cannot assign to `{field}` of {}, which was moved out",
+                            self.name(l)
+                        )
+                    } else if path.is_empty() {
+                        format!(
+                            "use of partly moved value {}: `{field}` was moved out",
+                            self.name(l)
+                        )
+                    } else {
+                        format!("use of moved field `{field}` of {}", self.name(l))
+                    };
+                    self.error_note(span, msg, mspan, "field moved here");
+                    return;
+                }
+            }
         }
         // mutability
         if matches!(kind, Access::Write | Access::Mutable) {
@@ -453,12 +490,38 @@ impl<'a> Ck<'a> {
                 self.st.moved.insert(*l, span);
             }
             Place::Field(..) => {
-                // consuming a field consumes the whole (owned) value
-                if let Some(l) = Self::root_local(p) {
-                    self.st.moved.insert(l, span);
+                let Some(l) = Self::root_local(p) else { return };
+                // a field of a struct or tuple local: only that field is gone
+                // (moving `x.a.b` takes all of `x.a`)
+                if let Some((_, path)) = Self::place_path(p) {
+                    if let (Some(Proj::Field(i)), true) = (path.first(), self.partial_ok(l)) {
+                        let fs = self.st.moved_fields.entry(l).or_default();
+                        if !fs.iter().any(|(j, _)| j == i) {
+                            fs.push((*i, span));
+                        }
+                        return;
+                    }
                 }
+                // otherwise consuming a field consumes the whole (owned) value
+                self.st.moved.insert(l, span);
             }
             _ => {}
+        }
+    }
+
+    /// Matches the code generator's rule for keeping the other fields.
+    fn partial_ok(&self, l: LocalId) -> bool {
+        self.f.async_frame.is_none() && self.ck.partial_move_ok(&self.f.locals[l as usize].ty)
+    }
+
+    fn field_name(&self, l: LocalId, i: u32) -> String {
+        match &self.f.locals[l as usize].ty {
+            Ty::Adt(id, _) => self.ck.adts[*id as usize]
+                .field_names()
+                .get(i as usize)
+                .cloned()
+                .unwrap_or_else(|| i.to_string()),
+            _ => i.to_string(),
         }
     }
 
@@ -716,6 +779,7 @@ impl<'a> Ck<'a> {
                 match p {
                     Place::Local(l) => {
                         self.st.moved.remove(l);
+                        self.st.moved_fields.remove(l);
                         self.st.holders.insert(*l, lv);
                     }
                     _ => {
@@ -912,6 +976,12 @@ impl<'a> Ck<'a> {
                 .filter(|(j, _)| {
                     let is_cx = matches!(&args[*j].ty, Ty::Ref(t, _) if matches!(&**t, Ty::Adt(id, _) if Some(*id) == ctx));
                     !is_cx || holds_ctx
+                })
+                // a `&U` (whose `U` holds no references) can only be stored
+                // where references into a `U` fit
+                .filter(|(j, _)| match &args[*j].ty {
+                    Ty::Ref(u, _) if !self.ck.has_refs(u) => self.ck.may_hold_ref_into(inner, u),
+                    _ => true,
                 })
                 .flat_map(|(_, l)| l.iter().copied())
                 .collect();

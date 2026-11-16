@@ -1,0 +1,63 @@
+// Copy and Clone: clone() on std types and copy types, Copy bounds,
+// extend_from_slice and to_vec.
+
+import std.collections.{HashMap, HashSet}
+import std.mem.{Box}
+
+copy struct P { x: i32
+    y: i32 }
+copy enum Dir { Up, Down }
+
+fn dup<T: Copy>(x: T) -> (T, T) { (x, x) }
+
+fn main() {
+    let s = String.from("hello")
+    let mut t = s.clone()
+    t.push_str(" world")
+    println(s)
+    println(t)
+    let v = vec_of()
+    let mut w = v.clone()
+    w.push(String.from("c"))
+    println(v.len())
+    println(w.len())
+    let mut u: Vec<i32> = Vec.new()
+    u.extend_from_slice(&[1, 2, 3])
+    let a = [4, 5]
+    let z = a.to_vec()
+    println(u.len() + z.len())
+    let mut m: HashMap<String, Vec<i32>> = HashMap.new()
+    m.insert(String.from("k"), u.clone())
+    let m2 = m.clone()
+    m.get_mut("k").unwrap().push(9)
+    println(m["k"].len())
+    println(m2["k"].len())
+    let b = Box.new(String.from("boxed"))
+    let b2 = b.clone()
+    println(b2.get())
+    let d = Dir.Up
+    println(d.clone() is Dir.Up)
+    println(dup(P { x: 7, y: 8 }).1.x)
+    let names = [String.from("x"), String.from("y")]
+    println(names.to_vec().len())
+}
+
+fn vec_of() -> Vec<String> {
+    let mut v: Vec<String> = Vec.new()
+    v.push(String.from("a"))
+    v.push(String.from("b"))
+    v
+}
+
+// output:
+// hello
+// hello world
+// 2
+// 3
+// 5
+// 4
+// 3
+// boxed
+// true
+// 7
+// 2

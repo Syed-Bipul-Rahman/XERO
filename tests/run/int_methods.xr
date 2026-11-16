@@ -1,0 +1,26 @@
+// Integer methods: wrapping, checked, overflowing and saturating
+// arithmetic, pow, abs; built with overflow checks.
+// flags: --overflow-checks
+
+fn main() {
+    println(i32.MAX.checked_add(1).is_none())
+    println(250u8.saturating_add(10))
+    println((-100i8).saturating_sub(100))
+    println(i32.MAX.wrapping_add(1))
+    println(200u8.overflowing_add(100).1)
+    println(3i64.pow(4))
+    println((-7i32).abs())
+    println(5u32.checked_sub(6).is_none())
+    println(i64.MAX.saturating_mul(2))
+}
+
+// output:
+// true
+// 255
+// -128
+// -2147483648
+// true
+// 81
+// 7
+// true
+// 9223372036854775807

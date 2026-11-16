@@ -375,6 +375,8 @@ impl FnCx<'_> {
             (body, ret, locals)
         };
         let n_params = params.len();
+        let overflow_checks =
+            self.ck.overflow_checks && !self.ck.modules[self.module as usize].is_std;
         self.pending_funcs.push(xir::Func {
             name: fn_name,
             params,
@@ -384,6 +386,7 @@ impl FnCx<'_> {
             export: false,
             span,
             async_frame,
+            overflow_checks,
         });
 
         // the closure value: its captured references or values

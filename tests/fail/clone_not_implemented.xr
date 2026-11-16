@@ -1,0 +1,6 @@
+struct S { a: String }
+fn main() {
+    let s = S { a: String.from("x") }
+    let t = s.clone()
+}
+// error: no method named `clone` found for type `S`

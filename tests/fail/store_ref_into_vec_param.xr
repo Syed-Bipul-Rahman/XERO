@@ -1,0 +1,15 @@
+struct Holder { name: String
+    n: i32 }
+fn put(v: &mut Vec<&String>, s: &String) { v.push(s) }
+fn put_field(v: &mut Vec<&String>, h: &Holder) { v.push(&h.name) }
+fn keep(v: &mut Vec<&String>) {
+    let local = String.from("x")
+    put(v, &local)
+}
+fn keep2(v: &mut Vec<&String>) {
+    let h = Holder { name: String.from("y"), n: 1 }
+    put_field(v, &h)
+}
+fn main() {}
+// error: `local` does not live long enough: a reference to it would be stored in memory that outlives this function
+// error: `h` does not live long enough: a reference to it would be stored in memory that outlives this function

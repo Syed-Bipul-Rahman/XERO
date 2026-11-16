@@ -34,6 +34,9 @@ jobs:
       - name: Test with the C library (Linux)
         if: runner.os == 'Linux'
         run: XERO_TEST_FLAGS=--libc cargo test --release --test harness
+      - name: Test with overflow checks (Linux)
+        if: runner.os == 'Linux'
+        run: XERO_TEST_FLAGS=--overflow-checks cargo test --release --test harness run_programs
       - name: Smoke test
         shell: bash
         run: |
