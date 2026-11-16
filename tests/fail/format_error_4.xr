@@ -1,0 +1,4 @@
+fn main() {
+    println("{", 1)
+}
+// error: unclosed `{` in format string (write `{{` for a literal brace)

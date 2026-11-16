@@ -67,6 +67,9 @@ pub struct Import {
 #[derive(Clone, Debug, Default)]
 pub struct Generics {
     pub params: Vec<GenericParam>,
+    /// `where` bounds on the enclosing impl's parameters (in a method):
+    /// `fn get<Q>(&self, k: &Q) where K: Borrow<Q>`.
+    pub outer: Vec<GenericParam>,
 }
 
 #[derive(Clone, Debug)]
@@ -187,6 +190,8 @@ pub enum TypeKind {
     Impl(Vec<TypeExpr>),
     /// `dyn Trait`: a trait object.
     Dyn(Box<TypeExpr>),
+    /// `Item = i32` among a trait bound's arguments: `Iterator<Item = i32>`.
+    AssocEq(Ident, Box<TypeExpr>),
     Never,
     Infer,
     /// `fn(i32, i32) -> i32`: a plain function pointer.
@@ -346,6 +351,8 @@ pub struct ClosureExpr {
     pub ret: Option<TypeExpr>,
     pub body: Expr,
     pub is_move: bool,
+    /// `async { ... }` / `async move { ... }`: a future, not a function.
+    pub is_async: bool,
 }
 
 #[derive(Clone, Debug)]

@@ -198,6 +198,8 @@ pub enum Intrinsic {
     UnsizeBox(String),
     /// Calling an `async fn`: a new frame (state 0) holding the arguments.
     MakeFrame(u32),
+    /// `rebind(r, source)`: `r`, borrowing what `source` borrows.
+    Rebind,
 }
 
 #[derive(Clone, Debug)]

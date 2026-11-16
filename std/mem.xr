@@ -102,3 +102,16 @@ impl<T> Box<T> {
         }
     }
 }
+
+impl<T> Deref for Box<T> {
+    type Target = T
+    fn deref(&self) -> &T {
+        self.get()
+    }
+}
+
+impl<T> DerefMut for Box<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        self.get_mut()
+    }
+}

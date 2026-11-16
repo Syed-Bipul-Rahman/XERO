@@ -1,0 +1,28 @@
+// std: deref
+
+struct Counter { n: i32 }
+impl Counter {
+    fn bump(&mut self) { self.n += 1 }
+    fn value(&self) -> i32 { self.n }
+}
+fn main() {
+    let s = String.from("  padded  ")
+    println(s.trim())
+    println(s.contains("pad"))
+    for w in String.from("a b c").split(" ") { print(w) }
+    println("")
+    let mut b = Box.new(Counter { n: 1 })
+    b.bump()
+    b.bump()
+    println(b.value())
+    let names: Vec<String> = Vec.new()
+    let v: Vec<i32> = (1..=3).collect()
+    println(v.iter().count())
+}
+
+// output:
+// padded
+// true
+// abc
+// 3
+// 3

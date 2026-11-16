@@ -373,15 +373,12 @@ impl Parser {
             }
             match g.params.iter_mut().find(|p| p.name.name == name.name) {
                 Some(p) => p.bounds.extend(bounds),
-                None => {
-                    return Err(Diagnostic::new(
-                        name.span,
-                        format!(
-                            "`where` clause names unknown type parameter `{}`",
-                            name.name
-                        ),
-                    ))
-                }
+                // a parameter of the enclosing impl (checked later)
+                None => g.outer.push(GenericParam {
+                    name,
+                    bounds,
+                    default: None,
+                }),
             }
             if !self.eat(&Tok::Comma) {
                 break;
@@ -775,7 +772,20 @@ impl Parser {
                     self.bump();
                     self.with_nl(false, |p| {
                         while !p.at(&Tok::Gt) {
-                            args.push(p.ty()?);
+                            // `Item = T`: a bound on an associated type
+                            if matches!(p.peek(), Tok::Ident(_)) && matches!(p.peek_at(1), Tok::Eq)
+                            {
+                                let start = p.span();
+                                let name = p.ident()?;
+                                p.bump();
+                                let t = p.ty()?;
+                                args.push(TypeExpr {
+                                    kind: TypeKind::AssocEq(name, Box::new(t)),
+                                    span: start.to(p.prev_span()),
+                                });
+                            } else {
+                                args.push(p.ty()?);
+                            }
                             if !p.eat(&Tok::Comma) {
                                 break;
                             }
@@ -870,6 +880,7 @@ impl Parser {
                 ret,
                 body,
                 is_move,
+                is_async: false,
             })),
             span,
         })
@@ -972,6 +983,8 @@ impl Parser {
                 span: start.to(self.prev_span()),
             });
         }
+        let async_block = matches!(self.peek(), Tok::Kw(Kw::Async))
+            && !matches!(self.peek_at(1), Tok::Kw(Kw::Fn));
         if let Tok::Kw(
             k @ (Kw::Async
             | Kw::Await
@@ -984,8 +997,14 @@ impl Parser {
         ) = self.peek().clone()
         {
             let what = crate::lexer::kw_name(k);
+            if async_block {
+                let e = self.expr_stmt()?;
+                let semi = self.end_stmt()?;
+                return Ok(Stmt::Expr(e, semi));
+            }
             return self.err(match k {
-                Kw::Async | Kw::Spawn | Kw::Await => format!("`{what}` is reserved for Xero's concurrency model and not yet implemented in this compiler version"),
+                Kw::Async => "`async fn` items must be declared at module level".to_string(),
+                Kw::Spawn | Kw::Await => format!("`{what}` is reserved for Xero's concurrency model and not yet implemented in this compiler version"),
                 Kw::Own => "`own` is reserved; ownership is the default for every binding".to_string(),
                 _ => format!("`{what}` items must be declared at module level"),
             });
@@ -1526,7 +1545,24 @@ impl Parser {
                 let is_move = self.eat_kw(Kw::Move);
                 ExprKind::Spawn(is_move, self.block()?)
             }
-            Tok::Kw(k @ (Kw::Async | Kw::Await)) => {
+            Tok::Kw(Kw::Async) => {
+                // `async { ... }`, `async move { ... }`: a future
+                self.bump();
+                let is_move = self.eat_kw(Kw::Move);
+                let b = self.block()?;
+                let bspan = b.span;
+                ExprKind::Closure(Box::new(ClosureExpr {
+                    params: Vec::new(),
+                    ret: None,
+                    body: Expr {
+                        kind: ExprKind::Block(b),
+                        span: bspan,
+                    },
+                    is_move,
+                    is_async: true,
+                }))
+            }
+            Tok::Kw(k @ Kw::Await) => {
                 return self.err(format!(
                     "`{}` is reserved for Xero's concurrency model and not yet implemented in this compiler version",
                     crate::lexer::kw_name(k)

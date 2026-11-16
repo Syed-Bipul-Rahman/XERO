@@ -57,6 +57,8 @@ pub struct FnCx<'a> {
     pub overrides: HashMap<Span, Ty>,
     /// Locals whose type came from a defaulted literal, with that literal's key.
     pub defaulted: HashMap<LocalId, Span>,
+    /// Untyped literals that took the default type (`i32`/`f64`).
+    pub default_lits: std::collections::HashSet<Span>,
     /// First defaulted literal found to need a different type.
     pub pending: Option<(Span, Ty)>,
     /// Symbol of the function being checked (names its closures).
@@ -79,6 +81,8 @@ pub struct FnCx<'a> {
     pub or_reuse: Option<Vec<(String, LocalId)>>,
     /// Inside an `async fn`: where `.await` gets its context and what `poll` returns.
     pub async_cx: Option<AsyncCx>,
+    /// The context local of the async block just checked.
+    pub async_block_cx: Option<LocalId>,
 }
 
 /// What a path-like expression (`a`, `a.b`, `Type.member`) refers to.
@@ -206,6 +210,7 @@ fn check_fn_inner(
         unsafe_depth: 0,
         overrides: overrides.clone(),
         defaulted: HashMap::new(),
+        default_lits: Default::default(),
         pending: None,
         fn_name: name.clone(),
         captures: None,
@@ -216,6 +221,7 @@ fn check_fn_inner(
         index_calls: HashMap::new(),
         or_reuse: None,
         async_cx: None,
+        async_block_cx: None,
     };
     if decl.is_unsafe {
         cx.unsafe_depth = 1;
@@ -382,6 +388,10 @@ fn check_async_body(
 /// Make values computed before a suspension point survive it: the operands
 /// of an operation, up to one that suspends, are stored in locals first
 /// (locals live in the frame; registers do not survive a suspension).
+pub fn spill_suspends_pub(e: X, locals: &mut Vec<xir::Local>) -> X {
+    spill_suspends(e, locals)
+}
+
 fn spill_suspends(e: X, locals: &mut Vec<xir::Local>) -> X {
     fn suspends(e: &X) -> bool {
         let mut found = matches!(e.kind, K::Suspend(..));
@@ -545,7 +555,10 @@ impl<'a> FnCx<'a> {
     /// `{ let f = fut; loop { match poll(&mut f, cx) { Ready(v) => break v, Pending => suspend } } }`
     fn await_expr(&mut self, inner: &ast::Expr, span: Span) -> Result<X> {
         let Some(actx) = self.async_cx.clone() else {
-            return self.err(span, "`.await` is only allowed inside an `async fn`");
+            return self.err(
+                span,
+                "`.await` is only allowed inside an `async fn` or an `async { }` block",
+            );
         };
         let fut = self.expr(inner, None)?;
         let fty = fut.ty.clone();
@@ -799,6 +812,19 @@ impl<'a> FnCx<'a> {
                 self.defaulted_expr(a).or_else(|| self.defaulted_expr(b))
             }
             K::Unary(UnOp::Neg, a) => self.defaulted_expr(a),
+            K::Int(_) | K::Float(_) if self.default_lits.contains(&v.span) => Some(v.span),
+            K::Borrow(Place::Local(l), _) => self.defaulted.get(l).copied(),
+            // `&(expr)` of an rvalue: `{ let tmp = expr; &tmp }`
+            K::Block(b) => match (&b.stmts[..], b.tail.as_deref()) {
+                (
+                    [xir::Stmt::Let(t, inner)],
+                    Some(X {
+                        kind: K::Borrow(Place::Local(l), _),
+                        ..
+                    }),
+                ) if t == l => self.defaulted_expr(inner),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -849,6 +875,43 @@ impl<'a> FnCx<'a> {
                 return Ok(v);
             }
             return Ok(v);
+        }
+        // &String -> &str, &Vec<T> -> &[T], &Box<T> -> &T (through `Deref`)
+        if let (Ty::Ref(a, m1), Ty::Ref(b, m2)) = (v.ty.clone(), expected.clone()) {
+            if (m1 || !m2) && !matches!(*b, Ty::Dyn(_)) && a != b {
+                if let Some(target) = self.deref_target(&a, span) {
+                    if target == *b {
+                        let v = if m1 && !m2 { self.weaken(v) } else { v };
+                        let (tname, m) = if m2 {
+                            ("DerefMut", "deref_mut")
+                        } else {
+                            ("Deref", "deref")
+                        };
+                        if let Some(tid) = self.prelude_trait(tname) {
+                            if !m2 || !self.ck.trait_impls_for(&a, tid).is_empty() {
+                                return self.call_operator_with(
+                                    tid,
+                                    tname,
+                                    m,
+                                    "deref",
+                                    &a,
+                                    None,
+                                    vec![v],
+                                    span,
+                                );
+                            }
+                        }
+                        return self.err(
+                            span,
+                            format!(
+                                "mismatched types: expected `{}`, found `{}`",
+                                self.ts(expected),
+                                self.ts(&Ty::Ref(a, m1))
+                            ),
+                        );
+                    }
+                }
+            }
         }
         match (&v.ty, expected) {
             // &[T; N] -> &[T]
@@ -904,6 +967,9 @@ impl<'a> FnCx<'a> {
                 ));
             }
             _ => {}
+        }
+        if expected.is_unit() && matches!(v.ty, Ty::Frame(_)) {
+            return self.err(span, "this future is dropped without running: futures do nothing until polled; `.await` it, or run it with `task.block_on`");
         }
         if expected.is_unit() {
             // value in statement context: evaluate and discard
@@ -1256,6 +1322,13 @@ impl<'a> FnCx<'a> {
                     (Some("f32"), _) => Ty::Float(FloatTy::F32),
                     (Some("f64"), _) => Ty::Float(FloatTy::F64),
                     (_, Some(Ty::Float(f))) => Ty::Float(*f),
+                    (None, _) => match self.overrides.get(&span) {
+                        Some(t @ Ty::Float(_)) => t.clone(),
+                        _ => {
+                            self.default_lits.insert(span);
+                            Ty::Float(FloatTy::F64)
+                        }
+                    },
                     _ => Ty::Float(FloatTy::F64),
                 };
                 Ok(x(K::Float(*v), ty, span))
@@ -1295,7 +1368,12 @@ impl<'a> FnCx<'a> {
                 }
                 self.path_value(e, expected)
             }
-            E::Call(callee, args) => self.call(callee, args, expected, span),
+            E::Call(callee, args) => {
+                if let Some(v) = self.format_call(callee, args, span)? {
+                    return Ok(v);
+                }
+                self.call(callee, args, expected, span)
+            }
             E::Await(inner) => self.await_expr(inner, span),
             E::Unary(op, inner) => self.unary(*op, inner, expected, span),
             E::Binary(op, a, b) => self.binary(*op, a, b, expected, span),
@@ -1328,13 +1406,7 @@ impl<'a> FnCx<'a> {
                     ty.clone()
                 };
                 if self.overloadable(*op, &ty) {
-                    // `a += b` on a user type is `a = a + b`
-                    if !self.ck.is_copy(&ty) {
-                        return self.err(span, format!("`{}=` on the move-only type `{}` is not supported yet; write `x = x {} y`", op.symbol(), self.ts(&ty), op.symbol()));
-                    }
-                    let cur = x(K::Use(p.clone(), UseKind::Copy), ty.clone(), lhs.span);
-                    let v = self.overloaded_arith(*op, cur, rhs, span)?;
-                    return Ok(x(K::Assign(p, Box::new(v)), Ty::unit(), span));
+                    return self.compound_overloaded(*op, p, ty, lhs, rhs, span);
                 }
                 let ok = match op {
                     BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
@@ -1457,6 +1529,8 @@ impl<'a> FnCx<'a> {
             E::Array(items) => {
                 let mut et = match expected {
                     Some(Ty::Array(t, _)) => Some((**t).clone()),
+                    // `&[...]` passed as a slice
+                    Some(Ty::Slice(t)) => Some((**t).clone()),
                     _ => None,
                 };
                 let mut out = Vec::new();
@@ -1685,6 +1759,7 @@ impl<'a> FnCx<'a> {
                             span: body.span,
                         },
                         is_move: *is_move,
+                        is_async: false,
                     })),
                     span,
                 };
@@ -1722,7 +1797,14 @@ impl<'a> FnCx<'a> {
             }
             (Some(s), _) => Ty::Int(IntTy::from_name(s).unwrap()),
             (None, Some(Ty::Int(it))) => Ty::Int(*it),
-            _ => Ty::Int(IntTy::I32),
+            (None, _) => match self.overrides.get(&span) {
+                Some(Ty::Float(f)) => return Ok(x(K::Float(v as f64), Ty::Float(*f), span)),
+                Some(t @ Ty::Int(_)) => t.clone(),
+                _ => {
+                    self.default_lits.insert(span);
+                    Ty::Int(IntTy::I32)
+                }
+            },
         };
         let Ty::Int(it) = ty else { unreachable!() };
         let (lo, hi) = it.range(self.ck.target.ptr_bits);
@@ -1961,16 +2043,40 @@ impl<'a> FnCx<'a> {
             return self.err(span, "indexing needs the prelude trait `Index`");
         };
         let impls = self.ck.trait_impls_for(&bty, tid);
-        let idx_tys: Vec<Ty> = impls
-            .iter()
-            .filter_map(|(iid, args)| {
-                self.ck.impls[*iid as usize]
-                    .trait_args
-                    .first()
-                    .map(|a| a.subst(args))
-            })
-            .collect();
-        if idx_tys.is_empty() {
+        // index types the impls fix (an `Index<&Q>` that leaves `Q` open
+        // takes whatever the index is)
+        fn params(t: &Ty, out: &mut Vec<u32>) {
+            match t {
+                Ty::Param(i) => out.push(*i),
+                Ty::Ref(e, _) | Ty::Ptr(e) | Ty::Slice(e) | Ty::Array(e, _) => params(e, out),
+                Ty::Tuple(ts) | Ty::Adt(_, ts) => ts.iter().for_each(|t| params(t, out)),
+                _ => {}
+            }
+        }
+        let mut open = false;
+        let mut idx_tys: Vec<Ty> = Vec::new();
+        for (iid, args) in &impls {
+            let im = &self.ck.impls[*iid as usize];
+            let Some(tpl) = im.trait_args.first() else {
+                continue;
+            };
+            let mut slots = vec![None; im.generics.len()];
+            match_template(&im.self_ty, &bty, &mut slots);
+            let mut ps = Vec::new();
+            params(tpl, &mut ps);
+            if ps
+                .iter()
+                .any(|p| slots.get(*p as usize).is_none_or(|s| s.is_none()))
+            {
+                open = true;
+            } else {
+                idx_tys.push(tpl.subst(args));
+            }
+        }
+        if open {
+            idx_tys.clear();
+        }
+        if idx_tys.is_empty() && !open {
             return self.err(span, format!("type `{}` cannot be indexed; implement `Index` for it:  impl Index<usize> for {} {{ type Output = ...  fn index(&self, i: usize) -> &Self.Output {{ ... }} }}", self.ts(&bty), self.ts(&bty)));
         }
         let i = if idx_tys.len() == 1 {
@@ -2803,6 +2909,77 @@ impl<'a> FnCx<'a> {
         )
     }
 
+    /// A `where` bound on the impl's parameters failed: if an untyped
+    /// literal argument with another numeric type satisfies it, check again.
+    #[allow(clippy::too_many_arguments)]
+    fn retry_literal_for_bounds(
+        &mut self,
+        xs: &[X],
+        slots: &[Ty],
+        n_impl: usize,
+        fn_generics: &[ast::GenericParam],
+        outer: &[ast::GenericParam],
+        module: ModId,
+        span: Span,
+        base: &Env,
+    ) {
+        for a in xs {
+            let Some(key) = self.defaulted_expr(a) else {
+                continue;
+            };
+            let lit_ty = match &a.ty {
+                Ty::Ref(t, _) => (**t).clone(),
+                t => t.clone(),
+            };
+            let Some(pos) = slots[n_impl..].iter().position(|s| *s == lit_ty) else {
+                continue;
+            };
+            let candidates: Vec<Ty> = if lit_ty.is_int() {
+                [
+                    IntTy::I64,
+                    IntTy::U64,
+                    IntTy::Usize,
+                    IntTy::Isize,
+                    IntTy::U32,
+                    IntTy::I16,
+                    IntTy::U16,
+                    IntTy::I8,
+                    IntTy::U8,
+                ]
+                .into_iter()
+                .map(Ty::Int)
+                .collect()
+            } else if lit_ty.is_float() {
+                vec![Ty::Float(FloatTy::F32)]
+            } else {
+                Vec::new()
+            };
+            for c in candidates {
+                let mut env = base.clone();
+                for (k, g) in fn_generics.iter().enumerate() {
+                    let t = if k == pos {
+                        c.clone()
+                    } else {
+                        slots[n_impl + k].clone()
+                    };
+                    env.names.insert(g.name.name.clone(), t);
+                }
+                let args: Vec<Ty> = outer
+                    .iter()
+                    .filter_map(|g| env.names.get(&g.name.name).cloned())
+                    .collect();
+                if self
+                    .ck
+                    .check_bounds_in(outer, &args, module, span, env)
+                    .is_ok()
+                {
+                    self.want_literal_type(key, &lit_ty, &c);
+                    return;
+                }
+            }
+        }
+    }
+
     /// Call function `fid` with `pre` (already lowered receiver) + `args`.
     #[allow(clippy::too_many_arguments)]
     fn invoke(
@@ -2935,8 +3112,94 @@ impl<'a> FnCx<'a> {
             }
             base.self_ty = trait_self.clone();
         }
-        self.ck
-            .check_bounds_in(&fn_generics, &slots[n_impl..], fmodule, span, base)?;
+        // `where` bounds on the impl's parameters
+        let outer = self.ck.fns[fid as usize].decl.generics.outer.clone();
+        if !outer.is_empty() {
+            let mut env = base.clone();
+            for (g, t) in fn_generics.iter().zip(&slots[n_impl..]) {
+                env.names.insert(g.name.name.clone(), t.clone());
+            }
+            let mut args = Vec::new();
+            for g in &outer {
+                match env.names.get(&g.name.name) {
+                    Some(t) => args.push(t.clone()),
+                    None => {
+                        return self.err(
+                            g.name.span,
+                            format!(
+                                "`where` clause names unknown type parameter `{}`",
+                                g.name.name
+                            ),
+                        )
+                    }
+                }
+            }
+            if let Err(d) = self.ck.check_bounds_in(&outer, &args, fmodule, span, env) {
+                self.retry_literal_for_bounds(
+                    &xs,
+                    &slots,
+                    n_impl,
+                    &fn_generics,
+                    &outer,
+                    fmodule,
+                    span,
+                    &base,
+                );
+                return Err(d);
+            }
+        }
+        if let Err(d) =
+            self.ck
+                .check_bounds_in(&fn_generics, &slots[n_impl..], fmodule, span, base.clone())
+        {
+            // an untyped literal argument (`m.get(&10)`) may just need another
+            // numeric type: if one satisfies the bounds, check again with it
+            for a in &xs {
+                let Some(key) = self.defaulted_expr(a) else {
+                    continue;
+                };
+                let lit_ty = match &a.ty {
+                    Ty::Ref(t, _) => (**t).clone(),
+                    t => t.clone(),
+                };
+                let Some(pos) = slots[n_impl..].iter().position(|s| *s == lit_ty) else {
+                    continue;
+                };
+                let candidates: Vec<Ty> = if lit_ty.is_int() {
+                    [
+                        IntTy::I64,
+                        IntTy::U64,
+                        IntTy::Usize,
+                        IntTy::Isize,
+                        IntTy::U32,
+                        IntTy::I16,
+                        IntTy::U16,
+                        IntTy::I8,
+                        IntTy::U8,
+                    ]
+                    .into_iter()
+                    .map(Ty::Int)
+                    .collect()
+                } else if lit_ty.is_float() {
+                    vec![Ty::Float(FloatTy::F32)]
+                } else {
+                    Vec::new()
+                };
+                for c in candidates {
+                    let mut trial = slots[n_impl..].to_vec();
+                    trial[pos] = c.clone();
+                    if self
+                        .ck
+                        .check_bounds_in(&fn_generics, &trial, fmodule, span, base.clone())
+                        .is_ok()
+                    {
+                        self.want_literal_type(key, &lit_ty, &c);
+                        break;
+                    }
+                }
+            }
+            return Err(d);
+        }
         let self_ty = match self.ck.fns[fid as usize].owner {
             FnOwner::Trait(_) => trait_self,
             _ => None,
@@ -3121,6 +3384,36 @@ impl<'a> FnCx<'a> {
         self.find_trait_method(ty, name)
     }
 
+    /// Is there a method `name` on `ty` or behind its references?
+    fn method_on_refs(&mut self, ty: &Ty, name: &str) -> bool {
+        let mut t = ty.clone();
+        loop {
+            if self.method_exists(&t, name) {
+                return true;
+            }
+            if let Ty::Array(e, _) = &t {
+                if self.method_exists(&Ty::Slice(e.clone()), name) {
+                    return true;
+                }
+            }
+            match t {
+                Ty::Ref(inner, _) => t = *inner,
+                _ => return false,
+            }
+        }
+    }
+
+    /// `T.Target` if `t` implements `Deref`.
+    fn deref_target(&mut self, t: &Ty, span: Span) -> Option<Ty> {
+        let tid = self.prelude_trait("Deref")?;
+        if !self.ck.implements(t, tid) {
+            return None;
+        }
+        self.ck
+            .project(t, Some((tid, Vec::new())), "Target", span)
+            .ok()
+    }
+
     fn method_exists(&mut self, ty: &Ty, name: &str) -> bool {
         self.find_method(ty, name).is_some()
     }
@@ -3271,6 +3564,58 @@ impl<'a> FnCx<'a> {
                 return self.dyn_call(r, tid, name, args, span);
             }
         }
+        // methods of a `Deref` target: `string.trim()` (str), `boxed.area()`
+        for _ in 0..8 {
+            if self.method_on_refs(&recv_ty, &name.name) {
+                break;
+            }
+            let base_t = recv_ty.deref_all().clone();
+            let Some(target) = self.deref_target(&base_t, span) else {
+                break;
+            };
+            let wants_mut = match self.find_method(&target, &name.name) {
+                Some((fid, _, _)) => {
+                    self.ck.fns[fid as usize].decl.self_param.map(|s| s.0) == Some(SelfKind::RefMut)
+                }
+                None => false,
+            };
+            let (tname, m) = if wants_mut {
+                ("DerefMut", "deref_mut")
+            } else {
+                ("Deref", "deref")
+            };
+            let Some(tid) = self.prelude_trait(tname) else {
+                break;
+            };
+            if wants_mut && self.ck.trait_impls_for(&base_t, tid).is_empty() {
+                return self.err(
+                    name.span,
+                    format!(
+                        "method `{}` needs `&mut self`, but `{}` does not implement `DerefMut`",
+                        name.name,
+                        self.ts(&base_t)
+                    ),
+                );
+            }
+            let (mut p, mut t) = self.recv_place(recv, span);
+            while let Ty::Ref(..) = t.clone() {
+                let (np, nt) = self.deref_place(p, &t, span);
+                p = np;
+                t = nt;
+            }
+            if wants_mut {
+                p = self.mut_place(p)?;
+                self.note_mut(&p);
+            }
+            let r = x(
+                K::Borrow(p, wants_mut),
+                Ty::reference(t.clone(), wants_mut),
+                base.span,
+            );
+            let v = self.call_operator_with(tid, tname, m, ".", &t, None, vec![r], span)?;
+            recv_ty = v.ty.clone();
+            recv = Recv::Value(v);
+        }
         // autoderef search
         let mut cand = recv_ty.clone();
         let mut depth = 0;
@@ -3303,6 +3648,10 @@ impl<'a> FnCx<'a> {
                         format!("`{}` is a field, not a method", name.name),
                     );
                 }
+            }
+            let bare = recv_ty.deref_all().clone();
+            if let Some(d) = self.ck.unmet_method_bound(&bare, &name.name, name.span) {
+                return Err(d);
             }
             return self.err(
                 name.span,
@@ -3549,6 +3898,20 @@ impl<'a> FnCx<'a> {
                     Ty::Int(IntTy::Isize),
                     span,
                 ))
+            }
+            IntrinsicFn::Rebind => {
+                // `rebind(r, source)`: the reference `r`, which the borrow checker
+                // treats as pointing where `source` points (not into whatever `r`
+                // was derived from). Unsafe: the caller promises that is true.
+                want(self, 2)?;
+                self.require_unsafe(span, "`rebind`")?;
+                let r = self.expr(&args[0], expected)?;
+                let s = self.expr(&args[1], None)?;
+                if !matches!(r.ty, Ty::Ref(..)) || !matches!(s.ty, Ty::Ref(..)) {
+                    return self.err(span, "`rebind` takes two references");
+                }
+                let t = r.ty.clone();
+                Ok(x(K::Intrinsic(xir::Intrinsic::Rebind, vec![r, s]), t, span))
             }
             IntrinsicFn::OsArgc | IntrinsicFn::OsArgv => {
                 want(self, 0)?;
@@ -4171,6 +4534,115 @@ impl<'a> FnCx<'a> {
             }
         };
         self.call_operator(tr, m, op.symbol(), &t, vec![l, r], span)
+    }
+
+    /// `a += b` on a user type: `AddAssign.add_assign(&mut a, b)` when it is
+    /// implemented, otherwise `a = a + b` (for a move-only `a`, its value is
+    /// taken out, combined and put back in place).
+    fn compound_overloaded(
+        &mut self,
+        op: BinOp,
+        p: Place,
+        ty: Ty,
+        lhs: &ast::Expr,
+        rhs: &ast::Expr,
+        span: Span,
+    ) -> Result<X> {
+        let (tname, method) = match op {
+            BinOp::Add => ("AddAssign", "add_assign"),
+            BinOp::Sub => ("SubAssign", "sub_assign"),
+            BinOp::Mul => ("MulAssign", "mul_assign"),
+            BinOp::Div => ("DivAssign", "div_assign"),
+            BinOp::Rem => ("RemAssign", "rem_assign"),
+            _ => return self.err(span, format!("`{}=` cannot be overloaded", op.symbol())),
+        };
+        if let Some(tid) = self.prelude_trait(tname) {
+            let impls = self.ck.trait_impls_for(&ty, tid);
+            if !impls.is_empty() {
+                let rhs_tys: Vec<Ty> = impls
+                    .iter()
+                    .filter_map(|(iid, args)| {
+                        self.ck.impls[*iid as usize]
+                            .trait_args
+                            .first()
+                            .map(|a| a.subst(args))
+                    })
+                    .collect();
+                let r = if rhs_tys.len() == 1 {
+                    self.expr_as(rhs, &rhs_tys[0])?
+                } else {
+                    self.expr(rhs, None)?
+                };
+                let p = self.mut_place(p)?;
+                self.note_mut(&p);
+                let recv = x(
+                    K::Borrow(p, true),
+                    Ty::reference(ty.clone(), true),
+                    lhs.span,
+                );
+                let rt = r.ty.clone();
+                let sym = format!("{}=", op.symbol());
+                let call = self.call_operator_with(
+                    tid,
+                    tname,
+                    method,
+                    &sym,
+                    &ty,
+                    Some(vec![rt]),
+                    vec![recv, r],
+                    span,
+                )?;
+                return Ok(self.coerce(call, &Ty::unit(), span)?);
+            }
+        }
+        if self.ck.is_copy(&ty) {
+            let cur = x(K::Use(p.clone(), UseKind::Copy), ty.clone(), lhs.span);
+            let v = self.overloaded_arith(op, cur, rhs, span)?;
+            return Ok(x(K::Assign(p, Box::new(v)), Ty::unit(), span));
+        }
+        // take the value out (bitwise), combine, and write the result back
+        let p = self.mut_place(p)?;
+        self.note_mut(&p);
+        let ptr_ty = Ty::Ptr(Box::new(ty.clone()));
+        let raw = |p: &Place| {
+            let b = x(
+                K::Borrow(p.clone(), true),
+                Ty::reference(ty.clone(), true),
+                lhs.span,
+            );
+            x(
+                K::Cast(Box::new(b), ptr_ty.clone()),
+                ptr_ty.clone(),
+                lhs.span,
+            )
+        };
+        let cur = x(
+            K::Intrinsic(xir::Intrinsic::PtrRead, vec![raw(&p)]),
+            ty.clone(),
+            lhs.span,
+        );
+        let tmp = self.synthetic("old", ty.clone(), lhs.span);
+        let use_tmp = x(
+            K::Use(Place::Local(tmp), UseKind::Move),
+            ty.clone(),
+            lhs.span,
+        );
+        let v = self.overloaded_arith(op, use_tmp, rhs, span)?;
+        let v = self.coerce(v, &ty, span)?;
+        let write = x(
+            K::Intrinsic(xir::Intrinsic::PtrWrite, vec![raw(&p), v]),
+            Ty::unit(),
+            span,
+        );
+        Ok(x(
+            K::Block(xir::Block {
+                stmts: vec![xir::Stmt::Let(tmp, cur), xir::Stmt::Expr(write)],
+                tail: None,
+                scope: Vec::new(),
+            }),
+            Ty::unit(),
+            span,
+        ))
     }
 
     fn is_fieldless_enum(&self, t: &Ty) -> bool {

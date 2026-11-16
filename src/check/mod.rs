@@ -9,6 +9,7 @@ mod closure;
 mod consteval;
 mod exhaust;
 mod expr;
+mod format;
 mod pat;
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
@@ -50,6 +51,7 @@ pub enum IntrinsicFn {
     Syscall,
     OsArgc,
     OsArgv,
+    Rebind,
 }
 
 const INTRINSICS: &[(&str, IntrinsicFn)] = &[
@@ -76,6 +78,7 @@ const INTRINSICS: &[(&str, IntrinsicFn)] = &[
     ("syscall", IntrinsicFn::Syscall),
     ("os_argc", IntrinsicFn::OsArgc),
     ("os_argv", IntrinsicFn::OsArgv),
+    ("rebind", IntrinsicFn::Rebind),
 ];
 
 /// Types from other std modules that are visible everywhere, like the prelude.
@@ -83,6 +86,8 @@ pub const PRELUDE_TYPES: &[(&str, &str)] = &[
     ("std.vec", "Vec"),
     ("std.string", "String"),
     ("std.mem", "Box"),
+    ("std.collections", "HashMap"),
+    ("std.collections", "HashSet"),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -989,6 +994,13 @@ impl Checker {
         let TypeKind::Path(_, args) = &t.kind else {
             unreachable!()
         };
+        // `Item = T` arguments are checked separately (`assoc_bounds_hold`)
+        let args: Vec<TypeExpr> = args
+            .iter()
+            .filter(|a| !matches!(a.kind, TypeKind::AssocEq(..)))
+            .cloned()
+            .collect();
+        let args = &args;
         let generics = self.traits[tid as usize].decl.generics.params.clone();
         let tmodule = self.traits[tid as usize].module;
         let tname = self.traits[tid as usize].name.clone();
@@ -1295,15 +1307,14 @@ impl Checker {
             }
             // overlapping impls of the same trait for the same type
             for other in 0..iid {
-                let args_overlap = self.impls[other]
-                    .trait_args
-                    .iter()
-                    .zip(&self.impls[iid].trait_args)
-                    .all(|(a, b)| templates_overlap(a, b));
-                if self.impls[other].trait_id == Some(tid)
-                    && args_overlap
-                    && templates_overlap(&self.impls[other].self_ty, &self.impls[iid].self_ty)
-                {
+                // both impls apply to some type only if their self types and
+                // trait arguments unify together (`impl<T> Borrow<T> for T`
+                // and `impl Borrow<str> for String` do not)
+                let mut a = vec![self.impls[other].self_ty.clone()];
+                a.extend(self.impls[other].trait_args.iter().cloned());
+                let mut b = vec![self.impls[iid].self_ty.clone()];
+                b.extend(self.impls[iid].trait_args.iter().cloned());
+                if self.impls[other].trait_id == Some(tid) && templates_unify(&a, &b) {
                     let ty = self.ty_str(&self.impls[iid].self_ty);
                     let prev = self.impls[other].span;
                     self.error(
@@ -1335,11 +1346,20 @@ impl Checker {
         let adt_name = |id: AdtId| self.adts[id as usize].name.clone();
         let param_name = |i: u32| format!("T{i}");
         let trait_name = |i: u32| self.traits[i as usize].name.clone();
+        let frame_name = |i: u32| {
+            let k = &self.frames[i as usize].key;
+            if k.fid == u32::MAX {
+                format!("async#{i}")
+            } else {
+                format!("async fn {}#{i}", self.fns[k.fid as usize].decl.name.name)
+            }
+        };
         TyFmt {
             ty: t,
             adt_name: &adt_name,
             param_name: &param_name,
             trait_name: &trait_name,
+            frame_name: &frame_name,
         }
         .to_string()
     }
@@ -1352,11 +1372,20 @@ impl Checker {
         };
         let param_name = |i: u32| format!("T{i}");
         let trait_name = |i: u32| self.traits[i as usize].name.clone();
+        let frame_name = |i: u32| {
+            let k = &self.frames[i as usize].key;
+            if k.fid == u32::MAX {
+                format!("async#{i}")
+            } else {
+                format!("async fn {}#{i}", self.fns[k.fid as usize].decl.name.name)
+            }
+        };
         TyFmt {
             ty: t,
             adt_name: &adt_name,
             param_name: &param_name,
             trait_name: &trait_name,
+            frame_name: &frame_name,
         }
         .to_string()
     }
@@ -1392,6 +1421,12 @@ impl Checker {
                     None => Ty::unit(),
                 }),
             ),
+            TypeKind::AssocEq(..) => {
+                return Err(Diagnostic::new(
+                    t.span,
+                    "`Name = Type` is only allowed in a trait bound, e.g. `I: Iterator<Item = i32>`",
+                ))
+            }
             TypeKind::Dyn(tr) => {
                 let tid = self.resolve_trait_ref(tr, module)?;
                 self.check_object_safe(tid, tr.span)?;
@@ -1844,6 +1879,28 @@ impl Checker {
         Some(args)
     }
 
+    /// Why no inherent method `name` applies to `t` when one exists but its
+    /// impl's bounds fail: that bound's error.
+    pub fn unmet_method_bound(&mut self, t: &Ty, name: &str, span: Span) -> Option<Diagnostic> {
+        for iid in 0..self.impls.len() {
+            let imp = &self.impls[iid];
+            if imp.trait_id.is_some() || !imp.methods.contains_key(name) {
+                continue;
+            }
+            let mut slots = vec![None; imp.generics.len()];
+            if !match_template(&imp.self_ty, t, &mut slots) {
+                continue;
+            }
+            let args: Vec<Ty> = slots.into_iter().map(|s| s.unwrap_or(Ty::unit())).collect();
+            let generics = imp.generics.clone();
+            let module = imp.module;
+            if let Err(d) = self.check_bounds(&generics, &args, module, span) {
+                return Some(d);
+            }
+        }
+        None
+    }
+
     /// Check `T: Bound` requirements of generic params with concrete args.
     pub fn check_bounds(
         &mut self,
@@ -1911,6 +1968,12 @@ impl Checker {
                     let tname = self.trait_str(tid, &targs);
                     return Err(Diagnostic::new(span, format!("the trait `{tname}` is not implemented for `{tys}` (required by `{}: {tname}`)", g.name.name)));
                 }
+                if let Some((name, want, have)) =
+                    self.assoc_mismatch(b, tid, &targs, module, &env, a, span)?
+                {
+                    let tys = self.ty_str(a);
+                    return Err(Diagnostic::new(span, format!("`{tys}.{name}` is `{have}`, but the bound `{}: ...<{name} = {want}>` requires `{want}`", g.name.name)));
+                }
             }
         }
         Ok(())
@@ -1939,8 +2002,59 @@ impl Checker {
             return Ok(ps == aps && r == ar && akind <= *bound_kind);
         }
         let (tid, targs) = self.resolve_trait_with_args(b, module, env, Some(arg.clone()))?;
-        Ok(self.is_future_frame(arg, tid)
-            || self.find_trait_impl_args(arg, tid, Some(&targs)).is_some())
+        let implemented = self.is_future_frame(arg, tid)
+            || self.find_trait_impl_args(arg, tid, Some(&targs)).is_some();
+        if !implemented {
+            return Ok(false);
+        }
+        Ok(self
+            .assoc_mismatch(b, tid, &targs, module, env, arg, b.span)?
+            .is_none())
+    }
+
+    /// The first `Name = T` in bound `b` that `arg` does not satisfy, as
+    /// (name, wanted type, actual type).
+    #[allow(clippy::too_many_arguments)]
+    fn assoc_mismatch(
+        &mut self,
+        b: &TypeExpr,
+        tid: TraitId,
+        targs: &[Ty],
+        module: ModId,
+        env: &Env,
+        arg: &Ty,
+        span: Span,
+    ) -> Result<Option<(String, String, String)>> {
+        let TypeKind::Path(_, args) = &b.kind else {
+            return Ok(None);
+        };
+        for a in args {
+            let TypeKind::AssocEq(name, want) = &a.kind else {
+                continue;
+            };
+            let declared = self.traits[tid as usize]
+                .decl
+                .assoc_types
+                .iter()
+                .any(|x| x.name.name == name.name);
+            if !declared && !(self.is_future_frame(arg, tid) && name.name == "Output") {
+                let tn = self.traits[tid as usize].name.clone();
+                return Err(Diagnostic::new(
+                    name.span,
+                    format!("trait `{tn}` has no associated type `{}`", name.name),
+                ));
+            }
+            let want = self.resolve_type(want, module, env)?;
+            let have = self.project(arg, Some((tid, targs.to_vec())), &name.name, span)?;
+            if want != have {
+                return Ok(Some((
+                    name.name.clone(),
+                    self.ty_str(&want),
+                    self.ty_str(&have),
+                )));
+            }
+        }
+        Ok(None)
     }
 
     // ------------------------------------------------------ associated types
@@ -2274,6 +2388,18 @@ impl Checker {
             let mut seen = Vec::new();
             if self.frame_reaches(&Ty::Frame(id), id, &frame_locals, &mut seen, true) {
                 let fid = self.frames[id as usize].key.fid;
+                if fid == u32::MAX {
+                    let f = self
+                        .out_funcs
+                        .iter()
+                        .find(|f| f.async_frame.map(|a| a.0) == Some(id));
+                    let sp = f.map(|f| f.span).unwrap_or_default();
+                    self.error(Diagnostic::new(
+                        sp,
+                        "this `async` block's future would contain itself",
+                    ));
+                    return;
+                }
                 let d = &self.fns[fid as usize].decl;
                 let (n, sp) = (d.name.name.clone(), d.name.span);
                 self.error(Diagnostic::new(sp, format!("recursive `async fn` `{n}`: its future would contain itself and have no finite size; make the recursive call in a plain function, or restructure it as a loop")));
@@ -2711,6 +2837,83 @@ fn ffi_safe(t: &Ty) -> bool {
 }
 
 /// Could two impl self-type templates match the same concrete type?
+/// Can the templates `a` and `b` (each with its own `Param`s) be made equal
+/// by one substitution on each side?
+fn templates_unify(a: &[Ty], b: &[Ty]) -> bool {
+    // a variable is (side, param index)
+    fn walk(t: &Ty, side: u8, subst: &HashMap<(u8, u32), (Ty, u8)>) -> (Ty, u8) {
+        let mut cur = (t.clone(), side);
+        while let (Ty::Param(i), s) = &cur {
+            match subst.get(&(*s, *i)) {
+                Some(next) => cur = next.clone(),
+                None => break,
+            }
+        }
+        cur
+    }
+    fn unify(
+        x: &Ty,
+        xs: u8,
+        y: &Ty,
+        ys: u8,
+        subst: &mut HashMap<(u8, u32), (Ty, u8)>,
+        depth: u32,
+    ) -> bool {
+        if depth > 64 {
+            return true;
+        }
+        let (x, xs) = walk(x, xs, subst);
+        let (y, ys) = walk(y, ys, subst);
+        match (&x, &y) {
+            (Ty::Param(i), Ty::Param(j)) if xs == ys && i == j => true,
+            (Ty::Param(i), _) => {
+                subst.insert((xs, *i), (y.clone(), ys));
+                true
+            }
+            (_, Ty::Param(j)) => {
+                subst.insert((ys, *j), (x.clone(), xs));
+                true
+            }
+            (Ty::Ref(p, m1), Ty::Ref(q, m2)) => m1 == m2 && unify(p, xs, q, ys, subst, depth + 1),
+            (Ty::Ptr(p), Ty::Ptr(q)) | (Ty::Slice(p), Ty::Slice(q)) => {
+                unify(p, xs, q, ys, subst, depth + 1)
+            }
+            (Ty::Array(p, n), Ty::Array(q, m)) => n == m && unify(p, xs, q, ys, subst, depth + 1),
+            (Ty::Tuple(ps), Ty::Tuple(qs)) => {
+                ps.len() == qs.len()
+                    && ps
+                        .iter()
+                        .zip(qs)
+                        .all(|(p, q)| unify(p, xs, q, ys, subst, depth + 1))
+            }
+            (Ty::Adt(i, ps), Ty::Adt(j, qs)) => {
+                i == j
+                    && ps
+                        .iter()
+                        .zip(qs)
+                        .all(|(p, q)| unify(p, xs, q, ys, subst, depth + 1))
+            }
+            (Ty::FnPtr(ps, r), Ty::FnPtr(qs, s)) => {
+                ps.len() == qs.len()
+                    && ps
+                        .iter()
+                        .zip(qs)
+                        .all(|(p, q)| unify(p, xs, q, ys, subst, depth + 1))
+                    && unify(r, xs, s, ys, subst, depth + 1)
+            }
+            // associated types are not known here: assume they could match
+            (Ty::Assoc(_), _) | (_, Ty::Assoc(_)) => true,
+            _ => x == y,
+        }
+    }
+    let mut subst = HashMap::new();
+    a.len() == b.len()
+        && a.iter()
+            .zip(b)
+            .all(|(x, y)| unify(x, 0, y, 1, &mut subst, 0))
+}
+
+#[allow(dead_code)]
 fn templates_overlap(a: &Ty, b: &Ty) -> bool {
     match (a, b) {
         (Ty::Param(_), _) | (_, Ty::Param(_)) => true,

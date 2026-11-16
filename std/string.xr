@@ -85,6 +85,13 @@ impl String {
         unsafe { str_from_raw(s as *u8, s.len()) }
     }
 
+    /// Keep only the first `len` bytes.
+    pub fn truncate(&mut self, len: usize) {
+        while self.bytes.len() > len {
+            self.bytes.pop()
+        }
+    }
+
     pub fn clear(&mut self) {
         self.bytes.clear()
     }
@@ -144,5 +151,51 @@ pub fn is_utf8(b: &[u8]) -> bool {
 impl Print for String {
     fn write_to(&self, fd: i32) {
         write_str(fd, self.as_str())
+    }
+}
+
+/// `s + "text"`: append, reusing the string's buffer.
+impl Add<&str> for String {
+    fn add(mut self, other: &str) -> String {
+        self.push_str(other)
+        self
+    }
+}
+
+/// `s += "text"`
+impl AddAssign<&str> for String {
+    fn add_assign(&mut self, other: &str) {
+        self.push_str(other)
+    }
+}
+
+impl Deref for String {
+    type Target = str
+    fn deref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl Hash for String {
+    fn hash(&self, h: &mut Hasher) {
+        self.as_str().hash(h)
+    }
+}
+
+impl Eq for String {
+    fn eq(&self, other: &String) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl Ord for String {
+    fn cmp(&self, other: &String) -> Ordering {
+        self.as_str().cmp(other.as_str())
+    }
+}
+
+impl Borrow<str> for String {
+    fn view(&self) -> &str {
+        self.as_str()
     }
 }

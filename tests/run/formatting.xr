@@ -1,0 +1,54 @@
+// Format strings: format(), println with arguments, Display.
+
+struct Point { x: i32
+    y: i32 }
+impl Display for Point {
+    fn fmt(&self, out: &mut String) {
+        out.push_str(&format("({}, {})", self.x, self.y))
+    }
+}
+
+fn main() {
+    let name = "Xero"
+    let version = 0.6
+    println("{} {}", name, version)
+    let s = format("{} + {} = {}", 2, 3, 2 + 3)
+    println(&s)
+    println("[{:5}] [{:<5}] [{:^7}] [{:>4}]", 42, 7, "mid", "r")
+    println("[{:05}] [{:05}] [{:*^9}]", 42, -42, "x")
+    println("{:.2} {:.0} {:.3}", 3.14159, 2.5, 1.0)
+    println("{:x} {:X} {:b} {:o} {:08x}", 255, 255, 5, 8, 48879)
+    println("{1} then {0}", "a", "b")
+    println("{{literal}} {}", true)
+    let p = Point { x: 1, y: -2 }
+    println("p = {}", p)
+    let r = &p
+    println("[{:12}]", r)
+    let o: Option<i32> = Some(5)
+    let none: Option<i32> = None
+    println("{} {}", o, none)
+    eprintln("to stderr: {}", 1)
+    let owned = String.from("owned")
+    println("{}!", owned)
+    println(&format("{}", 1u8))
+    println(format("plain"))
+    let n: u64 = 18446744073709551615
+    println("{}", n)
+}
+
+// output:
+// Xero 0.6
+// 2 + 3 = 5
+// [   42] [7    ] [  mid  ] [   r]
+// [00042] [-0042] [****x****]
+// 3.14 3 1.000
+// ff FF 101 10 0000beef
+// b then a
+// {literal} true
+// p = (1, -2)
+// [(1, -2)     ]
+// Some(5) None
+// owned!
+// 1
+// plain
+// 18446744073709551615

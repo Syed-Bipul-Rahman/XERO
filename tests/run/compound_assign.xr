@@ -1,0 +1,49 @@
+// Compound assignment on user types: AddAssign, and a = a + b for move-only values.
+
+struct Big { digits: Vec<u8> }
+impl Add for Big {
+    fn add(self, o: Big) -> Big {
+        let mut d: Vec<u8> = Vec.new()
+        for x in &self.digits { d.push(*x) }
+        for x in &o.digits { d.push(*x) }
+        Big { digits: d }
+    }
+}
+struct Counter { n: Vec<i32> }
+impl AddAssign<i32> for Counter {
+    fn add_assign(&mut self, k: i32) { self.n.push(k) }
+}
+struct Holder { b: Big }
+fn grow(h: &mut Holder) {
+    h.b += Big { digits: Vec.new() }
+    h.b += Big { digits: [7u8].iter().map(|x| *x).collect() }
+}
+fn main() {
+    let mut s = String.from("ab")
+    s += "cd"
+    s += "e"
+    let t = s + "!"
+    println(&t)
+    let mut b = Big { digits: Vec.new() }
+    b.digits.push(1)
+    b += Big { digits: [2u8, 3].iter().map(|x| *x).collect() }
+    println(b.digits.len())
+    let mut c = Counter { n: Vec.new() }
+    c += 5
+    c += 6
+    println(c.n[1])
+    let mut h = Holder { b: b }
+    grow(&mut h)
+    println(h.b.digits.len())
+    let mut v: Vec<String> = Vec.new()
+    v.push(String.from("x"))
+    v[0] += "yz"
+    println(&v[0])
+}
+
+// output:
+// abcde!
+// 3
+// 6
+// 4
+// xyz

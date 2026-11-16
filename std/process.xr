@@ -1,0 +1,128 @@
+// Running other programs.
+//
+//   let out = try process.run("git", &["status", "--short"])
+//   if out.success() { print(out.stdout) }
+//
+// The program is looked up in `PATH` unless its name contains a path
+// separator. Arguments are passed as they are, with no shell in between.
+
+module std.process
+
+import std.fs
+import std.fs.{Error}
+import std.sys
+
+/// What a finished program left behind.
+pub struct Output {
+    /// The exit code (on Unix, 128 + the signal number if a signal ended it).
+    pub status: i32
+    /// Everything it wrote to standard output and standard error (if that
+    /// is not valid UTF-8, its non-ASCII bytes are replaced by `?`).
+    pub stdout: String
+    pub stderr: String
+}
+
+impl Output {
+    /// Whether it exited with code 0.
+    pub fn success(&self) -> bool {
+        self.status == 0
+    }
+}
+
+/// Run `program` with `args`, wait for it to finish, and collect its
+/// output. Its standard input is this program's.
+pub fn run(program: &str, args: &[&str]) -> Result<Output, Error> {
+    let mut pipes = [-1isize; 2]
+    let p = try start(program, args, true, &mut pipes as *isize)
+    let mut out: Vec<u8> = Vec.new()
+    let mut err: Vec<u8> = Vec.new()
+    let mut buf = [0u8; 4096]
+    let mut a = pipes[0]
+    let mut b = pipes[1]
+    // read both pipes as data arrives, so neither fills up and blocks the program
+    while a >= 0 || b >= 0 {
+        let ready = unsafe { sys.pipe_wait(a, b) }
+        if a >= 0 && (ready & 1) != 0 {
+            if !drain(a, &mut buf, &mut out) {
+                unsafe { sys.pipe_close(a) }
+                a = -1
+            }
+        }
+        if b >= 0 && (ready & 2) != 0 {
+            if !drain(b, &mut buf, &mut err) {
+                unsafe { sys.pipe_close(b) }
+                b = -1
+            }
+        }
+    }
+    let status = unsafe { sys.proc_wait(p) }
+    Ok(Output { status: status, stdout: lossy(out), stderr: lossy(err) })
+}
+
+/// Run `program` with `args`, sharing this program's input and output, and
+/// return its exit code once it finishes.
+pub fn status(program: &str, args: &[&str]) -> Result<i32, Error> {
+    let mut pipes = [-1isize; 2]
+    let p = try start(program, args, false, &mut pipes as *isize)
+    Ok(unsafe { sys.proc_wait(p) })
+}
+
+/// End this program with exit code `code`.
+pub fn exit(code: i32) -> ! {
+    sys.exit_process(code)
+}
+
+/// Read once from `h` into `to`; false at the end of the pipe.
+fn drain(h: isize, buf: &mut [u8; 4096], to: &mut Vec<u8>) -> bool {
+    let n = unsafe { sys.pipe_read(h, &mut *buf as *u8, 4096) }
+    if n <= 0 {
+        return false
+    }
+    for i in 0..n as usize {
+        to.push(buf[i])
+    }
+    true
+}
+
+fn lossy(bytes: Vec<u8>) -> String {
+    let mut ascii = String.new()
+    for b in &bytes {
+        ascii.push_byte(if *b < 128 { *b } else { '?' })
+    }
+    match String.from_utf8(bytes) {
+        Some(s) => s
+        None => ascii
+    }
+}
+
+/// Start the program; returns its handle.
+fn start(program: &str, args: &[&str], capture: bool, pipes: *isize) -> Result<isize, Error> {
+    // NUL-terminated copies of the strings, and the null-terminated array of them
+    let mut strings: Vec<Vec<u8>> = Vec.with_capacity(args.len() + 1)
+    strings.push(try c_string(program))
+    for a in args {
+        strings.push(try c_string(*a))
+    }
+    let mut argv: Vec<*u8> = Vec.with_capacity(strings.len() + 1)
+    for s in &strings {
+        argv.push(s.as_slice() as *u8)
+    }
+    argv.push(0 as *u8)
+    let p = unsafe { sys.proc_spawn(argv.as_slice() as **u8, capture, pipes) }
+    if p < 0 {
+        throw fs.error_from(0 - p as i32)
+    }
+    Ok(p)
+}
+
+fn c_string(s: &str) -> Result<Vec<u8>, Error> {
+    let mut v: Vec<u8> = Vec.with_capacity(s.len() + 1)
+    for b in s.as_bytes() {
+        if *b == 0 {
+            throw fs.error_from(-2)
+        }
+        v.push(*b)
+    }
+    v.push(0)
+    Ok(v)
+}

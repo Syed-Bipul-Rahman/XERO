@@ -90,3 +90,72 @@ pub unsafe fn cond_free(c: *u8) {}
 pub fn sleep_ms(ms: u64) {}
 
 pub fn yield_now() {}
+
+// Without an OS there is no clock, environment, file system or processes:
+// clocks read 0, and the rest fails with ENOSYS.
+
+pub fn clock_monotonic() -> u64 {
+    0
+}
+
+pub fn clock_realtime() -> u64 {
+    0
+}
+
+pub fn sleep_ns(ns: u64) {}
+
+pub unsafe fn env_block() -> **u8 {
+    0 as **u8
+}
+
+pub unsafe fn cwd(buf: *u8, len: usize) -> isize {
+    -38
+}
+
+pub unsafe fn chdir_path(path: *u8) -> i32 {
+    -38
+}
+
+pub unsafe fn dir_create(path: *u8) -> i32 {
+    -38
+}
+
+pub unsafe fn dir_remove(path: *u8) -> i32 {
+    -38
+}
+
+pub unsafe fn path_rename(from: *u8, to: *u8) -> i32 {
+    -38
+}
+
+pub unsafe fn path_stat(path: *u8, out: *u64) -> i32 {
+    -38
+}
+
+pub unsafe fn dir_open(path: *u8) -> isize {
+    -38
+}
+
+pub unsafe fn dir_next(h: isize, name: *u8) -> isize {
+    0
+}
+
+pub unsafe fn dir_close(h: isize) {}
+
+pub unsafe fn proc_spawn(argv: **u8, capture: bool, pipes: *isize) -> isize {
+    -38
+}
+
+pub unsafe fn pipe_wait(a: isize, b: isize) -> i32 {
+    3
+}
+
+pub unsafe fn pipe_read(h: isize, buf: *u8, n: usize) -> isize {
+    0
+}
+
+pub unsafe fn pipe_close(h: isize) {}
+
+pub unsafe fn proc_wait(p: isize) -> i32 {
+    -1
+}

@@ -1,0 +1,35 @@
+// Bounds on associated types: I: Iterator<Item = i32>, F: Future<Output = i32>.
+
+import std.task
+
+fn total<I: Iterator<Item = i32>>(it: I) -> i32 {
+    it.fold(0, |a, b| a + b)
+}
+
+fn longest<I>(it: I) -> usize where I: Iterator<Item = &str> {
+    it.map(|s| s.len()).max().unwrap_or(0)
+}
+
+fn squares(n: i32) -> impl Iterator<Item = i32> {
+    (1..=n).map(|x| x * x)
+}
+
+async fn ten() -> i32 { 10 }
+
+fn run<F: Future<Output = i32>>(f: F) -> i32 {
+    task.block_on(f) + 1
+}
+
+fn main() {
+    println(total(1..=4))
+    println(total(squares(3)))
+    let words = ["a", "abcd", "ab"]
+    println(longest(words.iter().map(|w| *w)))
+    println(run(ten()))
+}
+
+// output:
+// 10
+// 14
+// 4
+// 11

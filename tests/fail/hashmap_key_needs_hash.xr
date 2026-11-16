@@ -1,0 +1,8 @@
+struct K { v: i32 }
+impl Eq for K { fn eq(&self, o: &K) -> bool { self.v == o.v } }
+
+fn main() {
+    let mut m: HashMap<K, i32> = HashMap.new()
+    m.insert(K { v: 1 }, 2)
+}
+// error: the trait `Hash` is not implemented for `K` (required by `K: Hash`)

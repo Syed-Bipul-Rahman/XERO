@@ -30,6 +30,29 @@ unsafe fn SleepConditionVariableSRW(cv: *u8, lock: *u8, ms: u32, flags: u32) -> 
 unsafe fn WakeConditionVariable(cv: *u8)
 unsafe fn WakeAllConditionVariable(cv: *u8)
 unsafe fn Sleep(ms: u32)
+unsafe fn QueryPerformanceCounter(count: *i64) -> i32
+unsafe fn QueryPerformanceFrequency(freq: *i64) -> i32
+unsafe fn GetSystemTimePreciseAsFileTime(time: *u64)
+unsafe fn GetLastError() -> u32
+unsafe fn MoveFileExA(from: *u8, to: *u8, flags: u32) -> i32
+unsafe fn CreatePipe(read: *usize, write: *usize, attrs: *u8, size: u32) -> i32
+unsafe fn SetHandleInformation(h: usize, mask: u32, flags: u32) -> i32
+unsafe fn GetStdHandle(which: u32) -> usize
+unsafe fn GetCurrentProcess() -> usize
+unsafe fn DuplicateHandle(sp: usize, h: usize, tp: usize, out: *usize, access: u32, inherit: i32, options: u32) -> i32
+unsafe fn CreateProcessA(app: *u8, cmd: *u8, pa: *u8, ta: *u8, inherit: i32, flags: u32, env: *u8, dir: *u8, si: *u8, pi: *u8) -> i32
+unsafe fn GetExitCodeProcess(h: usize, code: *u32) -> i32
+unsafe fn PeekNamedPipe(h: usize, buf: *u8, size: u32, read: *u32, avail: *u32, left: *u32) -> i32
+unsafe fn ReadFile(h: usize, buf: *u8, n: u32, read: *u32, overlapped: *u8) -> i32
+unsafe fn _getcwd(buf: *u8, size: i32) -> *u8
+unsafe fn _chdir(path: *u8) -> i32
+unsafe fn _mkdir(path: *u8) -> i32
+unsafe fn _rmdir(path: *u8) -> i32
+unsafe fn _stat64(path: *u8, buf: *u8) -> i32
+unsafe fn _findfirst64(spec: *u8, data: *u8) -> isize
+unsafe fn _findnext64(h: isize, data: *u8) -> i32
+unsafe fn _findclose(h: isize) -> i32
+unsafe fn __p__environ() -> ***u8
 unsafe fn SwitchToThread() -> i32
 
 pub const THREADS: bool = true
@@ -164,4 +187,347 @@ pub unsafe fn heap_free(ptr: *u8) {
 /// Copy `count` bytes; the regions may overlap.
 pub unsafe fn mem_move(dst: *u8, src: *u8, count: usize) {
     memmove(dst, src, count)
+}
+
+// ------------------------------------------------------------------ time
+
+/// Nanoseconds on a clock that never goes back.
+pub fn clock_monotonic() -> u64 {
+    let mut count: i64 = 0
+    let mut freq: i64 = 1
+    unsafe {
+        QueryPerformanceCounter(&mut count as *i64)
+        QueryPerformanceFrequency(&mut freq as *i64)
+    }
+    let c = count as u64
+    let f = freq as u64
+    (c / f) * 1000000000 + (c % f) * 1000000000 / f
+}
+
+/// Nanoseconds since 1970-01-01 00:00 UTC.
+pub fn clock_realtime() -> u64 {
+    // 100 ns units since 1601-01-01
+    let mut t: u64 = 0
+    unsafe {
+        GetSystemTimePreciseAsFileTime(&mut t as *u64)
+    }
+    (t - 116444736000000000) * 100
+}
+
+pub fn sleep_ns(ns: u64) {
+    // whole milliseconds, rounded up
+    let ms = (ns + 999999) / 1000000
+    unsafe {
+        Sleep(if ms > 0xFFFFFFFE { 0xFFFFFFFE } else { ms as u32 })
+    }
+}
+
+// ----------------------------------------------- environment and directories
+// These return `-errno` on failure.
+
+/// The environment: a null-terminated array of `NAME=value` C strings.
+pub unsafe fn env_block() -> **u8 {
+    *__p__environ()
+}
+
+fn fail() -> i32 {
+    0 - unsafe { target.errno() }
+}
+
+/// A Windows error code as the closest `errno`.
+fn win_error() -> i32 {
+    let e = unsafe { GetLastError() }
+    let n = if e == 2 || e == 3 {
+        2
+    } else if e == 5 {
+        13
+    } else if e == 80 || e == 183 {
+        17
+    } else if e == 145 {
+        41
+    } else if e == 193 {
+        8
+    } else {
+        e as i32
+    }
+    0 - n
+}
+
+/// Write the current directory into `buf`; returns its length.
+pub unsafe fn cwd(buf: *u8, len: usize) -> isize {
+    if _getcwd(buf, len as i32) as usize == 0 {
+        return fail() as isize
+    }
+    let mut n: usize = 0
+    while *(buf + n) != 0 {
+        n += 1
+    }
+    n as isize
+}
+
+pub unsafe fn chdir_path(path: *u8) -> i32 {
+    if _chdir(path) < 0 { fail() } else { 0 }
+}
+
+pub unsafe fn dir_create(path: *u8) -> i32 {
+    if _mkdir(path) < 0 { fail() } else { 0 }
+}
+
+pub unsafe fn dir_remove(path: *u8) -> i32 {
+    if _rmdir(path) < 0 { fail() } else { 0 }
+}
+
+/// Rename `from` to `to`, replacing `to` if it is a file.
+pub unsafe fn path_rename(from: *u8, to: *u8) -> i32 {
+    // MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED
+    if MoveFileExA(from, to, 3) == 0 { win_error() } else { 0 }
+}
+
+/// What is at `path`: `out[0]` is 1 for a file, 2 for a directory and 3
+/// for anything else; `out[1]` is the size in bytes.
+pub unsafe fn path_stat(path: *u8, out: *u64) -> i32 {
+    // struct _stat64: st_mode (u16) at 6, st_size (i64) at 24; 56 bytes
+    let mut buf = [0u64; 8]
+    let b = &mut buf as *u64 as *u8
+    if _stat64(path, b) < 0 {
+        return fail()
+    }
+    let mode = (*((b + 6) as *u16)) as u32 & 0xF000
+    *out = if mode == 0x8000 { 1 } else if mode == 0x4000 { 2 } else { 3 }
+    *(out + 1) = *((b + 24) as *u64)
+    0
+}
+
+// a directory being read: the search handle, whether `data` holds an entry
+// not yet returned, then struct __finddata64_t (name at 40; 304 bytes)
+const FIND_DATA: usize = 16
+
+pub unsafe fn dir_open(path: *u8) -> isize {
+    let mut n: usize = 0
+    while *(path + n) != 0 {
+        n += 1
+    }
+    let spec = heap_alloc(n + 3)
+    if spec as usize == 0 {
+        return -12
+    }
+    mem_move(spec, path, n)
+    let mut k = n
+    if n > 0 && *(path + n - 1) != '/' && *(path + n - 1) != '\\' {
+        *(spec + k) = '\\'
+        k += 1
+    }
+    *(spec + k) = '*'
+    *(spec + k + 1) = 0
+    let d = heap_alloc(FIND_DATA + 320) as *isize
+    if d as usize == 0 {
+        heap_free(spec)
+        return -12
+    }
+    let h = _findfirst64(spec, (d as *u8) + FIND_DATA)
+    heap_free(spec)
+    if h == -1 {
+        let e = fail()
+        heap_free(d as *u8)
+        return e as isize
+    }
+    *d = h
+    *(d + 1) = 1
+    d as isize
+}
+
+/// The next entry's name, copied into `name` (1024 bytes); returns its
+/// length, or 0 when there are no more.
+pub unsafe fn dir_next(h: isize, name: *u8) -> isize {
+    let d = h as *isize
+    if *(d + 1) == 0 {
+        if _findnext64(*d, (d as *u8) + FIND_DATA) != 0 {
+            return 0
+        }
+    }
+    *(d + 1) = 0
+    let s = (d as *u8) + FIND_DATA + 40
+    let mut len: usize = 0
+    while *(s + len) != 0 && len < 259 {
+        *(name + len) = *(s + len)
+        len += 1
+    }
+    len as isize
+}
+
+pub unsafe fn dir_close(h: isize) {
+    let d = h as *isize
+    _findclose(*d)
+    heap_free(d as *u8)
+}
+
+// --------------------------------------------------------------- processes
+
+/// Append `arg` to a command line, quoted the way the C runtime splits it.
+unsafe fn push_arg(cmd: &mut Vec<u8>, arg: *u8) {
+    let mut n: usize = 0
+    let mut plain = true
+    while *(arg + n) != 0 {
+        let c = *(arg + n)
+        if c == ' ' || c == '\t' || c == '"' {
+            plain = false
+        }
+        n += 1
+    }
+    if plain && n > 0 {
+        for i in 0..n {
+            cmd.push(*(arg + i))
+        }
+        return
+    }
+    cmd.push('"')
+    let mut slashes: usize = 0
+    for i in 0..n {
+        let c = *(arg + i)
+        if c == '\\' {
+            slashes += 1
+        } else {
+            if c == '"' {
+                // backslashes before a quote are doubled, and the quote escaped
+                for _ in 0..slashes + 1 {
+                    cmd.push('\\')
+                }
+            }
+            slashes = 0
+        }
+        cmd.push(c)
+    }
+    // backslashes before the closing quote are doubled
+    for _ in 0..slashes {
+        cmd.push('\\')
+    }
+    cmd.push('"')
+}
+
+/// An inheritable copy of one of this process's standard handles.
+unsafe fn inheritable(which: u32) -> usize {
+    let h = GetStdHandle(which)
+    let mut out: usize = 0
+    let me = GetCurrentProcess()
+    if h == 0 || h as isize == -1 || DuplicateHandle(me, h, me, &mut out as *usize, 0, 1, 2) == 0 {
+        return 0
+    }
+    out
+}
+
+/// Start the program `argv[0]` (searched for in `PATH`) with the
+/// null-terminated `argv`. With `capture`, its output and error output go
+/// to pipes whose read ends are stored in `pipes[0]` and `pipes[1]`.
+/// Returns a process handle, or `-errno` if it could not start.
+pub unsafe fn proc_spawn(argv: **u8, capture: bool, pipes: *isize) -> isize {
+    let mut cmd: Vec<u8> = Vec.new()
+    let mut i: usize = 0
+    while *(argv + i) as usize != 0 {
+        if i > 0 {
+            cmd.push(' ')
+        }
+        push_arg(&mut cmd, *(argv + i))
+        i += 1
+    }
+    cmd.push(0)
+    // SECURITY_ATTRIBUTES { nLength, lpSecurityDescriptor, bInheritHandle = 1 }
+    let sa = [24u64, 0, 1]
+    let sap = &sa as *u64 as *u8
+    let mut out_r: usize = 0
+    let mut out_w: usize = 0
+    let mut err_r: usize = 0
+    let mut err_w: usize = 0
+    let stdin = inheritable(0xFFFFFFF6)
+    if capture {
+        if CreatePipe(&mut out_r as *usize, &mut out_w as *usize, sap, 0) == 0 {
+            return win_error() as isize
+        }
+        if CreatePipe(&mut err_r as *usize, &mut err_w as *usize, sap, 0) == 0 {
+            let e = win_error()
+            CloseHandle(out_r)
+            CloseHandle(out_w)
+            return e as isize
+        }
+        // the read ends stay here
+        SetHandleInformation(out_r, 1, 0)
+        SetHandleInformation(err_r, 1, 0)
+    } else {
+        out_w = inheritable(0xFFFFFFF5)
+        err_w = inheritable(0xFFFFFFF4)
+    }
+    // STARTUPINFOA (104 bytes): cb at 0, dwFlags at 60, the handles at 80, 88, 96
+    let mut si = [0u64; 13]
+    let sp = &mut si as *u64 as *u8
+    *(sp as *u32) = 104
+    *((sp + 60) as *u32) = 0x100
+    *((sp + 80) as *usize) = stdin
+    *((sp + 88) as *usize) = out_w
+    *((sp + 96) as *usize) = err_w
+    // PROCESS_INFORMATION: hProcess, hThread, ids
+    let mut pi = [0usize; 3]
+    let ok = CreateProcessA(0 as *u8, cmd.as_slice() as *u8, 0 as *u8, 0 as *u8, 1, 0, 0 as *u8, 0 as *u8, sp, &mut pi as *usize as *u8)
+    let e = if ok == 0 { win_error() } else { 0 }
+    for h in [stdin, out_w, err_w] {
+        if h != 0 {
+            CloseHandle(h)
+        }
+    }
+    if ok == 0 {
+        if capture {
+            CloseHandle(out_r)
+            CloseHandle(err_r)
+        }
+        return e as isize
+    }
+    CloseHandle(pi[1])
+    *pipes = if capture { out_r as isize } else { -1 }
+    *(pipes + 1) = if capture { err_r as isize } else { -1 }
+    pi[0] as isize
+}
+
+/// Wait until pipe `a` or `b` (-1 for none) has data or has closed;
+/// returns bit 1 for `a` and bit 2 for `b`.
+pub unsafe fn pipe_wait(a: isize, b: isize) -> i32 {
+    loop {
+        let mut bits: i32 = 0
+        if a != -1 && pipe_ready(a) {
+            bits |= 1
+        }
+        if b != -1 && pipe_ready(b) {
+            bits |= 2
+        }
+        if bits != 0 {
+            return bits
+        }
+        Sleep(1)
+    }
+}
+
+/// Data waiting, or the other end closed.
+unsafe fn pipe_ready(h: isize) -> bool {
+    let mut avail: u32 = 0
+    PeekNamedPipe(h as usize, 0 as *u8, 0, 0 as *u32, &mut avail as *u32, 0 as *u32) == 0 || avail > 0
+}
+
+/// Read from a pipe; 0 at its end.
+pub unsafe fn pipe_read(h: isize, buf: *u8, n: usize) -> isize {
+    let mut got: u32 = 0
+    if ReadFile(h as usize, buf, n as u32, &mut got as *u32, 0 as *u8) == 0 {
+        // ERROR_BROKEN_PIPE: the program closed its end
+        return if GetLastError() == 109 { 0 } else { win_error() as isize }
+    }
+    got as isize
+}
+
+pub unsafe fn pipe_close(h: isize) {
+    CloseHandle(h as usize)
+}
+
+/// Wait for the process to end; its exit code.
+pub unsafe fn proc_wait(p: isize) -> i32 {
+    let mut code: u32 = 0
+    WaitForSingleObject(p as usize, INFINITE)
+    GetExitCodeProcess(p as usize, &mut code as *u32)
+    CloseHandle(p as usize)
+    code as i32
 }

@@ -1,0 +1,4 @@
+fn main() {
+    println("{:q}", 1)
+}
+// error: `{:q}`: unknown format `q` (use `x`, `X`, `b` or `o`, a width like `5`, or a precision like `.2`)

@@ -199,7 +199,7 @@ on `static mut`, non-exhaustive matches and more.
 
 ## Status
 
-Xero 0.5 is a working compiler. Language features:
+Xero 0.6 is a working compiler. Language features:
 
 * **Types:** structs and enums (which can hold references), enums with data,
   closures (`Fn`, `FnMut`, `FnOnce`), and function pointers.
@@ -216,8 +216,10 @@ Xero 0.5 is a working compiler. Language features:
 Compiler and runtime support:
 
 * **Safety:** RAII and a borrow checker that needs no lifetime annotations.
-* **Standard library:** modules, `Box`, `Vec`, `String`, files (`std.fs`),
-  command-line arguments (`std.env`).
+* **Standard library:** modules, `Box`, `Vec`, `String`, format strings
+  checked at compile time, `HashMap` and `HashSet`, files and directories
+  (`std.fs`), arguments and environment variables (`std.env`), running
+  programs (`std.process`), and time (`std.time`).
 * **Runtime:** none on Linux beyond a few KB of Xero code: system calls, an
   allocator and threads, with no C library.
 * **Low level:** unsafe code, raw pointers, C FFI, inline assembly, and

@@ -1,0 +1,96 @@
+// What's new in Xero 0.6: format strings, string methods, HashMap and
+// HashSet, time, processes, directories and environment variables.
+//
+//   xeroc run examples/whats_new_0_6.xr
+
+import std.collections.{HashMap, HashSet}
+import std.env
+import std.fs
+import std.process
+import std.time
+import std.time.{Duration, Instant}
+
+copy struct Point {
+    x: i32
+    y: i32
+}
+
+// `{}` formats anything that implements Display
+impl Display for Point {
+    fn fmt(&self, out: &mut String) {
+        out.push_str(format("({}, {})", self.x, self.y).as_str())
+    }
+}
+
+impl Eq for Point {
+    fn eq(&self, o: &Point) -> bool { self.x == o.x && self.y == o.y }
+}
+
+// keys of a HashMap or HashSet need Hash and Eq
+impl Hash for Point {
+    fn hash(&self, h: &mut Hasher) {
+        self.x.hash(h)
+        self.y.hash(h)
+    }
+}
+
+fn main() {
+    let start = Instant.now()
+
+    // ---- format strings, checked at compile time
+    let name = "Ada"
+    println("{} is {} years old", name, 36)
+    println(format("{0}, {0}!", "hello"))
+    println("[{:>6}] [{:<6}] [{:^6}]", 1, 2, 3)
+    println("{:08.3} {:x} {:b} {:-^11}", 3.14159, 255, 5, "mid")
+    println("p = {}", Point { x: 1, y: 2 })
+
+    // ---- strings
+    let line = "  name = Xero ; version = 0.6  "
+    for part in line.trim().split(" ; ") {
+        if part.split_once(" = ") is Some((k, v)) {
+            println("{:>8}: {}", k, v.to_upper())
+        }
+    }
+    let mut s = String.from("abc")
+    s += "-def"
+    println("{} {} {}", s, s.contains("c-d"), s.replace("-", "+"))
+    println("{}", "  42 ".trim().parse_int().unwrap() + 1)
+
+    // ---- HashMap and HashSet
+    let text = "the cat and the hat and the bat"
+    let mut counts: HashMap<String, usize> = HashMap.new()
+    for w in text.split_whitespace() {
+        *counts.get_or_insert_with(w.to_string(), || 0) += 1
+    }
+    println("the: {}, and: {}, dog: {}", counts["the"], counts["and"], counts.contains_key("dog"))
+    let mut words: Vec<String> = counts.keys().map(|k| k.as_str().to_string()).collect()
+    words.sort()
+    println("{} distinct words, first {}", words.len(), words[0])
+
+    let mut seen: HashSet<Point> = HashSet.new()
+    seen.insert(Point { x: 1, y: 2 })
+    seen.insert(Point { x: 1, y: 2 })
+    seen.insert(Point { x: 3, y: 4 })
+    println("{} distinct points", seen.len())
+
+    // ---- directories
+    fs.create_dir_all("whats-new-0-6.tmp/a/b") catch e { println("error: {}", e) }
+    fs.write("whats-new-0-6.tmp/a/note.txt", "hi".as_bytes()) catch e { println("error: {}", e) }
+    let mut names = fs.read_dir("whats-new-0-6.tmp/a").unwrap()
+    names.sort()
+    println("in a: {} {}", names[0], names[1])
+    println("note is {} bytes", fs.metadata("whats-new-0-6.tmp/a/note.txt").unwrap().len())
+    fs.remove_dir_all("whats-new-0-6.tmp") catch e { println("error: {}", e) }
+
+    // ---- the environment and other programs
+    println("PATH is set: {}", env.var("PATH").is_some())
+    match process.run("git", &["--version"]) {
+        Ok(out) => println("git exited with {}", out.status)
+        Err(e) => println("could not run git: {}", e)
+    }
+
+    // ---- time
+    time.sleep(Duration.from_millis(5))
+    println("took at least 5ms: {}", start.elapsed() >= Duration.from_millis(5))
+}
