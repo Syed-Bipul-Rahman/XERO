@@ -94,6 +94,8 @@ pub const PRELUDE_TYPES: &[(&str, &str)] = &[
     ("std.mem", "Box"),
     ("std.collections", "HashMap"),
     ("std.collections", "HashSet"),
+    ("std.collections", "VecDeque"),
+    ("std.collections", "TreeMap"),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

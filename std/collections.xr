@@ -8,6 +8,7 @@
 module std.collections
 
 import std.mem
+import std.mem.{Box}
 
 enum Slot<K, V> {
     Empty
@@ -342,5 +343,451 @@ impl<K: Clone, V: Clone> Clone for HashMap<K, V> {
 impl<T: Clone> Clone for HashSet<T> {
     fn clone(&self) -> HashSet<T> {
         HashSet { map: self.map.clone() }
+    }
+}
+
+// ------------------------------------------------------------- VecDeque
+
+/// A double-ended queue: push and pop at both ends in O(1) (a ring buffer).
+pub struct VecDeque<T> {
+    buf: *T
+    cap: usize
+    head: usize
+    len: usize
+}
+
+impl<T> VecDeque<T> {
+    pub fn new() -> VecDeque<T> {
+        VecDeque { buf: 0 as *T, cap: 0, head: 0, len: 0 }
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// The buffer slot of element `i`.
+    fn slot(&self, i: usize) -> *T {
+        let mut k = self.head + i
+        if k >= self.cap {
+            k -= self.cap
+        }
+        self.buf + k
+    }
+
+    fn grow(&mut self) {
+        let new_cap = if self.cap == 0 { 4 } else { self.cap * 2 }
+        unsafe {
+            let nb = mem.alloc<T>(new_cap)
+            for i in 0..self.len {
+                ptr_write(nb + i, ptr_read(self.slot(i)))
+            }
+            if self.cap > 0 {
+                mem.dealloc(self.buf)
+            }
+            self.buf = nb
+        }
+        self.cap = new_cap
+        self.head = 0
+    }
+
+    pub fn push_back(&mut self, value: T) {
+        if self.len == self.cap {
+            self.grow()
+        }
+        unsafe { ptr_write(self.slot(self.len), value) }
+        self.len += 1
+    }
+
+    pub fn push_front(&mut self, value: T) {
+        if self.len == self.cap {
+            self.grow()
+        }
+        self.head = if self.head == 0 { self.cap - 1 } else { self.head - 1 }
+        unsafe { ptr_write(self.buf + self.head, value) }
+        self.len += 1
+    }
+
+    pub fn pop_front(&mut self) -> Option<T> {
+        if self.len == 0 {
+            return None
+        }
+        let v = unsafe { ptr_read(self.buf + self.head) }
+        self.head += 1
+        if self.head == self.cap {
+            self.head = 0
+        }
+        self.len -= 1
+        Some(v)
+    }
+
+    pub fn pop_back(&mut self) -> Option<T> {
+        if self.len == 0 {
+            return None
+        }
+        self.len -= 1
+        unsafe { Some(ptr_read(self.slot(self.len))) }
+    }
+
+    pub fn front(&self) -> Option<&T> {
+        self.get(0)
+    }
+
+    pub fn back(&self) -> Option<&T> {
+        if self.len == 0 { None } else { self.get(self.len - 1) }
+    }
+
+    /// Element `i` counting from the front.
+    pub fn get(&self, i: usize) -> Option<&T> {
+        if i >= self.len {
+            return None
+        }
+        unsafe { Some(&*self.slot(i)) }
+    }
+
+    pub fn get_mut(&mut self, i: usize) -> Option<&mut T> {
+        if i >= self.len {
+            return None
+        }
+        unsafe { Some(&mut *self.slot(i)) }
+    }
+
+    pub fn clear(&mut self) {
+        while self.pop_front().is_some() {}
+    }
+
+    /// The elements from front to back.
+    pub fn iter(&self) -> DequeIter<T> {
+        DequeIter { d: self, i: 0 }
+    }
+
+    drop {
+        self.clear()
+        if self.cap > 0 {
+            unsafe { mem.dealloc(self.buf) }
+        }
+    }
+}
+
+pub struct DequeIter<T> {
+    d: &VecDeque<T>
+    i: usize
+}
+
+impl<T> Iterator for DequeIter<T> {
+    type Item = &T
+    fn next(&mut self) -> Option<&T> {
+        let i = self.i
+        if i >= self.d.len {
+            return None
+        }
+        self.i += 1
+        unsafe { Some(rebind(&*self.d.slot(i), &*self.d)) }
+    }
+}
+
+impl<T> Index<usize> for VecDeque<T> {
+    type Output = T
+    fn index(&self, i: usize) -> &T {
+        match self.get(i) {
+            Some(v) => v
+            None => panic("VecDeque index out of bounds")
+        }
+    }
+}
+
+impl<T: Clone> Clone for VecDeque<T> {
+    fn clone(&self) -> VecDeque<T> {
+        let mut d: VecDeque<T> = VecDeque.new()
+        for x in self.iter() {
+            d.push_back(x.clone())
+        }
+        d
+    }
+}
+
+// -------------------------------------------------------------- TreeMap
+
+/// A map kept in key order: `iter`, `keys`, `first` and `last` go from the
+/// smallest key to the largest. Insert, lookup and remove take O(log n)
+/// (a treap: a binary search tree balanced by random priorities).
+pub struct TreeMap<K, V> {
+    root: Option<Box<TreeNode<K, V>>>
+    len: usize
+    seed: u64
+}
+
+struct TreeNode<K, V> {
+    key: K
+    value: V
+    prio: u64
+    left: Option<Box<TreeNode<K, V>>>
+    right: Option<Box<TreeNode<K, V>>>
+}
+
+impl<K: Ord, V> TreeMap<K, V> {
+    pub fn new() -> TreeMap<K, V> {
+        TreeMap { root: None, len: 0, seed: 0x9E3779B97F4A7C15 }
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn clear(&mut self) {
+        self.root = None
+        self.len = 0
+    }
+
+    /// The next random priority (xorshift).
+    fn next_prio(&mut self) -> u64 {
+        let mut x = self.seed
+        x = x ^ (x << 13)
+        x = x ^ (x >> 7)
+        x = x ^ (x << 17)
+        self.seed = x
+        x
+    }
+
+    pub fn get(&self, key: &K) -> Option<&V> {
+        let mut cur = &self.root
+        while cur is Some(b) {
+            let n = b.get()
+            match key.cmp(&n.key) {
+                Ordering.Less => cur = &n.left
+                Ordering.Greater => cur = &n.right
+                Ordering.Equal => return Some(&n.value)
+            }
+        }
+        None
+    }
+
+    pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+        tree_get_mut(&mut self.root, key)
+    }
+
+    pub fn contains_key(&self, key: &K) -> bool {
+        self.get(key).is_some()
+    }
+
+    /// Add or replace the value for `key`; returns the old value.
+    pub fn insert(&mut self, key: K, value: V) -> Option<V> {
+        if self.get_mut(&key) is Some(v) {
+            return Some(mem.replace(v, value))
+        }
+        let prio = self.next_prio()
+        let node = Box.new(TreeNode { key: key, value: value, prio: prio, left: None, right: None })
+        let root = self.root.take()
+        self.root = Some(tree_insert(root, node))
+        self.len += 1
+        None
+    }
+
+    /// Take the entry for `key` out; returns its value.
+    pub fn remove(&mut self, key: &K) -> Option<V> {
+        let mut out: Option<V> = None
+        let root = self.root.take()
+        self.root = tree_remove(root, key, &mut out)
+        if out.is_some() {
+            self.len -= 1
+        }
+        out
+    }
+
+    /// The entry with the smallest key.
+    pub fn first(&self) -> Option<(&K, &V)> {
+        let mut cur = &self.root
+        let mut found: Option<(&K, &V)> = None
+        while cur is Some(b) {
+            let n = b.get()
+            found = Some((&n.key, &n.value))
+            cur = &n.left
+        }
+        found
+    }
+
+    /// The entry with the largest key.
+    pub fn last(&self) -> Option<(&K, &V)> {
+        let mut cur = &self.root
+        let mut found: Option<(&K, &V)> = None
+        while cur is Some(b) {
+            let n = b.get()
+            found = Some((&n.key, &n.value))
+            cur = &n.right
+        }
+        found
+    }
+
+    /// Entries as `(&key, &value)`, by increasing key.
+    pub fn iter(&self) -> TreeIter<K, V> {
+        let mut it: TreeIter<K, V> = TreeIter { stack: Vec.new() }
+        it.push_left(&self.root)
+        it
+    }
+
+    pub fn keys(&self) -> TreeKeys<K, V> {
+        TreeKeys { it: self.iter() }
+    }
+
+    pub fn values(&self) -> TreeValues<K, V> {
+        TreeValues { it: self.iter() }
+    }
+}
+
+fn tree_get_mut<K: Ord, V>(slot: &mut Option<Box<TreeNode<K, V>>>, key: &K) -> Option<&mut V> {
+    match slot {
+        Some(b) => {
+            let n = b.get_mut()
+            match key.cmp(&n.key) {
+                Ordering.Less => tree_get_mut(&mut n.left, key)
+                Ordering.Greater => tree_get_mut(&mut n.right, key)
+                Ordering.Equal => Some(&mut n.value)
+            }
+        }
+        None => None
+    }
+}
+
+/// Put `n` (whose key is not in `t`) into the tree `t`.
+fn tree_insert<K: Ord, V>(t: Option<Box<TreeNode<K, V>>>, n: Box<TreeNode<K, V>>) -> Box<TreeNode<K, V>> {
+    let mut b = t catch {
+        return n
+    }
+    if n.get().prio > b.get().prio {
+        // `n` goes above: split the tree around its key
+        let mut n = n
+        let parts = tree_split(Some(b), &n.get().key)
+        n.get_mut().left = parts.0
+        n.get_mut().right = parts.1
+        return n
+    }
+    if n.get().key < b.get().key {
+        let l = b.get_mut().left.take()
+        b.get_mut().left = Some(tree_insert(l, n))
+    } else {
+        let r = b.get_mut().right.take()
+        b.get_mut().right = Some(tree_insert(r, n))
+    }
+    b
+}
+
+/// The keys below `key`, and the rest.
+fn tree_split<K: Ord, V>(t: Option<Box<TreeNode<K, V>>>, key: &K) -> (Option<Box<TreeNode<K, V>>>, Option<Box<TreeNode<K, V>>>) {
+    let mut b = t catch {
+        return (None, None)
+    }
+    if b.get().key < *key {
+        let r = b.get_mut().right.take()
+        let parts = tree_split(r, key)
+        b.get_mut().right = parts.0
+        (Some(b), parts.1)
+    } else {
+        let l = b.get_mut().left.take()
+        let parts = tree_split(l, key)
+        b.get_mut().left = parts.1
+        (parts.0, Some(b))
+    }
+}
+
+/// Join two trees, every key of `a` below every key of `b`.
+fn tree_merge<K: Ord, V>(a: Option<Box<TreeNode<K, V>>>, b: Option<Box<TreeNode<K, V>>>) -> Option<Box<TreeNode<K, V>>> {
+    let mut x = a catch {
+        return b
+    }
+    let mut y = b catch {
+        return Some(x)
+    }
+    if x.get().prio > y.get().prio {
+        let r = x.get_mut().right.take()
+        x.get_mut().right = tree_merge(r, Some(y))
+        Some(x)
+    } else {
+        let l = y.get_mut().left.take()
+        y.get_mut().left = tree_merge(Some(x), l)
+        Some(y)
+    }
+}
+
+fn tree_remove<K: Ord, V>(t: Option<Box<TreeNode<K, V>>>, key: &K, out: &mut Option<V>) -> Option<Box<TreeNode<K, V>>> {
+    let mut b = t catch {
+        return None
+    }
+    match key.cmp(&b.get().key) {
+        Ordering.Less => {
+            let l = b.get_mut().left.take()
+            b.get_mut().left = tree_remove(l, key, out)
+            Some(b)
+        }
+        Ordering.Greater => {
+            let r = b.get_mut().right.take()
+            b.get_mut().right = tree_remove(r, key, out)
+            Some(b)
+        }
+        Ordering.Equal => {
+            let n = b.into_inner()
+            *out = Some(n.value)
+            tree_merge(n.left, n.right)
+        }
+    }
+}
+
+pub struct TreeIter<K, V> {
+    stack: Vec<&TreeNode<K, V>>
+}
+
+impl<K, V> TreeIter<K, V> {
+    fn push_left(&mut self, t: &Option<Box<TreeNode<K, V>>>) {
+        let mut cur = t
+        while cur is Some(b) {
+            let n = b.get()
+            self.stack.push(n)
+            cur = &n.left
+        }
+    }
+}
+
+impl<K, V> Iterator for TreeIter<K, V> {
+    type Item = (&K, &V)
+    fn next(&mut self) -> Option<(&K, &V)> {
+        let n = self.stack.pop() catch {
+            return None
+        }
+        self.push_left(&n.right)
+        Some((&n.key, &n.value))
+    }
+}
+
+pub struct TreeKeys<K, V> {
+    it: TreeIter<K, V>
+}
+
+impl<K, V> Iterator for TreeKeys<K, V> {
+    type Item = &K
+    fn next(&mut self) -> Option<&K> {
+        match self.it.next() {
+            Some(p) => Some(p.0)
+            None => None
+        }
+    }
+}
+
+pub struct TreeValues<K, V> {
+    it: TreeIter<K, V>
+}
+
+impl<K, V> Iterator for TreeValues<K, V> {
+    type Item = &V
+    fn next(&mut self) -> Option<&V> {
+        match self.it.next() {
+            Some(p) => Some(p.1)
+            None => None
+        }
     }
 }
