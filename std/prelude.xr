@@ -227,6 +227,80 @@ pub copy enum Ordering {
     Greater
 }
 
+// ------------------------------------------------- numeric limits
+
+impl i8 {
+    pub const MIN: i8 = -128
+    pub const MAX: i8 = 127
+    pub const BITS: u32 = 8
+}
+
+impl i16 {
+    pub const MIN: i16 = -32768
+    pub const MAX: i16 = 32767
+    pub const BITS: u32 = 16
+}
+
+impl i32 {
+    pub const MIN: i32 = -2147483648
+    pub const MAX: i32 = 2147483647
+    pub const BITS: u32 = 32
+}
+
+impl i64 {
+    pub const MIN: i64 = -9223372036854775808
+    pub const MAX: i64 = 9223372036854775807
+    pub const BITS: u32 = 64
+}
+
+impl u8 {
+    pub const MIN: u8 = 0
+    pub const MAX: u8 = 255
+    pub const BITS: u32 = 8
+}
+
+impl u16 {
+    pub const MIN: u16 = 0
+    pub const MAX: u16 = 65535
+    pub const BITS: u32 = 16
+}
+
+impl u32 {
+    pub const MIN: u32 = 0
+    pub const MAX: u32 = 4294967295
+    pub const BITS: u32 = 32
+}
+
+impl u64 {
+    pub const MIN: u64 = 0
+    pub const MAX: u64 = 18446744073709551615
+    pub const BITS: u32 = 64
+}
+
+impl isize {
+    pub const MIN: isize = 0 - isize.MAX - 1
+    pub const MAX: isize = (usize.MAX >> 1) as isize
+    pub const BITS: u32 = usize.BITS
+}
+
+impl usize {
+    pub const MIN: usize = 0
+    pub const MAX: usize = (0i64 - 1) as usize
+    pub const BITS: u32 = (size_of<usize>() * 8) as u32
+}
+
+impl f64 {
+    pub const MAX: f64 = 1.7976931348623157e308
+    pub const MIN_POSITIVE: f64 = 2.2250738585072014e-308
+    pub const EPSILON: f64 = 2.220446049250313e-16
+}
+
+impl f32 {
+    pub const MAX: f32 = 3.4028235e38
+    pub const MIN_POSITIVE: f32 = 1.1754944e-38
+    pub const EPSILON: f32 = 1.1920929e-7
+}
+
 /// Types whose values are copied by assignment: declared with `copy struct`
 /// or `copy enum`, and numbers, `bool`, shared references and raw pointers.
 /// The compiler implements it; use it as a bound: `fn twice<T: Copy>(x: T)`.

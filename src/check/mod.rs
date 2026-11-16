@@ -1259,10 +1259,15 @@ impl Checker {
                         }
                     }
                     None if !has_default => {
-                        self.error(Diagnostic::new(
-                            span,
-                            format!("missing method `{name}` in implementation of trait `{tname}`"),
-                        ));
+                        let msg = match name.strip_prefix("const#") {
+                            Some(c) => format!(
+                                "missing constant `{c}` in implementation of trait `{tname}`"
+                            ),
+                            None => format!(
+                                "missing method `{name}` in implementation of trait `{tname}`"
+                            ),
+                        };
+                        self.error(Diagnostic::new(span, msg));
                     }
                     None => {}
                 }
@@ -1274,10 +1279,11 @@ impl Checker {
                 .collect();
             for (n, sp) in names {
                 if !required.iter().any(|r| r.0 == n) {
-                    self.error(Diagnostic::new(
-                        sp,
-                        format!("method `{n}` is not a member of trait `{tname}`"),
-                    ));
+                    let msg = match n.strip_prefix("const#") {
+                        Some(c) => format!("constant `{c}` is not a member of trait `{tname}`"),
+                        None => format!("method `{n}` is not a member of trait `{tname}`"),
+                    };
+                    self.error(Diagnostic::new(sp, msg));
                 }
             }
             // associated types: every one the trait declares, and no others

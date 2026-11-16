@@ -1,0 +1,65 @@
+// Associated constants: in impls, in traits (with defaults), on generic
+// parameters, and the numeric limits.
+
+copy struct Point { x: i32
+    y: i32 }
+
+impl Point {
+    pub const ORIGIN: Point = Point { x: 0, y: 0 }
+    const LIMIT: i32 = 100
+    pub fn far(&self) -> bool { self.x > Point.LIMIT }
+}
+
+trait Zero {
+    const ZERO: Self
+    const NAME: &str = "zero"
+}
+
+impl Zero for i64 {
+    const ZERO: i64 = 0
+}
+
+impl Zero for Point {
+    const ZERO: Point = Point.ORIGIN
+    const NAME: &str = "origin"
+}
+
+fn sum<T: Zero + Add<Output = T> + Copy>(xs: &[T]) -> T {
+    let mut s = T.ZERO
+    for x in xs { s = s + *x }
+    s
+}
+
+fn describe<T: Zero>() -> &str { T.NAME }
+
+impl Add for Point {
+    fn add(self, o: Point) -> Point { Point { x: self.x + o.x, y: self.y + o.y } }
+}
+
+fn main() {
+    println(i32.MAX)
+    println(i8.MIN)
+    println(u64.MAX)
+    println(i64.MIN)
+    println(usize.BITS)
+    println(Point.ORIGIN.x)
+    println(Point { x: 200, y: 0 }.far())
+    println(sum(&[1i64, 2, 3]))
+    let p = sum(&[Point { x: 1, y: 2 }, Point { x: 3, y: 4 }])
+    println("{} {}", p.x, p.y)
+    println(describe<i64>())
+    println(describe<Point>())
+}
+
+// output:
+// 2147483647
+// -128
+// 18446744073709551615
+// -9223372036854775808
+// 64
+// 0
+// true
+// 6
+// 4 6
+// zero
+// origin

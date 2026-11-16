@@ -1846,7 +1846,9 @@ impl<'a> FnCx<'a> {
                 },
             },
             E::Field(base, name, targs) => {
-                if self.path(base)?.is_some() {
+                // `Type.CONST.field` takes the field of the constant's value
+                let base_is_const = matches!(self.path(base)?, Some(PathRes::Member(..)));
+                if !base_is_const && self.path(base)?.is_some() {
                     // `module.STATIC`
                     if let Some(PathRes::Module(m)) = self.path(base)? {
                         if let Def::Static(sid) =
@@ -2409,6 +2411,20 @@ impl<'a> FnCx<'a> {
                 if let Some((aid, idx, eargs)) = self.member_variant(&ty, gen, &name) {
                     let targs = if eargs.is_empty() { targs } else { eargs };
                     return self.variant_ctor(aid, idx, targs, &[], expected, span, false);
+                }
+                // an associated constant: `T.ZERO`
+                let cname = Ident {
+                    name: format!("const#{}", name.name),
+                    span: name.span,
+                };
+                if self.has_assoc_fn(&ty, gen, &cname.name) {
+                    return self.assoc_call(ty, gen, &cname, targs, &[], expected, span);
+                }
+                if !self.has_assoc_fn(&ty, gen, &name.name) {
+                    return self.err(
+                        name.span,
+                        format!("no associated constant or function named `{}`", name.name),
+                    );
                 }
                 self.err(
                     name.span,
@@ -3230,6 +3246,17 @@ impl<'a> FnCx<'a> {
 
     /// `Type.function(...)`
     #[allow(clippy::too_many_arguments)]
+    /// Is `name` an associated function of some impl or trait (so that
+    /// `Type.name` can mean it)?
+    fn has_assoc_fn(&self, _ty: &Ty, _gen: Option<AdtId>, name: &str) -> bool {
+        self.ck.impls.iter().any(|im| im.methods.contains_key(name))
+            || self
+                .ck
+                .traits
+                .iter()
+                .any(|t| t.decl.methods.iter().any(|m| m.name.name == name))
+    }
+
     fn assoc_call(
         &mut self,
         ty: Ty,
