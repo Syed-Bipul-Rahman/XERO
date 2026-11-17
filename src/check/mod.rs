@@ -168,6 +168,13 @@ impl AdtDef {
         matches!(self.kind, AdtKind::Enum(_))
     }
 
+    pub fn variant_names(&self) -> Vec<String> {
+        match &self.kind {
+            AdtKind::Enum(vs) => vs.iter().map(|v| v.name.name.clone()).collect(),
+            AdtKind::Struct(_) => Vec::new(),
+        }
+    }
+
     pub fn field_names(&self) -> Vec<String> {
         match &self.kind {
             AdtKind::Struct(fs) => fs.iter().map(|f| f.name.name.clone()).collect(),

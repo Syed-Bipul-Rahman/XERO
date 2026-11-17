@@ -8,6 +8,7 @@ pub mod ast;
 pub mod borrowck;
 pub mod check;
 pub mod codegen;
+pub mod debuginfo;
 pub mod diag;
 pub mod driver;
 pub mod fmt;

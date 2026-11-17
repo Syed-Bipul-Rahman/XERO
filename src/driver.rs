@@ -42,6 +42,8 @@ pub struct Options {
     pub packages: Vec<(String, PathBuf)>,
     /// Source appended to the root file (the test runner's `main`).
     pub root_suffix: Option<String>,
+    /// Emit debug information (`-g`).
+    pub debug: bool,
 }
 
 impl Options {
@@ -561,6 +563,7 @@ pub fn compile_to_llvm(
     opts: &Options,
 ) -> Result<(String, String, bool), FrontendError> {
     let (modules, root, libc) = load(fe, &opts.input, opts)?;
+    let root_file = modules[root].ast.file;
     let mut ck = Checker::new(Target {
         ptr_bits: opts.target.ptr_bits,
     });
@@ -581,6 +584,12 @@ pub fn compile_to_llvm(
         opts.target.triple,
         opts.target.ptr_bits,
         own_runtime,
+        opts.debug.then(|| crate::codegen::DebugOptions {
+            sm: &fe.sm,
+            root_file,
+            codeview: opts.target.triple.contains("windows"),
+            optimized: opts.opt_level > 0,
+        }),
     );
     Ok((ll, xir_dump, libc))
 }
@@ -686,12 +695,11 @@ pub fn build(opts: &Options) -> Result<PathBuf, String> {
     let mut cmd = Command::new(find_clang()?);
     cmd.arg("-Wno-override-module")
         .arg(format!("--target={}", opts.target.triple))
-        .arg(format!("-O{}", opts.opt_level))
-        .arg("-x")
-        .arg("ir")
-        .arg(&ll_path)
-        .arg("-o")
-        .arg(&out);
+        .arg(format!("-O{}", opts.opt_level));
+    if opts.debug {
+        cmd.arg("-g");
+    }
+    cmd.arg("-x").arg("ir").arg(&ll_path).arg("-o").arg(&out);
     let is_x86 = opts.target.triple.starts_with("x86_64");
     match opts.emit {
         Emit::Asm => {
@@ -857,6 +865,11 @@ fn build_builtin(
     } else {
         link_with_system(opts, &obj_path, out, libc)
     };
+    if r.is_ok() && opts.debug && triple.contains("apple") {
+        // macOS keeps debug info in the objects: collect it into a .dSYM
+        // before they are deleted (best effort; lldb needs it)
+        let _ = Command::new("dsymutil").arg(out).output();
+    }
     let _ = std::fs::remove_dir_all(&tmpdir);
     r.map_err(|e| format!("error: {e}\n"))?;
     Ok(out.to_path_buf())
@@ -899,8 +912,15 @@ fn link_with_system(opts: &Options, obj: &Path, out: &Path, libc: bool) -> Resul
                 .arg(obj)
                 .arg("/defaultlib:libcmt")
                 .arg("/defaultlib:oldnames");
+            if opts.debug {
+                // a .pdb next to the executable
+                cmd.arg("/debug");
+            }
         } else {
             cmd.arg(obj).arg("-o").arg(out);
+            if opts.debug {
+                cmd.arg("-g");
+            }
             if os == "linux" && libc {
                 cmd.arg("-pthread").arg("-lm");
             }

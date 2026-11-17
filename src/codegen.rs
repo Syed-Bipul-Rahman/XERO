@@ -10,6 +10,8 @@ use std::fmt::Write;
 
 use crate::ast::{BinOp, UnOp};
 use crate::check::Checker;
+use crate::debuginfo::{esc, DebugInfo};
+use crate::diag::SourceMap;
 use crate::types::{FloatTy, IntTy, Ty};
 use crate::xir::{
     self, BindMode, ConstVal, Expr, ExprKind as K, Func, Intrinsic, LocalId, Pat, Place, Program,
@@ -49,6 +51,18 @@ pub struct Codegen<'a> {
     terminated: bool,
     scopes: Vec<Vec<LocalId>>,
     loops: Vec<LoopCg>,
+    /// Debug information (`-g`), and the debug type of each type described.
+    dbg: Option<DebugInfo<'a>>,
+    dbg_types: HashMap<Ty, u32>,
+}
+
+/// What `-g` needs: the sources, the root file, and whether to use CodeView
+/// (Windows) and the code is optimized.
+pub struct DebugOptions<'a> {
+    pub sm: &'a SourceMap,
+    pub root_file: u32,
+    pub codeview: bool,
+    pub optimized: bool,
 }
 
 enum PlacePtr {
@@ -59,12 +73,13 @@ enum PlacePtr {
 
 /// `own_runtime`: the program runs without libc (Linux), so emit its entry
 /// point `_start` and the thread-creation trampoline.
-pub fn generate(
-    ck: &Checker,
-    prog: &Program,
+pub fn generate<'a>(
+    ck: &'a Checker,
+    prog: &'a Program,
     triple: &str,
     ptr_bits: u32,
     own_runtime: bool,
+    debug: Option<DebugOptions<'a>>,
 ) -> String {
     let mut cg = Codegen {
         ck,
@@ -75,6 +90,8 @@ pub fn generate(
         strings: HashMap::new(),
         glue_done: HashSet::new(),
         field_moved: HashMap::new(),
+        dbg: debug.map(|d| DebugInfo::new(d.sm, d.root_file, d.codeview, d.optimized)),
+        dbg_types: HashMap::new(),
         glue_queue: Vec::new(),
         intrinsics: BTreeSet::new(),
         externs: prog
@@ -354,6 +371,10 @@ impl<'a> Codegen<'a> {
         }
         m.push('\n');
         m.push_str(&self.out);
+        if let Some(d) = &self.dbg {
+            m.push('\n');
+            m.push_str(&d.finish());
+        }
         m
     }
 
@@ -677,7 +698,16 @@ impl<'a> Codegen<'a> {
             let _ = writeln!(self.body, "{l}:");
             self.terminated = false;
         }
-        let _ = writeln!(self.body, "  {s}");
+        match self.dbg.as_mut().and_then(|d| d.loc()) {
+            Some(l) => {
+                for line in s.lines() {
+                    let _ = writeln!(self.body, "  {}, !dbg !{l}", line.trim_start());
+                }
+            }
+            None => {
+                let _ = writeln!(self.body, "  {s}");
+            }
+        }
     }
 
     fn term(&mut self, s: &str) {
@@ -760,6 +790,7 @@ impl<'a> Codegen<'a> {
 
     fn function(&mut self, f: &'a Func) {
         self.func = Some(f);
+        let sp = self.dbg.as_mut().map(|d| d.subprogram(&f.name, f.span));
         self.body.clear();
         self.allocas.clear();
         self.field_moved.clear();
@@ -811,6 +842,9 @@ impl<'a> Codegen<'a> {
                 break;
             }
             let _ = writeln!(self.allocas, "  %l{i} = alloca {}", self.llty(&l.ty));
+            if sp.is_some() && !l.synthetic && !l.name.contains('#') && !l.ty.is_unsized() {
+                self.declare_variable(f, i);
+            }
             if self.needs_drop(&l.ty) {
                 let _ = writeln!(self.allocas, "  %f{i} = alloca i1");
                 let _ = writeln!(self.allocas, "  store i1 false, ptr %f{i}");
@@ -833,6 +867,14 @@ impl<'a> Codegen<'a> {
         }
         let v = self.expr(&f.body);
         if !self.terminated {
+            let bs = f.body.span;
+            if bs.hi > 0 {
+                self.at(crate::diag::Span::new(
+                    bs.file,
+                    bs.hi.saturating_sub(1),
+                    bs.hi,
+                ));
+            }
             self.exit_scopes(0);
             if f.async_frame.is_some() {
                 self.ins("store i32 -1, ptr %frame.state");
@@ -846,9 +888,10 @@ impl<'a> Codegen<'a> {
         }
         self.scopes.pop();
         let linkage = if f.export { "" } else { "internal " };
+        let dbg_attach = sp.map(|n| format!(" !dbg !{n}")).unwrap_or_default();
         let _ = writeln!(
             self.out,
-            "define {}{} {}({}) nounwind{} {{",
+            "define {}{} {}({}) nounwind{}{dbg_attach} {{",
             linkage,
             self.ret_llty(&f.ret),
             if f.export {
@@ -876,6 +919,179 @@ impl<'a> Codegen<'a> {
             self.out.push_str("  unreachable\n");
         }
         let _ = writeln!(self.out, "}}\n");
+        if let Some(d) = self.dbg.as_mut() {
+            d.sp = None;
+        }
+    }
+
+    /// `llvm.dbg.declare` for local `i`, so a debugger can show it.
+    fn declare_variable(&mut self, f: &Func, i: usize) {
+        let l = &f.locals[i];
+        let ty = self.dbg_type(&l.ty);
+        let arg = f
+            .params
+            .iter()
+            .position(|p| *p as usize == i)
+            .map(|k| k + 1);
+        let Some(d) = self.dbg.as_mut() else { return };
+        let Some(var) = d.variable(&l.name, l.span, arg, ty) else {
+            return;
+        };
+        let saved = d.span;
+        d.span = l.span;
+        let loc = d.loc();
+        d.span = saved;
+        let Some(loc) = loc else { return };
+        self.intrinsics.insert(
+            "declare void @llvm.dbg.declare(metadata, metadata, metadata) nounwind readnone".into(),
+        );
+        let _ = writeln!(
+            self.allocas,
+            "  call void @llvm.dbg.declare(metadata ptr %l{i}, metadata !{var}, metadata !DIExpression()), !dbg !{loc}"
+        );
+    }
+
+    /// The debug description of `t` (made once per type).
+    fn dbg_type(&mut self, t: &Ty) -> u32 {
+        if let Some(&n) = self.dbg_types.get(t) {
+            return n;
+        }
+        let name = esc(&self.ck.ty_str(t));
+        let (size, align) = self.layout(t);
+        let (bits, abits) = (size * 8, align * 8);
+        let pbits = self.ptr_bits;
+        let d = self.dbg.as_mut().unwrap();
+        // simple types need no recursion
+        let simple = match t {
+            Ty::Int(it) => Some(format!(
+                "!DIBasicType(name: \"{name}\", size: {bits}, encoding: {})",
+                if it.signed() {
+                    "DW_ATE_signed"
+                } else {
+                    "DW_ATE_unsigned"
+                }
+            )),
+            Ty::Float(_) => Some(format!(
+                "!DIBasicType(name: \"{name}\", size: {bits}, encoding: DW_ATE_float)"
+            )),
+            Ty::Bool => {
+                Some("!DIBasicType(name: \"bool\", size: 8, encoding: DW_ATE_boolean)".into())
+            }
+            _ => None,
+        };
+        if let Some(body) = simple {
+            let n = d.node(body);
+            self.dbg_types.insert(t.clone(), n);
+            return n;
+        }
+        // the rest may refer to themselves (a list node): number them first
+        let n = d.reserve();
+        self.dbg_types.insert(t.clone(), n);
+        let body = match t {
+            Ty::Ref(inner, _) | Ty::Ptr(inner) if !inner.is_unsized() => {
+                let base = self.dbg_type(inner);
+                format!("!DIDerivedType(tag: DW_TAG_pointer_type, name: \"{name}\", baseType: !{base}, size: {pbits})")
+            }
+            Ty::Ref(inner, _) | Ty::Ptr(inner) => {
+                // `&str`, `&[T]`, `&dyn T`: a pointer and a length (or vtable)
+                let elem = match &**inner {
+                    Ty::Slice(e) => (**e).clone(),
+                    _ => Ty::Int(IntTy::U8),
+                };
+                let et = self.dbg_type(&Ty::Ptr(Box::new(elem)));
+                let ut = self.dbg_type(&Ty::Int(if pbits == 64 { IntTy::U64 } else { IntTy::U32 }));
+                let second = if matches!(**inner, Ty::Dyn(_)) {
+                    "vtable"
+                } else {
+                    "length"
+                };
+                let m1 = self.dbg.as_mut().unwrap().node(format!(
+                    "!DIDerivedType(tag: DW_TAG_member, name: \"data_ptr\", scope: !{n}, baseType: !{et}, size: {pbits}, offset: 0)"
+                ));
+                let m2 = self.dbg.as_mut().unwrap().node(format!(
+                    "!DIDerivedType(tag: DW_TAG_member, name: \"{second}\", scope: !{n}, baseType: !{ut}, size: {pbits}, offset: {pbits})"
+                ));
+                format!("distinct !DICompositeType(tag: DW_TAG_structure_type, name: \"{name}\", size: {bits}, align: {abits}, elements: !{{!{m1}, !{m2}}})")
+            }
+            Ty::Adt(id, _)
+                if self.ck.adts[*id as usize].is_enum()
+                    && self.ck.adts[*id as usize]
+                        .variants
+                        .iter()
+                        .all(|v| v.is_empty()) =>
+            {
+                // a fieldless enum: its variants by name
+                let a = &self.ck.adts[*id as usize];
+                let names = a.variant_names();
+                let discs = a.discriminants.clone();
+                let tag = self.dbg_type(&Ty::Int(match size {
+                    1 => IntTy::I8,
+                    2 => IntTy::I16,
+                    4 => IntTy::I32,
+                    _ => IntTy::I64,
+                }));
+                let mut els = Vec::new();
+                for (nm, v) in names.iter().zip(discs) {
+                    els.push(
+                        self.dbg
+                            .as_mut()
+                            .unwrap()
+                            .node(format!("!DIEnumerator(name: \"{}\", value: {v})", esc(nm))),
+                    );
+                }
+                let els: Vec<String> = els.iter().map(|e| format!("!{e}")).collect();
+                format!("distinct !DICompositeType(tag: DW_TAG_enumeration_type, name: \"{name}\", baseType: !{tag}, size: {bits}, align: {abits}, elements: !{{{}}})", els.join(", "))
+            }
+            Ty::Adt(id, _) if !self.ck.adts[*id as usize].is_enum() => {
+                let names = self.ck.adts[*id as usize].field_names();
+                let fields = self.ck.fields_of(t).unwrap_or_default();
+                let els = self.dbg_members(n, &fields, &names);
+                format!("distinct !DICompositeType(tag: DW_TAG_structure_type, name: \"{name}\", size: {bits}, align: {abits}, elements: !{{{els}}})")
+            }
+            Ty::Array(e, len) => {
+                let et = self.dbg_type(e);
+                let d = self.dbg.as_mut().unwrap();
+                let range = d.node(format!("!DISubrange(count: {len})"));
+                format!("!DICompositeType(tag: DW_TAG_array_type, baseType: !{et}, size: {bits}, align: {abits}, elements: !{{!{range}}})")
+            }
+            Ty::Tuple(ts) => {
+                let names: Vec<String> = (0..ts.len()).map(|i| format!("__{i}")).collect();
+                let els = self.dbg_members(n, &ts.clone(), &names);
+                format!("distinct !DICompositeType(tag: DW_TAG_structure_type, name: \"{name}\", size: {bits}, align: {abits}, elements: !{{{els}}})")
+            }
+            _ => {
+                // enums with data, closures, futures...: their bytes
+                let u8t = self.dbg_type(&Ty::Int(IntTy::U8));
+                let d = self.dbg.as_mut().unwrap();
+                let range = d.node(format!("!DISubrange(count: {size})"));
+                let arr = d.node(format!("!DICompositeType(tag: DW_TAG_array_type, baseType: !{u8t}, size: {bits}, elements: !{{!{range}}})"));
+                let m = d.node(format!("!DIDerivedType(tag: DW_TAG_member, name: \"bytes\", scope: !{n}, baseType: !{arr}, size: {bits}, offset: 0)"));
+                format!("distinct !DICompositeType(tag: DW_TAG_structure_type, name: \"{name}\", size: {bits}, align: {abits}, elements: !{{!{m}}})")
+            }
+        };
+        self.dbg.as_mut().unwrap().define(n, body);
+        n
+    }
+
+    /// Member nodes of a struct or tuple (C layout), as `!a, !b, ...`.
+    fn dbg_members(&mut self, scope: u32, fields: &[Ty], names: &[String]) -> String {
+        let mut off = 0u64;
+        let mut els = Vec::new();
+        for (i, ft) in fields.iter().enumerate() {
+            let (s, a) = self.layout(ft);
+            off = off.div_ceil(a.max(1)) * a.max(1);
+            let base = self.dbg_type(ft);
+            let nm = names.get(i).cloned().unwrap_or_else(|| format!("__{i}"));
+            let m = self.dbg.as_mut().unwrap().node(format!(
+                "!DIDerivedType(tag: DW_TAG_member, name: \"{}\", scope: !{scope}, baseType: !{base}, size: {}, offset: {})",
+                esc(&nm),
+                s * 8,
+                off * 8
+            ));
+            els.push(format!("!{m}"));
+            off += s;
+        }
+        els.join(", ")
     }
 
     // ------------------------------------------------------------- drops
@@ -1431,7 +1647,22 @@ impl<'a> Codegen<'a> {
         "zeroinitializer".into()
     }
 
+    /// Generate `e`; its instructions get `e`'s source location.
     fn expr(&mut self, e: &Expr) -> String {
+        let saved = self.dbg.as_ref().map(|d| d.span);
+        if let Some(d) = self.dbg.as_mut() {
+            if e.span.hi > 0 {
+                d.span = e.span;
+            }
+        }
+        let r = self.expr_inner(e);
+        if let (Some(d), Some(s)) = (self.dbg.as_mut(), saved) {
+            d.span = s;
+        }
+        r
+    }
+
+    fn expr_inner(&mut self, e: &Expr) -> String {
         match &e.kind {
             K::Int(v) => match &e.ty {
                 Ty::Float(f) => float_lit(*v as f64, *f),
@@ -1697,7 +1928,7 @@ impl<'a> Codegen<'a> {
                 self.ins(&format!("store {lt} {r}, ptr {ptr}"));
                 self.unit()
             }
-            K::Block(b) => self.block(b, &e.ty),
+            K::Block(b) => self.block(b, &e.ty, e.span),
             K::If(c, t, els) => {
                 let cv = self.expr(c);
                 let then_l = self.new_label("then");
@@ -1904,9 +2135,22 @@ impl<'a> Codegen<'a> {
         name
     }
 
-    fn block(&mut self, b: &xir::Block, ty: &Ty) -> String {
+    /// Debug locations: the next instructions belong to `span`.
+    fn at(&mut self, span: crate::diag::Span) {
+        if let Some(d) = self.dbg.as_mut() {
+            if span.hi > 0 {
+                d.span = span;
+            }
+        }
+    }
+
+    fn block(&mut self, b: &xir::Block, ty: &Ty, span: crate::diag::Span) -> String {
         self.scopes.push(b.scope.clone());
         for s in &b.stmts {
+            // a statement's instructions (the store of a `let` too) are on its line
+            match s {
+                Stmt::Let(_, v) | Stmt::LetPat(_, v) | Stmt::Expr(v) => self.at(v.span),
+            }
             match s {
                 Stmt::Let(l, v) => {
                     let val = self.expr(v);
@@ -1944,11 +2188,22 @@ impl<'a> Codegen<'a> {
             }
         }
         let v = match &b.tail {
-            Some(t) => self.expr(t),
+            Some(t) => {
+                self.at(t.span);
+                self.expr(t)
+            }
             None => self.unit(),
         };
         let _ = ty;
         if !self.terminated {
+            // values destroyed at the closing brace
+            if span.hi > 0 {
+                self.at(crate::diag::Span::new(
+                    span.file,
+                    span.hi.saturating_sub(1),
+                    span.hi,
+                ));
+            }
             let depth = self.scopes.len() - 1;
             self.exit_scopes(depth);
         }

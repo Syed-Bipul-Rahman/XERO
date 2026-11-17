@@ -221,6 +221,63 @@ fn rejected_programs() {
     }
 }
 
+/// `-g` puts DWARF into the executable; where gdb is installed, it can stop
+/// in a function and show its arguments and locals.
+#[test]
+#[cfg(target_os = "linux")]
+fn debug_info() {
+    let tmp = std::env::temp_dir().join(format!("xero-dbg-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let src = tmp.join("dbg.xr");
+    std::fs::write(
+        &src,
+        "struct Point {\n    x: i32\n    y: i32\n}\n\nfn area(p: &Point, scale: i64) -> i64 {\n    let w = p.x as i64\n    let h = p.y as i64\n    w * h * scale\n}\n\nfn main() {\n    let p = Point { x: 3, y: 4 }\n    println(area(&p, 2))\n}\n",
+    )
+    .unwrap();
+    let exe = tmp.join("dbg");
+    let b = Command::new(xeroc())
+        .args(["build", "-g", "-O0"])
+        .arg(&src)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .unwrap();
+    assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
+    let bytes = std::fs::read(&exe).unwrap();
+    let has = |n: &[u8]| bytes.windows(n.len()).any(|w| w == n);
+    assert!(
+        has(b".debug_info") && has(b".debug_line"),
+        "no DWARF sections"
+    );
+    if Command::new("gdb").arg("--version").output().is_ok() {
+        let g = Command::new("gdb")
+            .args([
+                "-q",
+                "-batch",
+                "-ex",
+                "break area",
+                "-ex",
+                "run",
+                "-ex",
+                "next",
+                "-ex",
+                "print *p",
+                "-ex",
+                "info locals",
+            ])
+            .arg(&exe)
+            .output()
+            .unwrap();
+        let out = String::from_utf8_lossy(&g.stdout);
+        assert!(out.contains("area (p="), "{out}");
+        assert!(out.contains("scale=2"), "{out}");
+        assert!(out.contains("{x = 3, y = 4}"), "{out}");
+        assert!(out.contains("w = 3"), "{out}");
+        assert!(out.contains("8\t    let h = p.y as i64"), "{out}");
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 /// `xeroc fmt` turns tests/fmt/*.in into *.out, and leaves formatted files
 /// (and every file of the standard library) unchanged.
 #[test]

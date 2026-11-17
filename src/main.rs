@@ -25,6 +25,7 @@ OPTIONS:
     --emit <kind>        exe | obj | asm | llvm | llvm-raw | xir   (default: exe)
     -O0 | -O1 | -O2 | -O3 | -Os
                          optimization level (default: -O2)
+    -g                   debug information, for gdb and lldb (best with -O0)
     --overflow-checks    panic when +, - or * on integers overflows
                          (the default below -O2)
     --no-overflow-checks wrap around instead (the default at -O2 and up)
@@ -93,6 +94,7 @@ fn main() {
     let mut emit = Emit::Exe;
     let mut opt_level = 2;
     let mut overflow_checks = None;
+    let mut debug = false;
     let mut target = xeroc::target::host();
     let mut lib = false;
     let mut intel = true;
@@ -147,6 +149,7 @@ fn main() {
             "-O3" => opt_level = 3,
             "-Os" => opt_level = 2,
             "--lib" => lib = true,
+            "-g" => debug = true,
             "--overflow-checks" => overflow_checks = Some(true),
             "--no-overflow-checks" => overflow_checks = Some(false),
             "--libc" => libc = Libc::Yes,
@@ -246,6 +249,7 @@ fn main() {
             module_dirs,
             packages,
             root_suffix: None,
+            debug,
         };
         exit(run_tests(&p, &base, test_filter.as_deref()));
     }
@@ -263,6 +267,7 @@ fn main() {
             module_dirs,
             packages,
             root_suffix: None,
+            debug,
         };
         let mut fe = xeroc::driver::Frontend {
             sm: Default::default(),
@@ -303,6 +308,7 @@ fn main() {
         module_dirs,
         packages,
         root_suffix: None,
+        debug,
     };
     match build(&opts) {
         Ok(path) => {
