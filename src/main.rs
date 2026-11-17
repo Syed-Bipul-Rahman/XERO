@@ -18,6 +18,7 @@ PROJECTS (a directory with a xero.toml):
     xeroc run [-- args...]              build and run it
     xeroc check                         check it
     xeroc test [filter]                 run the fn test_...() functions in tests/*.xr
+    xeroc fmt [files...] [--check]      format source files (in a project: src/ and tests/)
 
 OPTIONS:
     -o <path>            output path
@@ -55,6 +56,9 @@ fn main() {
             println!("{:<16} {}", t.name, t.triple);
         }
         return;
+    }
+    if cmd == "fmt" {
+        exit(run_fmt(&args[1..]));
     }
     if cmd == "new" {
         let lib = args.iter().any(|a| a == "--lib");
@@ -317,6 +321,83 @@ fn main() {
         Err(msg) => {
             eprint!("{msg}");
             exit(1);
+        }
+    }
+}
+
+/// `xeroc fmt`: format the named files, or a project's `src/` and
+/// `tests/`. With `--check`, only report files that are not formatted.
+fn run_fmt(args: &[String]) -> i32 {
+    let check = args.iter().any(|a| a == "--check");
+    let mut files: Vec<PathBuf> = args
+        .iter()
+        .filter(|a| !a.starts_with('-'))
+        .map(PathBuf::from)
+        .collect();
+    if files.is_empty() {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let p = match xeroc::project::Project::find(&cwd) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return 2;
+            }
+        };
+        for dir in [p.src(), p.dir.join("tests")] {
+            collect_xr(&dir, &mut files);
+        }
+        files.sort();
+    }
+    let mut unformatted = 0;
+    let mut failed = 0;
+    for f in &files {
+        let src = match std::fs::read_to_string(f) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("error: cannot read `{}`: {e}", f.display());
+                failed += 1;
+                continue;
+            }
+        };
+        match xeroc::fmt::format_source(&src) {
+            Ok(out) if out == src => {}
+            Ok(out) => {
+                if check {
+                    println!("{}", f.display());
+                    unformatted += 1;
+                } else if let Err(e) = std::fs::write(f, out) {
+                    eprintln!("error: cannot write `{}`: {e}", f.display());
+                    failed += 1;
+                } else {
+                    println!("formatted {}", f.display());
+                }
+            }
+            Err(e) => {
+                eprintln!("error: {}: {e}", f.display());
+                failed += 1;
+            }
+        }
+    }
+    if failed > 0 {
+        1
+    } else if check && unformatted > 0 {
+        eprintln!("{unformatted} file(s) need formatting: run `xeroc fmt`");
+        1
+    } else {
+        0
+    }
+}
+
+fn collect_xr(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            collect_xr(&p, out);
+        } else if p.extension().is_some_and(|x| x == "xr") {
+            out.push(p);
         }
     }
 }

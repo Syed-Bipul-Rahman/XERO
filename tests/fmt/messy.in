@@ -1,0 +1,32 @@
+import std.collections.{HashMap}
+// a comment about Point
+
+
+copy struct Point{x:i32,y:i32}
+impl Point{
+pub fn new(x:i32,y:i32)->Point{Point{x:x,y:y}}
+      fn len2(&self)->i32{self.x*self.x+self.y*self.y}
+}
+fn apply<F:Fn(i32)->i32>(f:F,v:i32)->i32{f(v)}
+fn main(){
+let mut m:HashMap<String,Vec<i32>>=HashMap.new()
+    m.insert(String.from("a"),Vec.new())
+  let p=Point.new(3,-4)
+let q=&p
+if p.len2()>=25&&!(q.x<0){println("{} {}",p.x,-p.y)}
+   let v=[1,2,3]
+for i in 0..v.len(){
+        let w=v[i]*2   // doubled
+    println(w)
+          }
+let r=apply(|x|x+1,  41)
+match r{
+42=>println("yes"),
+_=>{println("no")}
+}
+let total = 1 +
+2 +
+3
+let s = *q
+println(total+s.x)
+}

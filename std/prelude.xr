@@ -1109,7 +1109,6 @@ pub fn compare<T>(a: T, b: T) -> Ordering {
     }
 }
 
-
 // Built-in types implement the operator traits too, so generic code with
 // bounds like `T: Ord` or `T: Add` accepts numbers.
 

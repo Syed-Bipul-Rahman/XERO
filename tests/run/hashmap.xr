@@ -4,7 +4,7 @@ copy struct P { x: i32
     y: i32 }
 impl Eq for P { fn eq(&self, o: &P) -> bool { self.x == o.x && self.y == o.y } }
 impl Hash for P { fn hash(&self, h: &mut Hasher) { self.x.hash(h)
-        self.y.hash(h) } }
+    self.y.hash(h) } }
 
 fn main() {
     let mut ages: HashMap<String, i32> = HashMap.new()

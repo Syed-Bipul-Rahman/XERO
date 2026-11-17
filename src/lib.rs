@@ -10,6 +10,7 @@ pub mod check;
 pub mod codegen;
 pub mod diag;
 pub mod driver;
+pub mod fmt;
 pub mod lexer;
 #[cfg(feature = "llvm")]
 pub mod llvm;

@@ -221,6 +221,56 @@ fn rejected_programs() {
     }
 }
 
+/// `xeroc fmt` turns tests/fmt/*.in into *.out, and leaves formatted files
+/// (and every file of the standard library) unchanged.
+#[test]
+fn formatter() {
+    let tmp = std::env::temp_dir().join(format!("xero-fmt-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for e in std::fs::read_dir(root.join("tests/fmt")).unwrap() {
+        let input = e.unwrap().path();
+        if input.extension().is_none_or(|x| x != "in") {
+            continue;
+        }
+        let want = std::fs::read_to_string(input.with_extension("out")).unwrap();
+        let f = tmp.join("case.xr");
+        std::fs::copy(&input, &f).unwrap();
+        let o = Command::new(xeroc()).arg("fmt").arg(&f).output().unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        let got = std::fs::read_to_string(&f).unwrap();
+        assert_eq!(got, want, "{}", input.display());
+        // formatting again changes nothing
+        let again = Command::new(xeroc())
+            .args(["fmt", "--check"])
+            .arg(&f)
+            .output()
+            .unwrap();
+        assert!(
+            again.status.success(),
+            "{}: not idempotent",
+            input.display()
+        );
+    }
+    let mut std_files: Vec<PathBuf> = std::fs::read_dir(root.join("std"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|x| x == "xr"))
+        .collect();
+    std_files.sort();
+    let o = Command::new(xeroc())
+        .args(["fmt", "--check"])
+        .args(&std_files)
+        .output()
+        .unwrap();
+    assert!(
+        o.status.success(),
+        "std is not formatted:\n{}",
+        String::from_utf8_lossy(&o.stdout)
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 /// `xeroc new`, then `build`, `run` and `test` in the project, with a
 /// library it depends on by path.
 #[test]
@@ -275,6 +325,19 @@ fn project_workflow() {
     assert_eq!(
         String::from_utf8_lossy(&built.stdout).replace("\r\n", "\n"),
         "Hello, Xero!\n42\n"
+    );
+    // a new project is formatted; a messy file gets formatted
+    ok(&x(&app, &["fmt", "--check"]), "fmt --check");
+    std::fs::write(
+        app.join("src/extra.xr"),
+        "module extra\npub fn one()->i32{1}\n",
+    )
+    .unwrap();
+    assert!(!x(&app, &["fmt", "--check"]).status.success());
+    ok(&x(&app, &["fmt"]), "fmt");
+    assert_eq!(
+        std::fs::read_to_string(app.join("src/extra.xr")).unwrap(),
+        "module extra\npub fn one() -> i32 { 1 }\n"
     );
     let t = ok(&x(&app, &["test"]), "test");
     assert!(t.contains("test greeting::test_hello ... ok"), "{t}");
