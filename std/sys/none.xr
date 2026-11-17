@@ -142,7 +142,7 @@ pub unsafe fn dir_next(h: isize, name: *u8) -> isize {
 
 pub unsafe fn dir_close(h: isize) {}
 
-pub unsafe fn proc_spawn(argv: **u8, capture: bool, input: bool, pipes: *isize) -> isize {
+pub unsafe fn proc_spawn(argv: **u8, envp: **u8, capture: bool, input: bool, pipes: *isize) -> isize {
     -38
 }
 

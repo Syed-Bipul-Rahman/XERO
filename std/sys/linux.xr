@@ -656,18 +656,10 @@ pub unsafe fn path_rename(from: *u8, to: *u8) -> i32 {
 }
 
 /// What is at `path`: `out[0]` is 1 for a file, 2 for a directory and 3
-/// for anything else; `out[1]` is the size in bytes.
+/// for anything else; `out[1]` is the size in bytes; `out[2]` the time it
+/// was last modified, in nanoseconds since 1970.
 pub unsafe fn path_stat(path: *u8, out: *u64) -> i32 {
-    let mut buf = [0u64; 32]
-    let p = &mut buf as *u64
-    let r = syscall(target.SYS_STATX, AT_FDCWD, path, 0, 0x7ff, p) as i32
-    if r < 0 {
-        return r
-    }
-    let mode = (*(((p as *u8) + 28) as *u16)) as u32 & 0xF000
-    *out = if mode == 0x8000 { 1 } else if mode == 0x4000 { 2 } else { 3 }
-    *(out + 1) = *(p + 5)
-    0
+    target.file_stat(path, out)
 }
 
 // a directory being read: fd, position and length in buf, then the buffer
@@ -728,7 +720,7 @@ pub unsafe fn dir_close(h: isize) {
 
 /// The paths to try for `prog`: itself if it has a `/`, else each
 /// directory of `PATH` joined with it (all NUL-terminated).
-unsafe fn exec_candidates(prog: *u8) -> Vec<Vec<u8>> {
+unsafe fn exec_candidates(prog: *u8, envp: **u8) -> Vec<Vec<u8>> {
     let mut n: usize = 0
     let mut slash = false
     while *(prog + n) != 0 {
@@ -747,7 +739,7 @@ unsafe fn exec_candidates(prog: *u8) -> Vec<Vec<u8>> {
         return out
     }
     let mut path = "/usr/local/bin:/usr/bin:/bin"
-    let mut e = env_block()
+    let mut e = envp
     while *e as usize != 0 {
         let s = *e
         if *s == 80 && *(s + 1) == 65 && *(s + 2) == 84 && *(s + 3) == 72 && *(s + 4) == 61 {
@@ -776,14 +768,13 @@ unsafe fn exec_candidates(prog: *u8) -> Vec<Vec<u8>> {
 }
 
 /// Start the program `argv[0]` (searched for in `PATH`) with the
-/// null-terminated `argv`. With `capture`, its output and error output go
+/// null-terminated `argv` and environment `envp`. With `capture`, its output and error output go
 /// to pipes whose read ends are stored in `pipes[0]` and `pipes[1]`; with
 /// `input`, its input comes from a pipe whose write end goes in `pipes[2]`.
 /// Returns a process handle, or `-errno` if it could not start.
-pub unsafe fn proc_spawn(argv: **u8, capture: bool, input: bool, pipes: *isize) -> isize {
+pub unsafe fn proc_spawn(argv: **u8, envp: **u8, capture: bool, input: bool, pipes: *isize) -> isize {
     // everything the child needs is made before it exists: it only makes system calls
-    let cands = exec_candidates(*argv)
-    let envp = env_block()
+    let cands = exec_candidates(*argv, envp)
     let mut outp = [-1i32; 2]
     let mut errp = [-1i32; 2]
     let mut status = [-1i32; 2]

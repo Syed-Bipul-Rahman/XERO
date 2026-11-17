@@ -14,6 +14,10 @@ fn main() {
             eprintln("to stderr")
             process.exit(3)
         }
+        if mode == "env" {
+            println(env.var("XERO_FROM_PARENT").unwrap_or(String.from("unset")))
+            process.exit(0)
+        }
         if mode == "upper" {
             // copy input to output upper-cased; count the bytes on stderr
             let mut buf = [0u8; 4096]
@@ -90,6 +94,15 @@ fn main() {
     let early = process.run_with_input(me, &["early"], lots.as_bytes()).unwrap()
     print(early.stdout.as_str().replace("\r\n", "\n"))
 
+    // environment changes reach this program and the programs it starts
+    print(process.run(me, &["env"]).unwrap().stdout.as_str().replace("\r\n", "\n"))
+    env.set_var("XERO_FROM_PARENT", "set by the parent")
+    println(env.var("XERO_FROM_PARENT").unwrap())
+    print(process.run(me, &["env"]).unwrap().stdout.as_str().replace("\r\n", "\n"))
+    env.remove_var("XERO_FROM_PARENT")
+    println(env.var("XERO_FROM_PARENT").is_none())
+    print(process.run(me, &["env"]).unwrap().stdout.as_str().replace("\r\n", "\n"))
+
     match process.run("xero-no-such-program", &[]) {
         Ok(_) => println("??")
         Err(e) => println(e)
@@ -124,6 +137,11 @@ fn main() {
 // 12 bytes
 // 50000
 // stopped early
+// unset
+// set by the parent
+// set by the parent
+// true
+// unset
 // no such file or directory
 // true
 // true

@@ -1,0 +1,22 @@
+// Moving a field out of a function's result: the rest is dropped at once.
+
+struct Pair { a: String
+    b: String }
+struct Res { id: i32 }
+impl Res { drop { println("drop res") } }
+fn make() -> Pair { Pair { a: String.from("first"), b: String.from("second") } }
+fn res() -> Res { Res { id: 7 } }
+fn main() {
+    let a = make().a
+    println(a)
+    println(make().b.len())
+    println(res().id)
+    println("end")
+}
+
+// output:
+// first
+// 6
+// drop res
+// 7
+// end

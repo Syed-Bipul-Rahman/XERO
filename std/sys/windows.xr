@@ -285,7 +285,8 @@ pub unsafe fn path_rename(from: *u8, to: *u8) -> i32 {
 }
 
 /// What is at `path`: `out[0]` is 1 for a file, 2 for a directory and 3
-/// for anything else; `out[1]` is the size in bytes.
+/// for anything else; `out[1]` is the size in bytes; `out[2]` the time it
+/// was last modified, in nanoseconds since 1970.
 pub unsafe fn path_stat(path: *u8, out: *u64) -> i32 {
     // struct _stat64: st_mode (u16) at 6, st_size (i64) at 24; 56 bytes
     let mut buf = [0u64; 8]
@@ -296,6 +297,9 @@ pub unsafe fn path_stat(path: *u8, out: *u64) -> i32 {
     let mode = (*((b + 6) as *u16)) as u32 & 0xF000
     *out = if mode == 0x8000 { 1 } else if mode == 0x4000 { 2 } else { 3 }
     *(out + 1) = *((b + 24) as *u64)
+    // st_mtime: seconds since 1970
+    let sec = *((b + 40) as *i64)
+    *(out + 2) = if sec < 0 { 0 } else { (sec as u64) * 1000000000 }
     0
 }
 
@@ -417,11 +421,11 @@ unsafe fn inheritable(which: u32) -> usize {
 }
 
 /// Start the program `argv[0]` (searched for in `PATH`) with the
-/// null-terminated `argv`. With `capture`, its output and error output go
+/// null-terminated `argv` and environment `envp`. With `capture`, its output and error output go
 /// to pipes whose read ends are stored in `pipes[0]` and `pipes[1]`; with
 /// `input`, its input comes from a pipe whose write end goes in `pipes[2]`.
 /// Returns a process handle, or `-errno` if it could not start.
-pub unsafe fn proc_spawn(argv: **u8, capture: bool, input: bool, pipes: *isize) -> isize {
+pub unsafe fn proc_spawn(argv: **u8, envp: **u8, capture: bool, input: bool, pipes: *isize) -> isize {
     let mut cmd: Vec<u8> = Vec.new()
     let mut i: usize = 0
     while *(argv + i) as usize != 0 {
@@ -432,6 +436,23 @@ pub unsafe fn proc_spawn(argv: **u8, capture: bool, input: bool, pipes: *isize) 
         i += 1
     }
     cmd.push(0)
+    // the environment block: each NAME=value with its NUL, then one more NUL
+    let mut env: Vec<u8> = Vec.new()
+    let mut k: usize = 0
+    while *(envp + k) as usize != 0 {
+        let e = *(envp + k)
+        let mut j: usize = 0
+        while *(e + j) != 0 {
+            env.push(*(e + j))
+            j += 1
+        }
+        env.push(0)
+        k += 1
+    }
+    if env.is_empty() {
+        env.push(0)
+    }
+    env.push(0)
     // SECURITY_ATTRIBUTES { nLength, lpSecurityDescriptor, bInheritHandle = 1 }
     let sa = [24u64, 0, 1]
     let sap = &sa as *u64 as *u8
@@ -486,7 +507,7 @@ pub unsafe fn proc_spawn(argv: **u8, capture: bool, input: bool, pipes: *isize) 
     *((sp + 96) as *usize) = err_w
     // PROCESS_INFORMATION: hProcess, hThread, ids
     let mut pi = [0usize; 3]
-    let ok = CreateProcessA(0 as *u8, cmd.as_slice() as *u8, 0 as *u8, 0 as *u8, 1, 0, 0 as *u8, 0 as *u8, sp, &mut pi as *usize as *u8)
+    let ok = CreateProcessA(0 as *u8, cmd.as_slice() as *u8, 0 as *u8, 0 as *u8, 1, 0, env.as_slice() as *u8, 0 as *u8, sp, &mut pi as *usize as *u8)
     let e = if ok == 0 { win_error() } else { 0 }
     for h in [stdin, out_w, err_w] {
         if h != 0 {

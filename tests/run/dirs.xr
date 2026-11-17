@@ -2,6 +2,7 @@
 
 import std.env
 import std.fs
+import std.time
 
 fn show(r: Result<(), fs.Error>) {
     match r {
@@ -26,6 +27,8 @@ fn main() {
     println(m.is_file())
     println(m.is_dir())
     println(m.len())
+    // modified a moment ago
+    println(time.since_epoch().saturating_sub(m.modified()).as_secs() < 600)
     println(fs.is_dir("xero-dirs-test.tmp/a/b"))
     println(fs.is_file("xero-dirs-test.tmp/a/b"))
     match fs.metadata("xero-dirs-test.tmp/missing") {
@@ -85,6 +88,7 @@ fn main() {
 // true
 // false
 // 12
+// true
 // true
 // false
 // no such file or directory

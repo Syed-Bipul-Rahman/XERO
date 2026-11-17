@@ -5,6 +5,7 @@ module std.fs
 import std.sys
 import std.sys.target
 import std.os
+import std.time.{Duration}
 
 /// An error from the operating system, such as a missing file.
 pub copy struct Error {
@@ -320,6 +321,7 @@ pub fn rename(from: &str, to: &str) -> Result<(), Error> {
 pub copy struct Metadata {
     kind: u64
     len: u64
+    modified: u64
 }
 
 impl Metadata {
@@ -335,18 +337,24 @@ impl Metadata {
     pub fn len(&self) -> u64 {
         self.len
     }
+
+    /// When it was last modified, as the time since 1970-01-01 00:00 UTC
+    /// (compare with `time.since_epoch()`). Whole seconds on Windows.
+    pub fn modified(&self) -> Duration {
+        Duration.from_nanos(self.modified)
+    }
 }
 
 /// Whether `path` is a file, a directory or something else, and its size.
 pub fn metadata(path: &str) -> Result<Metadata, Error> {
     let mut buf = [0u8; 4096]
     try c_path(path, &mut buf)
-    let mut out = [0u64; 2]
+    let mut out = [0u64; 3]
     let r = unsafe { sys.path_stat(&buf as *u8, &mut out as *u64) }
     if r < 0 {
         throw Error { code: 0 - r }
     }
-    Ok(Metadata { kind: out[0], len: out[1] })
+    Ok(Metadata { kind: out[0], len: out[1], modified: out[2] })
 }
 
 /// Whether anything exists at `path`.

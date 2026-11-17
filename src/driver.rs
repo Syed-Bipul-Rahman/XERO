@@ -234,6 +234,49 @@ fn sys_target_module(target: &TargetInfo) -> String {
             ));
         }
     }
+    // `file_stat(path, out)`: out[0] = 1 file, 2 directory, 3 other;
+    // out[1] = size; out[2] = modification time in ns since 1970.
+    // Returns -errno on failure.
+    match os {
+        "linux" => s.push_str(
+            "\npub unsafe fn file_stat(path: *u8, out: *u64) -> i32 {\n\
+             \x20   // statx: the same layout on every architecture\n\
+             \x20   let mut buf = [0u64; 32]\n\
+             \x20   let p = &mut buf as *u64\n\
+             \x20   let r = syscall(SYS_STATX, -100i32, path, 0, 0x7ff, p) as i32\n\
+             \x20   if r < 0 {\n        return r\n    }\n\
+             \x20   let mode = (*(((p as *u8) + 28) as *u16)) as u32 & 0xF000\n\
+             \x20   *out = if mode == 0x8000 { 1 } else if mode == 0x4000 { 2 } else { 3 }\n\
+             \x20   *(out + 1) = *(p + 5)\n\
+             \x20   let sec = *(p + 14) as i64\n\
+             \x20   let nsec = *((p + 15) as *u32) as u64\n\
+             \x20   *(out + 2) = if sec < 0 { 0 } else { (sec as u64) * 1000000000 + nsec }\n\
+             \x20   0\n}\n",
+        ),
+        "macos" => {
+            // struct stat with 64-bit inodes: mode u16 at 4, mtime at 48, size at 96
+            let f = if target_arch(target) == "x86_64" {
+                "stat64"
+            } else {
+                "stat"
+            };
+            s.push_str(&format!(
+                "\nunsafe fn {f}(path: *u8, buf: *u8) -> i32\n\n\
+                 pub unsafe fn file_stat(path: *u8, out: *u64) -> i32 {{\n\
+                 \x20   let mut buf = [0u64; 24]\n\
+                 \x20   let b = &mut buf as *u64 as *u8\n\
+                 \x20   if {f}(path, b) < 0 {{\n        return 0 - errno()\n    }}\n\
+                 \x20   let mode = (*((b + 4) as *u16)) as u32 & 0xF000\n\
+                 \x20   *out = if mode == 0x8000 {{ 1 }} else if mode == 0x4000 {{ 2 }} else {{ 3 }}\n\
+                 \x20   *(out + 1) = *((b + 96) as *u64)\n\
+                 \x20   let sec = *((b + 48) as *i64)\n\
+                 \x20   let nsec = *((b + 56) as *i64)\n\
+                 \x20   *(out + 2) = if sec < 0 {{ 0 }} else {{ (sec as u64) * 1000000000 + (nsec as u64) }}\n\
+                 \x20   0\n}}\n"
+            ));
+        }
+        _ => {}
+    }
     s
 }
 

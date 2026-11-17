@@ -269,32 +269,12 @@ pub unsafe fn path_rename(from: *u8, to: *u8) -> i32 {
 }
 
 /// What is at `path`: `out[0]` is 1 for a file, 2 for a directory and 3
-/// for anything else; `out[1]` is the size in bytes.
+/// for anything else; `out[1]` is the size in bytes; `out[2]` the time it
+/// was last modified, in nanoseconds since 1970.
 pub unsafe fn path_stat(path: *u8, out: *u64) -> i32 {
-    // `stat` has a different layout (and symbol) on each system, so ask
-    // `access`, `opendir` and `lseek` instead
-    if access(path, 0) < 0 {
-        return fail()
-    }
-    let d = opendir(path)
-    if d as usize != 0 {
-        closedir(d)
-        *out = 2
-        *(out + 1) = 0
-        return 0
-    }
-    let fd = open(path, target.O_RDONLY | target.O_NONBLOCK | target.O_CLOEXEC)
-    if fd < 0 {
-        // there, but not readable: report it as a file of unknown size
-        *out = 1
-        *(out + 1) = 0
-        return 0
-    }
-    let len = lseek(fd, 0, 2)
-    close(fd)
-    *out = if len < 0 { 3 } else { 1 }
-    *(out + 1) = if len < 0 { 0 } else { len as u64 }
-    0
+    // `stat` has a different layout (and symbol) on each system: the
+    // compiler generates the right one
+    target.file_stat(path, out)
 }
 
 pub unsafe fn dir_open(path: *u8) -> isize {
@@ -325,11 +305,11 @@ pub unsafe fn dir_close(h: isize) {
 // --------------------------------------------------------------- processes
 
 /// Start the program `argv[0]` (searched for in `PATH`) with the
-/// null-terminated `argv`. With `capture`, its output and error output go
+/// null-terminated `argv` and environment `envp`. With `capture`, its output and error output go
 /// to pipes whose read ends are stored in `pipes[0]` and `pipes[1]`; with
 /// `input`, its input comes from a pipe whose write end goes in `pipes[2]`.
 /// Returns a process handle, or `-errno` if it could not start.
-pub unsafe fn proc_spawn(argv: **u8, capture: bool, input: bool, pipes: *isize) -> isize {
+pub unsafe fn proc_spawn(argv: **u8, envp: **u8, capture: bool, input: bool, pipes: *isize) -> isize {
     let mut outp = [-1i32; 2]
     let mut errp = [-1i32; 2]
     let mut inp = [-1i32; 2]
@@ -367,7 +347,7 @@ pub unsafe fn proc_spawn(argv: **u8, capture: bool, input: bool, pipes: *isize) 
         posix_spawn_file_actions_adddup2(fa, errp[1], 2)
     }
     let mut pid: i32 = 0
-    let r = posix_spawnp(&mut pid as *i32, *argv, fa, 0 as *u8, argv, env_block())
+    let r = posix_spawnp(&mut pid as *i32, *argv, fa, 0 as *u8, argv, envp)
     posix_spawn_file_actions_destroy(fa)
     if input {
         close(inp[0])

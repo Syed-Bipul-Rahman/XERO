@@ -1346,6 +1346,40 @@ impl<'a> FnCx<'a> {
             E::Str(s) => Ok(x(K::Str(s.clone()), Ty::reference(Ty::Str, false), span)),
             E::Bool(b) => Ok(x(K::Bool(*b), Ty::Bool, span)),
             E::Unit => Ok(x(K::Unit, Ty::unit(), span)),
+            // `f().field` as a value: `{ let tmp = f(); tmp.field }`, so the
+            // field can be moved out and the rest is dropped right after
+            E::Field(base, name, targs)
+                if targs.is_empty()
+                    && matches!(base.kind, E::Call(..))
+                    && self.path(base)?.is_none() =>
+            {
+                let tmp = Ident {
+                    name: format!("tmp#field{}", span.lo),
+                    span,
+                };
+                let mk = |kind| ast::Expr { kind, span };
+                let field = E::Field(
+                    Box::new(mk(E::Name(tmp.clone(), Vec::new()))),
+                    name.clone(),
+                    Vec::new(),
+                );
+                let block = ast::Block {
+                    stmts: vec![
+                        ast::Stmt::Let {
+                            pat: ast::Pattern {
+                                kind: ast::PatKind::Bind(tmp.clone(), false),
+                                span,
+                            },
+                            ty: None,
+                            init: (**base).clone(),
+                            span,
+                        },
+                        ast::Stmt::Expr(mk(field), false),
+                    ],
+                    span,
+                };
+                self.expr(&mk(E::Block(block)), expected)
+            }
             E::Name(..)
             | E::SelfValue
             | E::SelfType(_)

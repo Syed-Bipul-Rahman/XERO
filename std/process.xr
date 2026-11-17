@@ -9,6 +9,7 @@
 
 module std.process
 
+import std.env
 import std.fs
 import std.fs.{Error}
 import std.sys
@@ -160,7 +161,14 @@ fn start(program: &str, args: &[&str], capture: bool, input: bool, pipes: *isize
         argv.push(s.as_slice() as *u8)
     }
     argv.push(0 as *u8)
-    let p = unsafe { sys.proc_spawn(argv.as_slice() as **u8, capture, input, pipes) }
+    // the environment, with any changes from `env.set_var`
+    let entries = env.entries()
+    let mut envp: Vec<*u8> = Vec.with_capacity(entries.len() + 1)
+    for e in &entries {
+        envp.push(e.as_slice() as *u8)
+    }
+    envp.push(0 as *u8)
+    let p = unsafe { sys.proc_spawn(argv.as_slice() as **u8, envp.as_slice() as **u8, capture, input, pipes) }
     if p < 0 {
         throw fs.error_from(0 - p as i32)
     }
