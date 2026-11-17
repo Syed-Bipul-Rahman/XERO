@@ -2,6 +2,7 @@
 //
 //   let out = try process.run("git", &["status", "--short"])
 //   if out.success() { print(out.stdout) }
+//   let sorted = try process.run_with_input("sort", &[], text.as_bytes())
 //
 // The program is looked up in `PATH` unless its name contains a path
 // separator. Arguments are passed as they are, with no shell in between.
@@ -32,8 +33,56 @@ impl Output {
 /// Run `program` with `args`, wait for it to finish, and collect its
 /// output. Its standard input is this program's.
 pub fn run(program: &str, args: &[&str]) -> Result<Output, Error> {
-    let mut pipes = [-1isize; 2]
-    let p = try start(program, args, true, &mut pipes as *isize)
+    collect(program, args, None)
+}
+
+/// Like `run`, but the program reads `input` as its standard input (and
+/// then end of input): `process.run_with_input("sort", &[], "b\na\n".as_bytes())`.
+/// If it exits without reading everything, the rest is dropped.
+pub fn run_with_input(program: &str, args: &[&str], input: &[u8]) -> Result<Output, Error> {
+    collect(program, args, Some(input))
+}
+
+/// What the input thread writes, and where.
+struct InputJob {
+    h: isize
+    data: *u8
+    len: usize
+}
+
+/// Feed the program its input, then close the pipe (end of input).
+fn write_input(p: *u8) -> *u8 {
+    unsafe {
+        let job = p as *InputJob
+        let mut done: usize = 0
+        while done < (*job).len {
+            let n = sys.pipe_write((*job).h, (*job).data + done, (*job).len - done)
+            if n <= 0 {
+                // the program stopped reading
+                break
+            }
+            done += n as usize
+        }
+        sys.pipe_close((*job).h)
+    }
+    0 as *u8
+}
+
+fn collect(program: &str, args: &[&str], input: Option<&[u8]>) -> Result<Output, Error> {
+    let mut pipes = [-1isize; 3]
+    let p = try start(program, args, true, input.is_some(), &mut pipes as *isize)
+    // the input is written by another thread while this one reads the
+    // output, so the program never waits on a full pipe either way
+    let mut job = InputJob { h: pipes[2], data: 0 as *u8, len: 0 }
+    let mut writer: Option<usize> = None
+    if input is Some(bytes) {
+        job.data = bytes as *u8
+        job.len = bytes.len()
+        unsafe {
+            sys.ignore_broken_pipes()
+            writer = Some(sys.thread_start(write_input, &mut job as *InputJob as *u8))
+        }
+    }
     let mut out: Vec<u8> = Vec.new()
     let mut err: Vec<u8> = Vec.new()
     let mut buf = [0u8; 4096]
@@ -56,14 +105,17 @@ pub fn run(program: &str, args: &[&str]) -> Result<Output, Error> {
         }
     }
     let status = unsafe { sys.proc_wait(p) }
+    if writer is Some(t) {
+        unsafe { sys.thread_join(t) }
+    }
     Ok(Output { status: status, stdout: lossy(out), stderr: lossy(err) })
 }
 
 /// Run `program` with `args`, sharing this program's input and output, and
 /// return its exit code once it finishes.
 pub fn status(program: &str, args: &[&str]) -> Result<i32, Error> {
-    let mut pipes = [-1isize; 2]
-    let p = try start(program, args, false, &mut pipes as *isize)
+    let mut pipes = [-1isize; 3]
+    let p = try start(program, args, false, false, &mut pipes as *isize)
     Ok(unsafe { sys.proc_wait(p) })
 }
 
@@ -96,7 +148,7 @@ fn lossy(bytes: Vec<u8>) -> String {
 }
 
 /// Start the program; returns its handle.
-fn start(program: &str, args: &[&str], capture: bool, pipes: *isize) -> Result<isize, Error> {
+fn start(program: &str, args: &[&str], capture: bool, input: bool, pipes: *isize) -> Result<isize, Error> {
     // NUL-terminated copies of the strings, and the null-terminated array of them
     let mut strings: Vec<Vec<u8>> = Vec.with_capacity(args.len() + 1)
     strings.push(try c_string(program))
@@ -108,7 +160,7 @@ fn start(program: &str, args: &[&str], capture: bool, pipes: *isize) -> Result<i
         argv.push(s.as_slice() as *u8)
     }
     argv.push(0 as *u8)
-    let p = unsafe { sys.proc_spawn(argv.as_slice() as **u8, capture, pipes) }
+    let p = unsafe { sys.proc_spawn(argv.as_slice() as **u8, capture, input, pipes) }
     if p < 0 {
         throw fs.error_from(0 - p as i32)
     }

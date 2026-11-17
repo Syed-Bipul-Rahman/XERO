@@ -44,6 +44,7 @@ unsafe fn CreateProcessA(app: *u8, cmd: *u8, pa: *u8, ta: *u8, inherit: i32, fla
 unsafe fn GetExitCodeProcess(h: usize, code: *u32) -> i32
 unsafe fn PeekNamedPipe(h: usize, buf: *u8, size: u32, read: *u32, avail: *u32, left: *u32) -> i32
 unsafe fn ReadFile(h: usize, buf: *u8, n: u32, read: *u32, overlapped: *u8) -> i32
+unsafe fn WriteFile(h: usize, buf: *u8, n: u32, written: *u32, overlapped: *u8) -> i32
 unsafe fn _getcwd(buf: *u8, size: i32) -> *u8
 unsafe fn _chdir(path: *u8) -> i32
 unsafe fn _mkdir(path: *u8) -> i32
@@ -417,9 +418,10 @@ unsafe fn inheritable(which: u32) -> usize {
 
 /// Start the program `argv[0]` (searched for in `PATH`) with the
 /// null-terminated `argv`. With `capture`, its output and error output go
-/// to pipes whose read ends are stored in `pipes[0]` and `pipes[1]`.
+/// to pipes whose read ends are stored in `pipes[0]` and `pipes[1]`; with
+/// `input`, its input comes from a pipe whose write end goes in `pipes[2]`.
 /// Returns a process handle, or `-errno` if it could not start.
-pub unsafe fn proc_spawn(argv: **u8, capture: bool, pipes: *isize) -> isize {
+pub unsafe fn proc_spawn(argv: **u8, capture: bool, input: bool, pipes: *isize) -> isize {
     let mut cmd: Vec<u8> = Vec.new()
     let mut i: usize = 0
     while *(argv + i) as usize != 0 {
@@ -437,15 +439,34 @@ pub unsafe fn proc_spawn(argv: **u8, capture: bool, pipes: *isize) -> isize {
     let mut out_w: usize = 0
     let mut err_r: usize = 0
     let mut err_w: usize = 0
-    let stdin = inheritable(0xFFFFFFF6)
+    let mut in_w: usize = 0
+    let mut stdin: usize = 0
+    if input {
+        if CreatePipe(&mut stdin as *usize, &mut in_w as *usize, sap, 0) == 0 {
+            return win_error() as isize
+        }
+        // the write end stays here
+        SetHandleInformation(in_w, 1, 0)
+    } else {
+        stdin = inheritable(0xFFFFFFF6)
+    }
     if capture {
         if CreatePipe(&mut out_r as *usize, &mut out_w as *usize, sap, 0) == 0 {
-            return win_error() as isize
+            let e = win_error()
+            if input {
+                CloseHandle(stdin)
+                CloseHandle(in_w)
+            }
+            return e as isize
         }
         if CreatePipe(&mut err_r as *usize, &mut err_w as *usize, sap, 0) == 0 {
             let e = win_error()
             CloseHandle(out_r)
             CloseHandle(out_w)
+            if input {
+                CloseHandle(stdin)
+                CloseHandle(in_w)
+            }
             return e as isize
         }
         // the read ends stay here
@@ -477,13 +498,33 @@ pub unsafe fn proc_spawn(argv: **u8, capture: bool, pipes: *isize) -> isize {
             CloseHandle(out_r)
             CloseHandle(err_r)
         }
+        if input {
+            CloseHandle(in_w)
+        }
         return e as isize
     }
     CloseHandle(pi[1])
     *pipes = if capture { out_r as isize } else { -1 }
     *(pipes + 1) = if capture { err_r as isize } else { -1 }
+    *(pipes + 2) = if input { in_w as isize } else { -1 }
     pi[0] as isize
 }
+
+/// Write to a pipe; returns the bytes written or `-errno` (`-EPIPE` once
+/// the reader has gone).
+pub unsafe fn pipe_write(h: isize, buf: *u8, n: usize) -> isize {
+    let mut put: u32 = 0
+    let chunk = if n > 0x40000000 { 0x40000000 } else { n }
+    if WriteFile(h as usize, buf, chunk as u32, &mut put as *u32, 0 as *u8) == 0 {
+        let e = GetLastError()
+        // ERROR_NO_DATA / ERROR_BROKEN_PIPE: the program closed its input
+        return if e == 232 || e == 109 { -32 } else { win_error() as isize }
+    }
+    put as isize
+}
+
+/// Nothing to do on Windows: a closed pipe is an error, never a signal.
+pub unsafe fn ignore_broken_pipes() {}
 
 /// Wait until pipe `a` or `b` (-1 for none) has data or has closed;
 /// returns bit 1 for `a` and bit 2 for `b`.

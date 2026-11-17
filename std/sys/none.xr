@@ -142,9 +142,15 @@ pub unsafe fn dir_next(h: isize, name: *u8) -> isize {
 
 pub unsafe fn dir_close(h: isize) {}
 
-pub unsafe fn proc_spawn(argv: **u8, capture: bool, pipes: *isize) -> isize {
+pub unsafe fn proc_spawn(argv: **u8, capture: bool, input: bool, pipes: *isize) -> isize {
     -38
 }
+
+pub unsafe fn pipe_write(h: isize, buf: *u8, n: usize) -> isize {
+    -38
+}
+
+pub unsafe fn ignore_broken_pipes() {}
 
 pub unsafe fn pipe_wait(a: isize, b: isize) -> i32 {
     3

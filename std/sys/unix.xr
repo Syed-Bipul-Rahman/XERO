@@ -53,6 +53,7 @@ unsafe fn posix_spawnp(pid: *i32, file: *u8, actions: *u8, attrs: *u8, argv: **u
 unsafe fn posix_spawn_file_actions_init(actions: *u8) -> i32
 unsafe fn posix_spawn_file_actions_adddup2(actions: *u8, fd: i32, to: i32) -> i32
 unsafe fn posix_spawn_file_actions_destroy(actions: *u8) -> i32
+unsafe fn signal(sig: i32, handler: usize) -> usize
 unsafe fn sched_yield() -> i32
 
 pub const THREADS: bool = true
@@ -325,15 +326,27 @@ pub unsafe fn dir_close(h: isize) {
 
 /// Start the program `argv[0]` (searched for in `PATH`) with the
 /// null-terminated `argv`. With `capture`, its output and error output go
-/// to pipes whose read ends are stored in `pipes[0]` and `pipes[1]`.
+/// to pipes whose read ends are stored in `pipes[0]` and `pipes[1]`; with
+/// `input`, its input comes from a pipe whose write end goes in `pipes[2]`.
 /// Returns a process handle, or `-errno` if it could not start.
-pub unsafe fn proc_spawn(argv: **u8, capture: bool, pipes: *isize) -> isize {
+pub unsafe fn proc_spawn(argv: **u8, capture: bool, input: bool, pipes: *isize) -> isize {
     let mut outp = [-1i32; 2]
     let mut errp = [-1i32; 2]
+    let mut inp = [-1i32; 2]
     // posix_spawn_file_actions_t: 80 bytes with glibc, a pointer on macOS
     let mut actions = [0u64; 32]
     let fa = &mut actions as *u64 as *u8
     posix_spawn_file_actions_init(fa)
+    if input {
+        if pipe(&mut inp as *i32) < 0 {
+            let e = fail()
+            posix_spawn_file_actions_destroy(fa)
+            return e as isize
+        }
+        fcntl(inp[0], 2, 1)
+        fcntl(inp[1], 2, 1)
+        posix_spawn_file_actions_adddup2(fa, inp[0], 0)
+    }
     if capture {
         if pipe(&mut outp as *i32) < 0 {
             let e = fail()
@@ -356,11 +369,17 @@ pub unsafe fn proc_spawn(argv: **u8, capture: bool, pipes: *isize) -> isize {
     let mut pid: i32 = 0
     let r = posix_spawnp(&mut pid as *i32, *argv, fa, 0 as *u8, argv, env_block())
     posix_spawn_file_actions_destroy(fa)
+    if input {
+        close(inp[0])
+    }
     if capture {
         close(outp[1])
         close(errp[1])
     }
     if r != 0 {
+        if input {
+            close(inp[1])
+        }
         if capture {
             close(outp[0])
             close(errp[0])
@@ -369,7 +388,28 @@ pub unsafe fn proc_spawn(argv: **u8, capture: bool, pipes: *isize) -> isize {
     }
     *pipes = outp[0] as isize
     *(pipes + 1) = errp[0] as isize
+    *(pipes + 2) = inp[1] as isize
     pid as isize
+}
+
+/// Write to a pipe; returns the bytes written or `-errno` (`-EPIPE` once
+/// the reader has gone).
+pub unsafe fn pipe_write(h: isize, buf: *u8, n: usize) -> isize {
+    loop {
+        let r = write(h as i32, buf, n)
+        if r >= 0 {
+            return r
+        }
+        if target.errno() != 4 {
+            return fail() as isize
+        }
+    }
+}
+
+/// Writing to a pipe nobody reads fails with an error instead of ending
+/// the program (SIGPIPE is ignored).
+pub unsafe fn ignore_broken_pipes() {
+    signal(13, 1)
 }
 
 /// Wait until pipe `a` or `b` (-1 for none) has data or has closed;

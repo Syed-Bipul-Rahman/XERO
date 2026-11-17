@@ -224,6 +224,7 @@ fn sys_target_module(target: &TargetInfo) -> String {
             ("EXECVE", 59, 221),
             ("WAIT4", 61, 260),
             ("PPOLL", 271, 73),
+            ("RT_SIGACTION", 13, 134),
         ];
         s.push('\n');
         for (n, a, b) in nrs {

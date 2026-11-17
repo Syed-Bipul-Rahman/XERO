@@ -777,28 +777,39 @@ unsafe fn exec_candidates(prog: *u8) -> Vec<Vec<u8>> {
 
 /// Start the program `argv[0]` (searched for in `PATH`) with the
 /// null-terminated `argv`. With `capture`, its output and error output go
-/// to pipes whose read ends are stored in `pipes[0]` and `pipes[1]`.
+/// to pipes whose read ends are stored in `pipes[0]` and `pipes[1]`; with
+/// `input`, its input comes from a pipe whose write end goes in `pipes[2]`.
 /// Returns a process handle, or `-errno` if it could not start.
-pub unsafe fn proc_spawn(argv: **u8, capture: bool, pipes: *isize) -> isize {
+pub unsafe fn proc_spawn(argv: **u8, capture: bool, input: bool, pipes: *isize) -> isize {
     // everything the child needs is made before it exists: it only makes system calls
     let cands = exec_candidates(*argv)
     let envp = env_block()
     let mut outp = [-1i32; 2]
     let mut errp = [-1i32; 2]
     let mut status = [-1i32; 2]
+    let mut inp = [-1i32; 2]
+    if input {
+        let r = syscall(target.SYS_PIPE2, &mut inp as *i32, target.O_CLOEXEC)
+        if r < 0 {
+            return r
+        }
+    }
     if capture {
         let r = syscall(target.SYS_PIPE2, &mut outp as *i32, target.O_CLOEXEC)
         if r < 0 {
+            close_pair(&inp)
             return r
         }
         let r = syscall(target.SYS_PIPE2, &mut errp as *i32, target.O_CLOEXEC)
         if r < 0 {
+            close_pair(&inp)
             close_pair(&outp)
             return r
         }
     }
     let r = syscall(target.SYS_PIPE2, &mut status as *i32, target.O_CLOEXEC)
     if r < 0 {
+        close_pair(&inp)
         close_pair(&outp)
         close_pair(&errp)
         return r
@@ -806,6 +817,9 @@ pub unsafe fn proc_spawn(argv: **u8, capture: bool, pipes: *isize) -> isize {
     // fork: a new process (SIGCHLD tells the parent when it ends)
     let pid = syscall(target.SYS_CLONE, 17, 0, 0, 0, 0)
     if pid == 0 {
+        if input {
+            syscall(target.SYS_DUP3, inp[0], 0, 0)
+        }
         if capture {
             syscall(target.SYS_DUP3, outp[1], 1, 0)
             syscall(target.SYS_DUP3, errp[1], 2, 0)
@@ -828,12 +842,18 @@ pub unsafe fn proc_spawn(argv: **u8, capture: bool, pipes: *isize) -> isize {
         syscall(target.SYS_EXIT_GROUP, 127)
     }
     syscall(target.SYS_CLOSE, status[1])
+    if input {
+        syscall(target.SYS_CLOSE, inp[0])
+    }
     if capture {
         syscall(target.SYS_CLOSE, outp[1])
         syscall(target.SYS_CLOSE, errp[1])
     }
     if pid < 0 {
         syscall(target.SYS_CLOSE, status[0])
+        if input {
+            syscall(target.SYS_CLOSE, inp[1])
+        }
         if capture {
             syscall(target.SYS_CLOSE, outp[0])
             syscall(target.SYS_CLOSE, errp[0])
@@ -846,6 +866,9 @@ pub unsafe fn proc_spawn(argv: **u8, capture: bool, pipes: *isize) -> isize {
     syscall(target.SYS_CLOSE, status[0])
     if n == 4 {
         proc_wait(pid)
+        if input {
+            syscall(target.SYS_CLOSE, inp[1])
+        }
         if capture {
             syscall(target.SYS_CLOSE, outp[0])
             syscall(target.SYS_CLOSE, errp[0])
@@ -854,7 +877,27 @@ pub unsafe fn proc_spawn(argv: **u8, capture: bool, pipes: *isize) -> isize {
     }
     *pipes = outp[0] as isize
     *(pipes + 1) = errp[0] as isize
+    *(pipes + 2) = inp[1] as isize
     pid
+}
+
+/// Write to a pipe; returns the bytes written or `-errno` (`-EPIPE` once
+/// the reader has gone).
+pub unsafe fn pipe_write(h: isize, buf: *u8, n: usize) -> isize {
+    loop {
+        let r = syscall(target.SYS_WRITE, h, buf, n)
+        if r != -4 {
+            return r
+        }
+    }
+}
+
+/// Writing to a pipe nobody reads fails with an error instead of ending
+/// the program (SIGPIPE is ignored).
+pub unsafe fn ignore_broken_pipes() {
+    // struct sigaction { handler = SIG_IGN, flags, (restorer), mask }
+    let act = [1u64, 0, 0, 0]
+    syscall(target.SYS_RT_SIGACTION, 13, &act as *u64, 0, 8)
 }
 
 unsafe fn close_pair(p: &[i32; 2]) {

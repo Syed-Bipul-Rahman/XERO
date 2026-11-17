@@ -2,6 +2,7 @@
 // test: native-only (it runs itself, which qemu cannot do)
 
 import std.env
+import std.io
 import std.os
 import std.process
 
@@ -12,6 +13,28 @@ fn main() {
             println("to stdout")
             eprintln("to stderr")
             process.exit(3)
+        }
+        if mode == "upper" {
+            // copy input to output upper-cased; count the bytes on stderr
+            let mut buf = [0u8; 4096]
+            let mut total: usize = 0
+            loop {
+                let n = io.read_into(0, &mut buf) catch { break }
+                if n == 0 {
+                    break
+                }
+                total += n
+                print(unsafe { str_from_raw(&buf as *u8, n) }.to_upper())
+            }
+            eprintln("{} bytes", total)
+            process.exit(0)
+        }
+        if mode == "early" {
+            // read a little, then stop
+            let mut buf = [0u8; 10]
+            let _ = io.read_into(0, &mut buf)
+            println("stopped early")
+            process.exit(0)
         }
         if mode == "args" {
             let mut i: usize = 2
@@ -53,6 +76,20 @@ fn main() {
         println(7)
     }
 
+    // input piped in, while the output is read
+    let up = process.run_with_input(me, &["upper"], "piped\ninput\n".as_bytes()).unwrap()
+    print(up.stdout.as_str().replace("\r\n", "\n"))
+    print(up.stderr.as_str().replace("\r\n", "\n"))
+    let mut lots = String.new()
+    for i in 0..50000 {
+        lots.push_str("line of input\n")
+    }
+    let bigup = process.run_with_input(me, &["upper"], lots.as_bytes()).unwrap()
+    println(bigup.stdout.as_str().lines().count())
+    // a program that stops reading does not stop this one
+    let early = process.run_with_input(me, &["early"], lots.as_bytes()).unwrap()
+    print(early.stdout.as_str().replace("\r\n", "\n"))
+
     match process.run("xero-no-such-program", &[]) {
         Ok(_) => println("??")
         Err(e) => println(e)
@@ -82,6 +119,11 @@ fn main() {
 // to stdout
 // 3
 // 7
+// PIPED
+// INPUT
+// 12 bytes
+// 50000
+// stopped early
 // no such file or directory
 // true
 // true
