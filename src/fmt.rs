@@ -16,7 +16,11 @@ use crate::lexer::{self, punct_str, Kw, Tok, Token};
 /// result would not mean the same.
 pub fn format_source(src: &str) -> Result<String, String> {
     let toks = lexer::lex(0, src).map_err(|d| d.message)?;
-    let out = layout(src, &toks);
+    let mut out = layout(src, &toks);
+    // a file with Windows line endings keeps them
+    if src.contains("\r\n") {
+        out = out.replace('\n', "\r\n");
+    }
     // the safety net: same tokens, same line breaks
     let again =
         lexer::lex(0, &out).map_err(|d| format!("formatting broke the file: {}", d.message))?;
