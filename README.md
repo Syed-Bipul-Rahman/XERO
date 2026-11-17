@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/xero-logo-dark.png">
+    <img src="docs/assets/xero-logo.png" alt="Xero" width="220">
+  </picture>
+</p>
+
 # Xero
 
 **Xero** is a minimal, native, zero-runtime-cost systems programming language.

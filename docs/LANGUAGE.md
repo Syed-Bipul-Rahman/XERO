@@ -1,3 +1,5 @@
+<img src="assets/xero-mark.png" alt="Xero" width="64" align="right">
+
 # The Xero Language Reference (v0.7)
 
 This document describes the language as implemented by `xeroc` 0.7. Features
