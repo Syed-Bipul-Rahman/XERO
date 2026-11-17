@@ -81,6 +81,8 @@ pub unsafe fn cond_wait(c: *u8, m: *u8) {
     panic("waiting would block forever: there is only one thread on this target")
 }
 
+pub unsafe fn cond_wait_ns(c: *u8, m: *u8, ns: u64) {}
+
 pub unsafe fn cond_notify_one(c: *u8) {}
 
 pub unsafe fn cond_notify_all(c: *u8) {}

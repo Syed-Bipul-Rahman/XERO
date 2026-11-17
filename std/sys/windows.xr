@@ -104,6 +104,12 @@ pub unsafe fn cond_wait(c: *u8, m: *u8) {
     SleepConditionVariableSRW(c, m, INFINITE, 0)
 }
 
+/// `cond_wait`, giving up after `ns` nanoseconds.
+pub unsafe fn cond_wait_ns(c: *u8, m: *u8, ns: u64) {
+    let ms = (ns + 999999) / 1000000
+    SleepConditionVariableSRW(c, m, if ms >= 0xFFFFFFFE { 0xFFFFFFFE } else { ms as u32 }, 0)
+}
+
 pub unsafe fn cond_notify_one(c: *u8) {
     WakeConditionVariable(c)
 }

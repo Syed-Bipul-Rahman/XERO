@@ -1,0 +1,31 @@
+// A thousand sleeping tasks share one timer thread.
+
+import std.task
+import std.time
+import std.time.{Duration, Instant}
+
+async fn nap(ms: u64) -> u64 {
+    time.sleep_async(Duration.from_millis(ms)).await
+    ms
+}
+
+fn main() {
+    // a thousand sleeping tasks share one timer thread
+    let t = Instant.now()
+    let mut ex = task.Executor.new()
+    for i in 0..1000 {
+        ex.start(nap(10 + (i % 50)))
+    }
+    ex.run()
+    let e = t.elapsed()
+    println(e >= Duration.from_millis(59))
+    println(e < Duration.from_secs(5))
+    // a sleep dropped before its time is simply removed
+    let s = time.sleep_async(Duration.from_secs(100))
+    println(task.block_on(nap(1)))
+}
+
+// output:
+// true
+// true
+// 1

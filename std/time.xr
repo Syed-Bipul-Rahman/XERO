@@ -6,6 +6,7 @@
 
 module std.time
 
+import std.mem
 import std.sys
 
 /// A span of time, to the nanosecond.
@@ -251,32 +252,84 @@ pub fn since_epoch() -> Duration {
 }
 
 /// A future that is ready after `d`: `sleep_async(Duration.from_millis(10)).await`.
-/// Other tasks run meanwhile; a helper thread wakes the task when the time is up.
+/// Other tasks run meanwhile. One timer thread, started on first use, wakes
+/// every sleeping task at its deadline.
 pub fn sleep_async(d: Duration) -> Sleep {
-    Sleep { deadline: Instant.now() + d, timer: 0, started: false }
+    Sleep { deadline: Instant.now() + d, id: 0 }
 }
 
 pub struct Sleep {
     deadline: Instant
-    /// The timer thread, once started.
-    timer: usize
-    started: bool
+    /// Its entry in the timer list (0: none).
+    id: u64
 }
 
-/// What the timer thread gets: when to wake, and whom.
-struct Timer {
-    deadline: Instant
+/// A task to wake at `deadline`.
+copy struct TimerEntry {
+    deadline: u64
     waker: Waker
+    id: u64
 }
 
-fn timer_main(p: *u8) -> *u8 {
+/// The timers of every `Sleep` not yet ready, shared with the timer thread.
+struct Timers {
+    lock: *u8
+    cond: *u8
+    entries: Vec<TimerEntry>
+    next_id: u64
+}
+
+static mut TIMERS: usize = 0
+static mut TIMERS_INIT: u32 = 0
+
+/// The timer list, made (with its thread) on first use.
+unsafe fn timers() -> *Timers {
+    // 0: not made, 1: being made, 2: ready
+    if atomic_load(&mut TIMERS_INIT as *u32) != 2 {
+        if atomic_cas(&mut TIMERS_INIT as *u32, 0, 1) == 0 {
+            let t = mem.alloc<Timers>(1)
+            ptr_write(t, Timers { lock: sys.lock_new(), cond: sys.cond_new(), entries: Vec.new(), next_id: 1 })
+            TIMERS = t as usize
+            sys.thread_start(timer_thread, t as *u8)
+            atomic_store(&mut TIMERS_INIT as *u32, 2)
+        } else {
+            while atomic_load(&mut TIMERS_INIT as *u32) != 2 {
+                sys.yield_now()
+            }
+        }
+    }
+    TIMERS as *Timers
+}
+
+/// Wakes each task when its deadline passes; sleeps until the next one
+/// (or until a new, earlier timer is added).
+fn timer_thread(p: *u8) -> *u8 {
     unsafe {
-        let t = p as *Timer
-        let now = Instant.now()
-        let wait = (*t).deadline.duration_since(now)
-        sleep(wait)
-        (*t).waker.wake()
-        sys.heap_free(p)
+        let t = p as *Timers
+        sys.lock_acquire((*t).lock)
+        loop {
+            let now = sys.clock_monotonic()
+            let mut next: u64 = 0
+            let mut i: usize = 0
+            while i < (*t).entries.len() {
+                let e = (*t).entries[i]
+                if e.deadline <= now {
+                    (*t).entries.swap_remove(i)
+                    // still under the lock, so the Sleep cannot go away meanwhile
+                    e.waker.wake()
+                } else {
+                    if next == 0 || e.deadline < next {
+                        next = e.deadline
+                    }
+                    i += 1
+                }
+            }
+            if next == 0 {
+                sys.cond_wait((*t).cond, (*t).lock)
+            } else {
+                sys.cond_wait_ns((*t).cond, (*t).lock, next - now)
+            }
+        }
     }
     0 as *u8
 }
@@ -285,33 +338,57 @@ impl Future for Sleep {
     type Output = ()
     unsafe fn poll(&mut self, cx: &mut Context) -> Poll<()> {
         if Instant.now() >= self.deadline {
-            self.join_timer()
+            self.cancel()
             return Poll.Ready(())
         }
-        if !self.started {
-            if !sys.THREADS {
-                // nothing can wake us: wait here
-                sleep(self.deadline.duration_since(Instant.now()))
-                return Poll.Ready(())
-            }
-            let t = sys.heap_alloc(32) as *Timer
-            *t = Timer { deadline: self.deadline, waker: cx.waker() }
-            self.timer = sys.thread_start(timer_main, t as *u8)
-            self.started = true
+        if !sys.THREADS {
+            // nothing can wake us: wait here
+            sleep(self.deadline.duration_since(Instant.now()))
+            return Poll.Ready(())
         }
+        let t = timers()
+        sys.lock_acquire((*t).lock)
+        if self.id == 0 {
+            self.id = (*t).next_id
+            (*t).next_id += 1
+            (*t).entries.push(TimerEntry { deadline: self.deadline.nanos, waker: cx.waker(), id: self.id })
+            sys.cond_notify_one((*t).cond)
+        } else {
+            // polled again: the waker may have changed
+            for e in (*t).entries.iter_mut() {
+                if e.id == self.id {
+                    e.waker = cx.waker()
+                }
+            }
+        }
+        sys.lock_release((*t).lock)
         Poll.Pending
     }
 }
 
 impl Sleep {
-    fn join_timer(&mut self) {
-        if self.started {
-            unsafe { sys.thread_join(self.timer) }
-            self.started = false
+    /// Take this sleep's entry out of the timer list.
+    fn cancel(&mut self) {
+        if self.id == 0 {
+            return
         }
+        unsafe {
+            let t = timers()
+            sys.lock_acquire((*t).lock)
+            let mut i: usize = 0
+            while i < (*t).entries.len() {
+                if (*t).entries[i].id == self.id {
+                    (*t).entries.swap_remove(i)
+                    break
+                }
+                i += 1
+            }
+            sys.lock_release((*t).lock)
+        }
+        self.id = 0
     }
 
     drop {
-        self.join_timer()
+        self.cancel()
     }
 }

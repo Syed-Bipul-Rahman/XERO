@@ -259,6 +259,22 @@ impl<T> Vec<T> {
         }
     }
 
+    /// Remove element `index` in O(1) by moving the last element into its
+    /// place (the order changes); panics when out of range.
+    pub fn swap_remove(&mut self, index: usize) -> T {
+        if index >= self.len {
+            panic("Vec index out of bounds")
+        }
+        self.len -= 1
+        unsafe {
+            let v = ptr_read(self.ptr + index)
+            if index != self.len {
+                ptr_write(self.ptr + index, ptr_read(self.ptr + self.len))
+            }
+            v
+        }
+    }
+
     /// Sort in place by `cmp` (heap sort: O(n log n), no allocation, not stable).
     pub fn sort_by<F: Fn(&T, &T) -> Ordering>(&mut self, cmp: F) {
         let n = self.len

@@ -30,6 +30,7 @@ unsafe fn pthread_mutex_unlock(m: *u8) -> i32
 unsafe fn pthread_mutex_destroy(m: *u8) -> i32
 unsafe fn pthread_cond_init(c: *u8, attr: *u8) -> i32
 unsafe fn pthread_cond_wait(c: *u8, m: *u8) -> i32
+unsafe fn pthread_cond_timedwait(c: *u8, m: *u8, abstime: *i64) -> i32
 unsafe fn pthread_cond_signal(c: *u8) -> i32
 unsafe fn pthread_cond_broadcast(c: *u8) -> i32
 unsafe fn pthread_cond_destroy(c: *u8) -> i32
@@ -110,6 +111,17 @@ pub unsafe fn cond_new() -> *u8 {
 /// Atomically release `m`, wait for a notification, and re-acquire `m`.
 pub unsafe fn cond_wait(c: *u8, m: *u8) {
     pthread_cond_wait(c, m)
+}
+
+/// `cond_wait`, giving up after `ns` nanoseconds.
+pub unsafe fn cond_wait_ns(c: *u8, m: *u8, ns: u64) {
+    // the deadline, on the clock condition variables use by default
+    let mut ts = [0i64; 2]
+    clock_gettime(0, &mut ts as *i64)
+    let total = ts[1] as u64 + ns % 1000000000
+    ts[0] = ts[0] + (ns / 1000000000) as i64 + (total / 1000000000) as i64
+    ts[1] = (total % 1000000000) as i64
+    pthread_cond_timedwait(c, m, &ts as *i64)
 }
 
 pub unsafe fn cond_notify_one(c: *u8) {

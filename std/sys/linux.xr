@@ -563,6 +563,20 @@ pub unsafe fn cond_wait(c: *u8, m: *u8) {
     raw_lock(m as *u32)
 }
 
+/// `cond_wait`, giving up after `ns` nanoseconds.
+pub unsafe fn cond_wait_ns(c: *u8, m: *u8, ns: u64) {
+    let seq = c as *u32
+    let waiters = seq + 1
+    atomic_add(waiters, 1)
+    let s = atomic_load(seq)
+    raw_unlock(m as *u32)
+    // FUTEX_WAIT's timeout is relative
+    let ts = [(ns / 1000000000) as i64, (ns % 1000000000) as i64]
+    syscall(target.SYS_FUTEX, seq, FUTEX_WAIT | FUTEX_PRIVATE, s, &ts as *i64)
+    atomic_sub(waiters, 1)
+    raw_lock(m as *u32)
+}
+
 pub unsafe fn cond_notify_one(c: *u8) {
     let seq = c as *u32
     atomic_add(seq, 1)
