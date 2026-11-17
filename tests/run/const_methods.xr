@@ -1,0 +1,16 @@
+// Methods called on module constants and statics.
+
+import std.os
+
+const WORDS: &str = "one two three"
+
+fn main() {
+    println(os.NAME.len() > 0)
+    println(os.ARCH.starts_with(os.ARCH))
+    println(WORDS.split_whitespace().count())
+}
+
+// output:
+// true
+// true
+// 3

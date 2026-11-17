@@ -1,8 +1,8 @@
 <img src="assets/xero-mark.png" alt="Xero" width="64" align="right">
 
-# The Xero Language Reference (v0.7)
+# The Xero Language Reference (v0.8)
 
-This document describes the language as implemented by `xeroc` 0.7. Features
+This document describes the language as implemented by `xeroc` 0.8. Features
 that are reserved but not implemented yet are marked **(reserved)**.
 
 ## 1. Lexical structure
@@ -618,14 +618,14 @@ pointers and `usize`. Pointer arithmetic: `p + n` and `p - n` advance by whole e
 | prelude | `Option` and `Result` (with `map`, `and_then`, `unwrap_or`, `unwrap_or_else`, `ok_or`, `map_err`, `as_ref`, `take`, ...), `Print`, `print`/`println`/`eprint`/`eprintln`, `format`, `Display`, `panic`, `assert`, `assert_eq`, `assert_ne`, `Copy`, `Clone`, operator traits (`Eq`, `Ord`, `Add`, `Sub`, `Mul`, `Div`, `Rem`, `Neg`, `AddAssign`..., `Index`, `IndexMut`, `Deref`, `DerefMut`), `Ordering`, `compare`, `Hash`, `Hasher`, `Borrow`, `str` methods (below), `Iterator` (`next`; `map filter enumerate take skip zip chain`; `fold for_each count last any all find position min max sum collect`), `Range`, `RangeInclusive`, slice `iter`/`iter_mut`, `Future`, `Poll`, `Context`, `Waker` |
 | `str` | `len is_empty as_bytes byte_at find rfind contains starts_with ends_with trim trim_start trim_end split split_once split_whitespace lines bytes replace repeat to_upper to_lower to_string parse_int parse_float` |
 | `std.mem` | `Box<T>`, `alloc`, `realloc_array`, `dealloc`, `swap`, `replace`, `copy_values` |
-| `std.vec` | `Vec<T>`: `push pop get get_mut at at_mut set swap insert remove clear reserve as_slice as_mut_slice iter iter_mut into_iter`, `v[i]`, and with closures `map filter for_each any all count position sort_by sort` |
+| `std.vec` | `Vec<T>`: `push pop get get_mut at at_mut set swap insert remove swap_remove extend_from_slice clone clear reserve as_slice as_mut_slice iter iter_mut into_iter`, `v[i]`, and with closures `map filter for_each any all count position sort_by sort` |
 | `std.string` | `String`: `from new from_utf8 push_str push_byte push_int as_str as_bytes into_bytes len truncate equals clear`, `+` and `+=` with a `&str`, every `str` method, and `is_utf8` |
 | `std.collections` | `HashMap<K, V>` (`new with_capacity len is_empty insert get get_mut contains_key remove get_or_insert_with clear iter keys values`, `map[&key]`), `HashSet<T>` (`new len is_empty insert contains remove clear iter`), `TreeMap<K, V>` in key order (`new len is_empty insert get get_mut contains_key remove first last clear iter keys values`), `VecDeque<T>` (`new len is_empty push_back push_front pop_back pop_front front back get get_mut clear iter`, `d[i]`) |
 | `std.math` | `min max clamp abs isqrt sqrt pow_int gcd PI E` |
 | `std.io` | `read_into write_all exit_process STDIN STDOUT STDERR` (errors are `errno` values) |
-| `std.fs` | `File` (`open`, `create`, `append`, `read`, `read_all`, `read_to_string`, `write`, `write_str`; closed when destroyed), `read_to_string`, `read`, `write`, `remove`, `rename`, `create_dir`, `create_dir_all`, `remove_dir`, `remove_dir_all`, `read_dir`, `metadata` (`is_file`, `is_dir`, `len`), `exists`, `is_file`, `is_dir`, `parent`, `join`, `Error` (`code`, `message`, printable) |
-| `std.env` | `args`, `arg`, `arg_count`, `var`, `vars`, `current_dir`, `set_current_dir` |
-| `std.process` | `run` (collects `Output`: `status`, `stdout`, `stderr`, `success`), `status`, `exit` |
+| `std.fs` | `File` (`open`, `create`, `append`, `read`, `read_all`, `read_to_string`, `write`, `write_str`; closed when destroyed), `read_to_string`, `read`, `write`, `remove`, `rename`, `create_dir`, `create_dir_all`, `remove_dir`, `remove_dir_all`, `read_dir`, `metadata` (`is_file`, `is_dir`, `len`, `modified`), `exists`, `is_file`, `is_dir`, `parent`, `join`, `Error` (`code`, `message`, printable) |
+| `std.env` | `args`, `arg`, `arg_count`, `var`, `vars`, `set_var`, `remove_var`, `current_dir`, `set_current_dir` |
+| `std.process` | `run` (collects `Output`: `status`, `stdout`, `stderr`, `success`), `run_with_input`, `status`, `exit` |
 | `std.time` | `Duration` (`from_secs from_millis from_micros from_nanos from_secs_f64 as_secs as_millis as_micros as_nanos as_secs_f64`, arithmetic, printable), `Instant` (`now elapsed duration_since`), `sleep`, `since_epoch`, `sleep_async` |
 | `std.os` | `NAME` (`"linux"`, `"macos"`, `"windows"`, `"wasm"`, `"none"`), `ARCH`, `POINTER_BITS` |
 | `std.thread` | `start` (what `spawn` calls), `Thread<T, F>` with `join`, `sleep_ms`, `yield_now` |
@@ -725,7 +725,21 @@ let home = env.var("HOME").unwrap_or(String.from("/"))
 A program is looked up in `PATH` unless its name has a path separator, and
 its arguments are passed as they are, with no shell. `process.run` collects
 standard output and standard error while the program runs; `process.status`
-lets it use this program's input and output.
+lets it use this program's input and output. `process.run_with_input` also
+feeds it input, written while its output is read, so neither side waits on
+the other:
+
+```xero
+let sorted = try process.run_with_input("sort", &[], "pear\napple\n".as_bytes())
+print(sorted.stdout)                        // apple, pear
+```
+
+`env.set_var` and `env.remove_var` change the environment of this program
+and of the programs it starts. `fs.metadata(path).modified()` is when a file
+last changed, as a `Duration` since 1970 (like `time.since_epoch()`).
+
+`time.sleep_async` sleeps without blocking other tasks; one timer thread,
+started on first use, wakes every sleeping task at its deadline.
 
 ### The runtime
 
@@ -878,7 +892,7 @@ fn main() {
 * An `async fn` cannot call itself (its future would contain itself), and
   `.await` is not allowed in plain closures.
 
-## 13. Projects and tests
+## 13. Projects, tests, formatting and debugging
 
 A project is a directory with a `xero.toml`. `xeroc new hello` creates one
 (`--lib` for a library):
@@ -928,3 +942,42 @@ test greeting::test_hello ... ok
 
 1 passed, 0 failed
 ```
+
+### Formatting
+
+`xeroc fmt` formats files in place (in a project with no file names: `src/`
+and `tests/`); `xeroc fmt --check` only lists the files that would change,
+and fails if there are any. It keeps your line breaks and comments (a line
+break is part of Xero's syntax) and sets everything else: four spaces of
+indentation per open `{`, `(` or `[`, one more for a line that continues an
+expression, single spaces around operators and after commas and colons, none
+inside `(...)` and `[...]`, `{ a }` on one line, at most one blank line, and a
+final newline. Where spacing depends on meaning it leaves it as written:
+`<` and `>` (generics or comparisons), closure bars, and ranges. Formatting
+never changes what a program does: the output is checked to have exactly
+the same tokens.
+
+### Debugging
+
+`-g` adds debug information (DWARF; CodeView and a `.pdb` on Windows), best
+with `-O0` so that every variable is kept:
+
+```console
+$ xeroc build -g -O0 app.xr
+$ gdb ./app
+(gdb) break area
+(gdb) run
+Breakpoint 1, area (p=0x7fffffffc590, scale=2) at app.xr:7
+(gdb) next
+(gdb) print *p
+$1 = {x = 3, y = 4}
+(gdb) info locals
+w = 3
+```
+
+Functions are named as in the source (`area`, `len`); breakpoints, stepping
+by line, backtraces and printing values work in gdb and lldb. Numbers,
+`bool`, references and pointers, `&str` and slices (a pointer and a
+length), structs and tuples with their fields, arrays, and enums without
+data (by variant name) are shown as values; other enums and closures as
+their bytes.

@@ -2828,7 +2828,11 @@ impl<'a> FnCx<'a> {
     ) -> Result<X> {
         if let E::Field(base, name, targs) = &callee.kind {
             // a value, or a constant or unit variant (`i32.MAX.checked_add(1)`)
-            if matches!(self.path(base)?, None | Some(PathRes::Member(..))) {
+            if matches!(
+                self.path(base)?,
+                None | Some(PathRes::Member(..))
+                    | Some(PathRes::Def(Def::Const(_) | Def::Static(_), _, _))
+            ) {
                 return self.method_call(base, name, targs, args, expected, span);
             }
         }

@@ -1,0 +1,65 @@
+// What's new in Xero 0.8: piping input into programs, environment changes,
+// file times, shared async timers, and moving a field out of a result.
+// (`xeroc fmt` formats this file; build it with `-g` to step through it.)
+//
+//   xeroc run examples/whats_new_0_8.xr
+
+import std.env
+import std.fs
+import std.io
+import std.os
+import std.process
+import std.task
+import std.time
+import std.time.{Duration, Instant}
+
+async fn nap(ms: u64) -> u64 {
+    time.sleep_async(Duration.from_millis(ms)).await
+    ms
+}
+
+fn main() {
+    // as a child program: upper-case what comes in
+    if env.arg(1) is Some(mode) {
+        if mode == "shout" {
+            let mut buf = [0u8; 256]
+            let n = io.read_into(0, &mut buf) catch { 0 }
+            print(unsafe { str_from_raw(&buf as *u8, n) }.to_upper())
+            println(env.var("GREETING").unwrap_or(String.from("(no greeting)")))
+            process.exit(0)
+        }
+    }
+    let me = env.arg(0).unwrap()
+
+    // ---- input piped into another program, and the environment it gets
+    env.set_var("GREETING", "hello from the parent")
+    let out = process.run_with_input(me, &["shout"], "quiet words\n".as_bytes()).unwrap().stdout
+    print(out.as_str().replace("\r\n", "\n"))
+    env.remove_var("GREETING")
+    println(env.var("GREETING").is_none())
+
+    // ---- when a file last changed
+    fs.write("whats-new.tmp", "x".as_bytes()).unwrap()
+    let age = time.since_epoch().saturating_sub(fs.metadata("whats-new.tmp").unwrap().modified())
+    println("written {} seconds ago", age.as_secs())
+    fs.remove("whats-new.tmp").unwrap()
+
+    // ---- many sleeping tasks, one timer thread
+    let start = Instant.now()
+    let mut ex = task.Executor.new()
+    for i in 0..100 {
+        ex.start(nap(20 + i % 10))
+    }
+    ex.run()
+    println("100 naps took under a second: {}", start.elapsed() < Duration.from_secs(1))
+
+    // ---- O(1) removal when order does not matter
+    let mut v = vec_of(&[10, 20, 30, 40])
+    v.swap_remove(0)
+    println("{} {}", v.len(), v[0])
+    println(os.NAME.len() > 0)
+}
+
+fn vec_of(xs: &[i32]) -> Vec<i32> {
+    xs.to_vec()
+}

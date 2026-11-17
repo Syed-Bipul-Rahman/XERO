@@ -171,6 +171,7 @@ test greeting::test_hello ... ok
 ```
 xeroc new <name> [--lib]            create a project (xero.toml, src/, tests/)
 xeroc build | run | check | test    in a project: no file name needed
+xeroc fmt [files...] [--check]      format source (in a project: src/ and tests/)
 xeroc build <file.xr> [options]     compile one file to a native executable
 xeroc run <file.xr> [-- args...]    compile and run
 xeroc check <file.xr>               type- and borrow-check only
@@ -179,6 +180,7 @@ xeroc targets                       list supported targets
   -o <path>          output path
   --emit <kind>      exe | obj | asm | llvm | llvm-raw | xir
   -O0..-O3           optimization level (default -O2)
+  -g                 debug information for gdb and lldb (best with -O0)
   --overflow-checks  panic on integer overflow (the default below -O2)
   --target <name>    cross-compile, e.g. aarch64-linux, riscv64-linux, wasm32, thumbv7em-none
   --lib              no `main` required (library object / wasm module)
@@ -221,7 +223,7 @@ on `static mut`, non-exhaustive matches and more.
 
 ## Status
 
-Xero 0.7 is a working compiler. Language features:
+Xero 0.8 is a working compiler. Language features:
 
 * **Types:** structs and enums (which can hold references), enums with data,
   closures (`Fn`, `FnMut`, `FnOnce`), and function pointers.
@@ -240,8 +242,9 @@ Compiler and runtime support:
 
 * **Safety:** RAII and a borrow checker that needs no lifetime annotations;
   overflow checks in debug builds.
-* **Projects:** `xeroc new`, a `xero.toml` manifest with path and git
-  dependencies, and `xeroc test`.
+* **Tooling:** projects (`xeroc new`, a `xero.toml` manifest with path and
+  git dependencies), `xeroc test`, a formatter (`xeroc fmt`), and debug
+  information for gdb and lldb (`-g`).
 * **Standard library:** modules, `Box`, `Vec`, `String`, format strings
   checked at compile time, `HashMap`, `HashSet`, `TreeMap` and `VecDeque`, files and directories
   (`std.fs`), arguments and environment variables (`std.env`), running

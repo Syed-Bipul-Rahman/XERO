@@ -1,3 +1,16 @@
+## 0.8.0
+
+* Adds `xeroc fmt`, a formatter: it keeps line breaks and comments and sets indentation, spacing and blank lines; `--check` reports unformatted files. Formatting is checked never to change a program's tokens. The repository's own code is formatted with it.
+* Adds debug information with `-g`: gdb and lldb can break on functions, step by source line, show backtraces, and print arguments and locals with their types (structs by field, arrays, `&str`, enums by name). CodeView and a `.pdb` on Windows; a `.dSYM` on macOS.
+* Adds `process.run_with_input`, which pipes input into a program while collecting its output; a program that stops reading early is fine.
+* Adds `env.set_var` and `env.remove_var`, seen by `env.var` and by the programs `std.process` starts.
+* Adds `Metadata.modified()`: when a file last changed.
+* Changes `time.sleep_async` to share one timer thread among all sleeping tasks instead of starting a thread per sleep.
+* Adds moving a field out of a function's result: `run(...).unwrap().stdout`; the rest of the result is dropped at once.
+* Adds `Vec.swap_remove`.
+* Fixes calling a method on a module constant: `os.NAME.len()`.
+* Changes the libc OS layer (macOS, and Linux with `--libc`) to use `stat` (`statx` on Linux), which also gives sizes of files that cannot be opened.
+
 ## 0.7.0
 
 * Adds projects: `xeroc new <name>` (or `--lib`) creates a directory with a `xero.toml` manifest, `src/` and `tests/`; inside it `xeroc build`, `run`, `check` and `test` need no file name, and `build` writes `build/<name>`.

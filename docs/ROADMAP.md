@@ -67,18 +67,23 @@
 - [x] Projects: `xeroc new`, `xero.toml` with path and git dependencies, `xeroc test`
 - [x] `TreeMap` and `VecDeque`
 
+## Done in v0.8
+
+- [x] `xeroc fmt` and debug information (`-g`)
+- [x] Piping input to a process, setting environment variables, file modification times
+- [x] One timer thread for every `sleep_async`
+
 ## Next
 
 ### Concurrency
-- Async closures; async I/O in `std.task`, and timers without a thread each.
+- Async closures; async I/O in `std.task`.
 - Thread-safety marker traits (the role of Rust's `Send` and `Sync`) for
   user types with interior mutability built on `unsafe`.
 - Thread pools and parallel iterators in the standard library.
 
 ### Standard library
-- Piping input to a process; setting environment variables; file
-  modification times; iterating a directory lazily; range queries on
-  `TreeMap`.
+- Iterating a directory lazily; range queries on `TreeMap`; networking
+  (TCP and UDP sockets).
 
 ### Self-contained programs
 - No C runtime on Windows: call `kernel32` directly.
@@ -98,6 +103,7 @@
 
 ### Tooling
 - A package registry, lock files, and workspaces with several packages.
-- Formatter and language server.
-- Debug info (DWARF) and source maps.
+- A language server for editors.
+- Lexical scopes in debug information (variables shadowed in inner blocks),
+  and debugger views of enums with data.
 - Incremental compilation; a self-hosted compiler written in Xero.
